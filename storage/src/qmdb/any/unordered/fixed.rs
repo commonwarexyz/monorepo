@@ -32,7 +32,7 @@ pub mod partitioned {
         index::partitioned::unordered::Index, journal::contiguous::fixed::Journal, merkle::Location,
     };
 
-    /// A key-value QMDB with a partitioned snapshot index.
+    /// A key-value QMDB with a partitioned key index.
     ///
     /// This is the partitioned variant of [super::Db]. The const generic `P` specifies
     /// the number of prefix bytes used for partitioning:
@@ -88,7 +88,7 @@ pub(crate) mod test {
                 unordered::{Update, fixed::Operation},
             },
             floor::{Bounded, Proportional},
-            snapshot::Rebuild,
+            index_build::Rebuild,
         },
         translator::{OneCap, TwoCap},
     };
@@ -475,7 +475,7 @@ pub(crate) mod test {
     /// A merkleize future dropped mid-flight leaves the database fully usable.
     ///
     /// With a parallel strategy, merkleize's hashing job may keep running detached against its
-    /// snapshot of committed Merkle state after the future is dropped. Later mutations must not
+    /// view of committed Merkle state after the future is dropped. Later mutations must not
     /// observe it (they copy-on-write instead), and its discarded result must not corrupt
     /// anything.
     ///
@@ -499,7 +499,7 @@ pub(crate) mod test {
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", strategy);
             let db = ParTest::init(context.child("db"), cfg, None).await.unwrap();
 
-            // Populate and commit so later snapshots carry committed nodes.
+            // Populate and commit so later views carry committed nodes.
             let mut rng = TestRng::new(11);
             let mut keys = Vec::with_capacity(1024);
             let mut batch = db.new_batch();
@@ -650,7 +650,7 @@ pub(crate) mod test {
         Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
-    /// Reopening a database rebuilds its snapshot from the log, which must reproduce the root and
+    /// Reopening a database rebuilds its index from the log, which must reproduce the root and
     /// the key-value state.
     #[test_traced("WARN")]
     fn test_unordered_fixed_init_rebuilds_state() {
@@ -663,7 +663,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Track the expected key-value state alongside the applied ops. The `any` root is a
-            // pure function of the immutable log, so only a state check can catch a snapshot
+            // pure function of the immutable log, so only a state check can catch an index
             // rebuilt into the wrong index.
             let ops = create_test_ops(10_000);
             let mut expected = HashMap::new();
@@ -879,7 +879,7 @@ pub(crate) mod test {
             drop(db);
 
             // Reopen the op log directly (init's reads run before faults are enabled) and build
-            // against a fresh index, mirroring init's parallel snapshot build.
+            // against a fresh index, mirroring init's parallel index build.
             let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail");
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
@@ -898,7 +898,7 @@ pub(crate) mod test {
             // Failing that read fails every task replaying the log.
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let result = index
-                .build_snapshot(
+                .build_index(
                     context.child("build"),
                     floor,
                     &log,
@@ -962,7 +962,7 @@ pub(crate) mod test {
                 mode: deterministic::PartialWriteMode::Prefix,
             });
             let result = index
-                .build_snapshot(
+                .build_index(
                     context.child("build"),
                     floor,
                     &log,
@@ -1008,7 +1008,7 @@ pub(crate) mod test {
                         OneCap,
                     );
                 let result = index
-                    .build_snapshot(
+                    .build_index(
                         context
                             .child("build")
                             .with_attribute("concurrency", concurrency),
@@ -1095,7 +1095,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = create_test_db(ctx.child("db")).await;
 
-            // Seed 2000 keys and commit so they live in the committed snapshot.
+            // Seed 2000 keys and commit so they live in the committed index.
             let mut seed = db.new_batch();
             for i in 0..2000u64 {
                 seed = seed.write(key(i), Some(val(i)));
@@ -1429,7 +1429,7 @@ pub(crate) mod test {
             .unwrap();
         let expected_root = c.root();
 
-        // Applying C directly also applies B. The snapshot location must be rebased from
+        // Applying C directly also applies B. The index location must be rebased from
         // the original DB location to A's now-committed update.
         let db = db.apply_batch(c).await.unwrap();
         assert_eq!(db.root(), expected_root);
@@ -1460,7 +1460,7 @@ pub(crate) mod test {
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
-        let iter = db.snapshot.get(&k);
+        let iter = db.index.get(&k);
         assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
 

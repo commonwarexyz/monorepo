@@ -296,7 +296,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             .expect("init current ordered db");
 
         // Seed committed base state so recursive batching sees translated-key collisions
-        // against the committed snapshot.
+        // against the committed index.
         let mut model = BTreeMap::new();
         let mut batch = db.new_batch();
         for write in &input.initial {
@@ -315,7 +315,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         match input.schedule {
             Schedule::PendingParent => {
                 // Build the child while the parent is still pending, so the child resolves
-                // through the parent's diff plus the committed snapshot. A parent-deleted key
+                // through the parent's diff plus the committed index. A parent-deleted key
                 // with a colliding committed sibling is the advisory's trigger.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);

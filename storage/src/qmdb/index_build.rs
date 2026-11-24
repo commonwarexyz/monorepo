@@ -1,4 +1,4 @@
-//! Rebuild snapshot indexes and activity bitmaps from the operations log.
+//! Rebuild key indexes and activity bitmaps from the operations log.
 //!
 //! A build has two phases. It first replays the log, writing a small record for every keyed
 //! operation into the bucket that owns the key's partition. It then sorts each bucket by key and
@@ -1213,37 +1213,39 @@ where
     let mut running = Tasks(FuturesUnordered::new());
     let mut waiting = BTreeMap::new();
     let (mut started, mut passed) = (0, 0);
-    let routed = async {
-        loop {
-            while running.0.len() < decoders && started - passed < window {
-                let Some((index, chunk)) = chunks.next() else {
-                    break;
-                };
-                let mut visitor = scan.visitor(chunk.clone());
-                let (log, buckets) = (log.clone(), buckets.clone());
-                let decoder = context.child("snapshot_decoder").dedicated().spawn(
-                    move |context| async move {
-                        route(&context, &*log, chunk, init_buffer, &buckets, &mut visitor).await?;
-                        Ok::<_, Error<F>>((index, visitor.finish()?))
-                    },
-                );
-                running.0.push(decoder);
-                started += 1;
-            }
-            let Some(output) = running.0.next().await else {
-                return Ok(true);
-            };
-            let (index, output) = output??;
-            waiting.insert(index, output);
-            while let Some(output) = waiting.remove(&passed) {
-                if !scan.send(output).await {
-                    return Ok(false);
+    let routed =
+        async {
+            loop {
+                while running.0.len() < decoders && started - passed < window {
+                    let Some((index, chunk)) = chunks.next() else {
+                        break;
+                    };
+                    let mut visitor = scan.visitor(chunk.clone());
+                    let (log, buckets) = (log.clone(), buckets.clone());
+                    let decoder = context.child("index_decoder").dedicated().spawn(
+                        move |context| async move {
+                            route(&context, &*log, chunk, init_buffer, &buckets, &mut visitor)
+                                .await?;
+                            Ok::<_, Error<F>>((index, visitor.finish()?))
+                        },
+                    );
+                    running.0.push(decoder);
+                    started += 1;
                 }
-                passed += 1;
+                let Some(output) = running.0.next().await else {
+                    return Ok(true);
+                };
+                let (index, output) = output??;
+                waiting.insert(index, output);
+                while let Some(output) = waiting.remove(&passed) {
+                    if !scan.send(output).await {
+                        return Ok(false);
+                    }
+                    passed += 1;
+                }
             }
         }
-    }
-    .await;
+        .await;
 
     // Decoders are still running if one failed or the scan stopped the build. Abort them, and
     // wait for each to end so that none outlives the build.
@@ -1341,7 +1343,7 @@ async fn close_scratch<B, R>(
     Ok(())
 }
 
-/// Build `snapshot` from `log` in two phases, each on up to `init_concurrency` tasks.
+/// Build `index` from `log` in two phases, each on up to `init_concurrency` tasks.
 ///
 /// First, tasks replay the log in chunks and append the record of every keyed operation to the
 /// bucket that owns its key's partition. Then tasks sort each bucket by key and location, let
@@ -1352,13 +1354,13 @@ async fn close_scratch<B, R>(
 ///
 /// Once a build holds more than [MEMORY_BYTES] of records, a bucket that has collected
 /// [SPILL_BYTES] of them writes them to a blob of the `scratch` partition. Returns the number
-/// of active keys and the activity bitmap (see [Rebuild::build_snapshot]).
+/// of active keys and the activity bitmap (see [Rebuild::build_index]).
 ///
 /// `scan` chooses the chunks of the first phase and sees each one's operations (see [Scan]). If
 /// it stops the build, nothing is sorted and the result is unspecified.
 #[allow(clippy::too_many_arguments)]
 async fn build<F, E, C, I, S>(
-    snapshot: &mut I,
+    index: &mut I,
     context: E,
     inactivity_floor_loc: Location<F>,
     log: &Arc<C>,
@@ -1391,7 +1393,7 @@ where
 
     // Split the partitions into buckets of whole partitions, enough of them to bound each
     // bucket's records and to occupy every task when there are records to go around.
-    let partitions = snapshot.partition_count();
+    let partitions = index.partition_count();
     let bucket_bytes = (bytes / tasks as u64).clamp(MIN_BUCKET_BYTES, BUCKET_BYTES);
     let buckets = usize::try_from(bytes.div_ceil(bucket_bytes))
         .unwrap_or(usize::MAX)
@@ -1414,7 +1416,7 @@ where
                 let lo = bucket * per_bucket;
                 Mutex::new(Bucket {
                     records: Records::default(),
-                    range: Some(snapshot.new_range(lo, per_bucket.min(partitions - lo))),
+                    range: Some(index.new_range(lo, per_bucket.min(partitions - lo))),
                 })
             })
             .collect(),
@@ -1461,7 +1463,7 @@ where
             let shared = shared.clone();
             let active = active.clone();
             let handle = context
-                .child("snapshot_sorter")
+                .child("index_sorter")
                 .with_attribute("sorter", sorter)
                 .dedicated()
                 .spawn(move |context| async move {
@@ -1478,11 +1480,11 @@ where
         .expect("tasks were joined")
         .into_bitmap();
 
-    // Install each bucket's partitions into the snapshot and fold its active-key count in.
+    // Install each bucket's partitions into the index and fold its active-key count in.
     let mut total_items = 0;
     for (ranges, keys) in filled {
         for range in ranges {
-            snapshot.install_range(range);
+            index.install_range(range);
         }
         total_items += keys;
     }
@@ -1498,17 +1500,14 @@ where
     Ok((total_items, active))
 }
 
-/// Configures snapshot rebuilding during QMDB initialization.
+/// Configures index rebuilding during QMDB initialization.
 ///
 /// This trait is sealed to the index types provided by this crate.
 #[expect(
     private_bounds,
-    reason = "the Rebuild supertrait is private so only QMDB can call build_snapshot"
+    reason = "the Rebuild supertrait is private so only QMDB can call build_index"
 )]
-pub trait SnapshotBuild<F: Family>:
-    Index<Value = Location<F>> + Rebuild<F> + Sized + 'static
-{
-}
+pub trait IndexBuild<F: Family>: Index<Value = Location<F>> + Rebuild<F> + Sized + 'static {}
 
 /// Replays the log into an index owned by initialization. Implementations must drop all log
 /// clones before returning, including on error.
@@ -1520,7 +1519,7 @@ pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
     ///
     /// `init_buffer` sizes the replay read buffer (in bytes). `scratch` names a partition the
     /// build may keep temporary data in, which it removes before returning successfully.
-    fn build_snapshot<E, C>(
+    fn build_index<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -1533,11 +1532,11 @@ pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
         E: Spawner + crate::Context,
         C: Contiguous<Item: Operation<F>> + 'static;
 
-    /// Like [Self::build_snapshot], but the tasks that replay the log also hash every chunk of
+    /// Like [Self::build_index], but the tasks that replay the log also hash every chunk of
     /// `leaves` and send them to it in order. If `leaves` stops accepting chunks, the journal
     /// reports why and the result is unspecified.
     #[allow(clippy::too_many_arguments)]
-    fn build_snapshot_hashing<E, C, H>(
+    fn build_index_hashing<E, C, H>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -1553,19 +1552,19 @@ pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
         H: MerkleHasher<F> + 'static;
 }
 
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+impl<F: Family, T: Translator> IndexBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator> IndexBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator, const P: usize> IndexBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
 }
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+impl<F: Family, T: Translator, const P: usize> IndexBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
 }
 
 impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
-    async fn build_snapshot<E, C>(
+    async fn build_index<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -1591,7 +1590,7 @@ impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
         .await
     }
 
-    async fn build_snapshot_hashing<E, C, H>(
+    async fn build_index_hashing<E, C, H>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -1834,9 +1833,9 @@ mod tests {
         Log,
     }
 
-    /// Build the snapshot of `log` from `floor` into `index` on `tasks` tasks, and check the
-    /// index, the active-key count and the activity bitmap against the operations applied in
-    /// order. A build that replays the whole log must also pass every chunk on once, in order.
+    /// Build `index` from `log`, starting at `floor`, on `tasks` tasks, and check the index, the
+    /// active-key count and the activity bitmap against the operations applied in order. A build
+    /// that replays the whole log must also pass every chunk on once, in order.
     async fn check_build<I>(
         context: deterministic::Context,
         mut index: I,

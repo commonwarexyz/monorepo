@@ -215,7 +215,14 @@ pub(crate) async fn check_orphaned_resize<S: crate::Storage>(storage: &S) {
 ///
 /// Mixing plain and durable writes must retain any debt the backend's write barrier
 /// did not cover, regardless of the order of those writes.
-pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &Pending) {
+///
+/// `range_only` states whether the backend credits a `SYNC` write with only its own range, as
+/// after a fused `RWF_DSYNC` write, rather than with the whole file.
+pub(crate) async fn check_sync_writes<S: crate::Storage>(
+    storage: &S,
+    pending: &Pending,
+    range_only: bool,
+) {
     // The cache hint must not change durability or require a flush on reopen.
     for (case, options) in [
         WriteOptions::SYNC,
@@ -272,9 +279,9 @@ pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &
         );
         drop(blob);
 
-        // Linux's per-write sync covers only the durable write's range. Other
-        // platforms use a full-file sync, which also covers an earlier plain write.
-        let needs_flush = !plain_first || cfg!(target_os = "linux");
+        // The backend never credits the plain write after a range-only barrier. After a
+        // whole-file sync it credits an earlier plain write, never a later one.
+        let needs_flush = !plain_first || range_only;
         assert_eq!(
             pending.completions() - before,
             u64::from(needs_flush),

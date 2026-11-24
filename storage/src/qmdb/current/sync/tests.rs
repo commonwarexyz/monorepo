@@ -15,7 +15,9 @@ use crate::qmdb::{
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
-use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Context};
+use commonware_runtime::{
+    Metrics as _, Runner as _, Supervisor as _, deterministic, deterministic::Context,
+};
 use commonware_utils::{NZU64, NZUsize, non_empty_range, probability};
 use rand::Rng as _;
 use std::collections::BTreeMap;
@@ -543,6 +545,12 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 
         assert_eq!(SyncDatabase::target(&synced_db).root, sync_root);
         assert_eq!(synced_db.root(), verification_root);
+        assert!(
+            context
+                .encode()
+                .lines()
+                .any(|line| line == "client_any_index_items 1")
+        );
         assert_eq!(synced_db.sync_boundary(), lower_bound);
         assert_eq!(synced_db.get(&key).await.unwrap(), expected);
 
@@ -553,6 +561,12 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             .unwrap();
         assert_eq!(SyncDatabase::target(&reopened).root, sync_root);
         assert_eq!(reopened.root(), verification_root);
+        assert!(
+            context
+                .encode()
+                .lines()
+                .any(|line| line == "reopened_any_index_items 1")
+        );
         assert_eq!(reopened.sync_boundary(), lower_bound);
         assert_eq!(reopened.get(&key).await.unwrap(), expected);
 
@@ -745,6 +759,7 @@ fn test_current_sync_persist_failure_reopens_at_target() {
 /// source at the recovered commit, and retrying reaches the target.
 #[test_traced("WARN")]
 fn test_current_sync_interrupted_persist_is_retried() {
+    use crate::{merkle::Location, translator::TwoCap};
     use commonware_runtime::mocks::{MutationFaultContext, MutationFaults};
 
     type Db = crate::qmdb::current::unordered::fixed::Db<
@@ -753,116 +768,131 @@ fn test_current_sync_interrupted_persist_is_retried() {
         Digest,
         Digest,
         Sha256,
-        crate::translator::TwoCap,
+        TwoCap,
         32,
         Sequential,
     >;
 
+    let key = Digest::from([9u8; 32]);
+    let populate =
+        async |context: Context, label: &'static str, rounds: u64, prune_at: Option<_>| {
+            let context = MutationFaultContext {
+                inner: context.child(label),
+                faults: MutationFaults::default(),
+            };
+            let config = fixed_config::<TwoCap>(label);
+            let mut db: Db = Db::init(context, config, None).await.unwrap();
+            let mut commits = BTreeMap::new();
+            for round in 0..rounds {
+                let value = Digest::from([round as u8; 32]);
+                let merkleized = db
+                    .new_batch()
+                    .write(key, Some(value))
+                    .merkleize(&db)
+                    .await
+                    .unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                commits.insert(db.bounds().end, (db.ops_root(), db.root(), value));
+            }
+            let boundary = prune_at.unwrap_or_else(|| db.sync_boundary());
+            let db = db.prune(boundary).await.unwrap().sync().await.unwrap();
+            (db, commits)
+        };
+
+    // Keep one durable copy of the source, then add each scenario's replica in its own fork.
+    let ((target, canonical_root, commits), source_storage) = deterministic::Runner::default()
+        .start_and_recover(|context| async {
+            let (source, commits) = populate(context, "source", 300, None).await;
+            let target = crate::qmdb::sync::Target {
+                root: SyncDatabase::target(&source).root,
+                range: non_empty_range!(source.sync_boundary(), source.bounds().end),
+            };
+            (target, source.root(), commits)
+        });
+
     for rounds in [300u64, 280] {
+        let runner = source_storage.fork_storage();
+        let (local_end, fixture) = runner.start_and_recover(|context| async {
+            let (local, _) = populate(context, "local", rounds, Some(Location::new(256))).await;
+            assert_eq!(local.root() == canonical_root, rounds == 300);
+            assert!(local.bounds().start < target.range.start());
+            assert!(local.bounds().end > target.range.start());
+            local.bounds().end
+        });
         let mut saw_intermediate = false;
         for interrupted in 0.. {
-            let (completed, intermediate) =
-                deterministic::Runner::default().start(|context| async move {
-                    let faults = MutationFaults::default();
-                    let context = MutationFaultContext {
-                        inner: context,
-                        faults: faults.clone(),
-                    };
-                    let key = Digest::from([9u8; 32]);
-                    let populate = |label: &'static str, rounds: u64, prune_at: Option<_>| {
-                        let context = context.child(label);
-                        async move {
-                            let config = fixed_config::<crate::translator::TwoCap>(label);
-                            let mut db: Db = Db::init(context, config, None).await.unwrap();
-                            let mut commits = BTreeMap::new();
-                            for round in 0..rounds {
-                                let value = Digest::from([round as u8; 32]);
-                                let merkleized = db
-                                    .new_batch()
-                                    .write(key, Some(value))
-                                    .merkleize(&db)
-                                    .await
-                                    .unwrap();
-                                db = db.apply_batch(merkleized).await.unwrap();
-                                commits.insert(db.bounds().end, (db.ops_root(), db.root(), value));
-                            }
-                            let boundary = prune_at.unwrap_or_else(|| db.sync_boundary());
-                            let db = db.prune(boundary).await.unwrap().sync().await.unwrap();
-                            (db, commits)
-                        }
-                    };
-                    let (source, commits) = populate("source", 300, None).await;
-                    let (local, _) =
-                        populate("local", rounds, Some(crate::merkle::Location::new(256))).await;
-                    let target = crate::qmdb::sync::Target {
-                        root: SyncDatabase::target(&source).root,
-                        range: non_empty_range!(source.sync_boundary(), source.bounds().end),
-                    };
-                    let canonical_root = source.root();
-                    let local_end = local.bounds().end;
-                    assert_eq!(local.root() == canonical_root, rounds == 300);
-                    assert!(local.bounds().start < target.range.start());
-                    assert!(local.bounds().end > target.range.start());
-                    drop(local);
+            let (completed, intermediate) = fixture.fork_storage().start(|context| async {
+                let faults = MutationFaults::default();
+                let context = MutationFaultContext {
+                    inner: context,
+                    faults: faults.clone(),
+                };
+                let source: Db = Db::init(
+                    context.child("source"),
+                    fixed_config::<TwoCap>("source"),
+                    None,
+                )
+                .await
+                .unwrap();
+                let source = std::sync::Arc::new(source);
+                let sync = |label: &'static str| {
+                    crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
+                        context: context.child(label),
+                        db_config: fixed_config::<TwoCap>("local"),
+                        fetch_batch_size: NZU64!(64),
+                        target: target.clone(),
+                        source: source.clone(),
+                        apply_batch_size: NZU64!(1024),
+                        max_outstanding_requests: NZUsize!(4),
+                        update_rx: None,
+                        finish_rx: None,
+                        reached_target_tx: None,
+                    })
+                };
+                let reopen = |label: &'static str| {
+                    Db::init(context.child(label), fixed_config::<TwoCap>("local"), None)
+                };
 
-                    let source = std::sync::Arc::new(source);
-                    let sync = |label: &'static str| {
-                        crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
-                            context: context.child(label),
-                            db_config: fixed_config::<crate::translator::TwoCap>("local"),
-                            fetch_batch_size: NZU64!(64),
-                            target: target.clone(),
-                            source: source.clone(),
-                            apply_batch_size: NZU64!(1024),
-                            max_outstanding_requests: NZUsize!(4),
-                            update_rx: None,
-                            finish_rx: None,
-                            reached_target_tx: None,
-                        })
-                    };
-                    let reopen = |label: &'static str| {
-                        Db::init(
-                            context.child(label),
-                            fixed_config::<crate::translator::TwoCap>("local"),
-                            None,
-                        )
-                    };
+                // Sync fails exactly when one of its mutations was refused.
+                faults.allow(interrupted);
+                let result = sync("sync").await;
+                let stopped = faults.failed();
+                faults.disarm();
+                let scenario = format!("rounds {rounds}, stopped after {interrupted}");
+                assert_eq!(result.is_err(), stopped, "{scenario}");
+                if let Ok(db) = result {
+                    assert_eq!(db.root(), canonical_root, "{scenario}");
+                    return (true, false);
+                }
 
-                    // Sync fails exactly when one of its mutations was refused.
-                    faults.allow(interrupted);
-                    let result = sync("sync").await;
-                    let stopped = faults.failed();
-                    faults.disarm();
-                    let scenario = format!("rounds {rounds}, stopped after {interrupted}");
-                    assert_eq!(result.is_err(), stopped, "{scenario}");
-                    if let Ok(db) = result {
-                        assert_eq!(db.root(), canonical_root, "{scenario}");
-                        return (true, false);
-                    }
+                let db = reopen("reopen").await.unwrap();
+                let end = db.bounds().end;
+                assert!(
+                    (local_end..=target.range.end()).contains(&end),
+                    "{scenario}"
+                );
+                let (ops_root, root, value) = commits[&end];
+                assert_eq!(db.ops_root(), ops_root, "{scenario}");
+                assert_eq!(db.root(), root, "{scenario}");
+                assert_eq!(db.get(&key).await.unwrap(), Some(value), "{scenario}");
+                drop(db);
 
-                    let db = reopen("reopen").await.unwrap();
-                    let end = db.bounds().end;
-                    assert!(
-                        (local_end..=target.range.end()).contains(&end),
-                        "{scenario}"
-                    );
-                    let (ops_root, root, value) = commits[&end];
-                    assert_eq!(db.ops_root(), ops_root, "{scenario}");
-                    assert_eq!(db.root(), root, "{scenario}");
-                    assert_eq!(db.get(&key).await.unwrap(), Some(value), "{scenario}");
-                    drop(db);
-
-                    // Retrying the sync reaches the target, which survives a reopen.
-                    drop(sync("retry").await.unwrap());
-                    assert_eq!(
-                        reopen("final").await.unwrap().root(),
-                        canonical_root,
-                        "{scenario}"
-                    );
-                    (false, local_end < end && end < target.range.end())
-                });
+                // Retrying the sync reaches the target, which survives a reopen.
+                drop(sync("retry").await.unwrap());
+                assert_eq!(
+                    reopen("final").await.unwrap().root(),
+                    canonical_root,
+                    "{scenario}"
+                );
+                (false, local_end < end && end < target.range.end())
+            });
             saw_intermediate |= intermediate;
             if completed {
+                tracing::debug!(
+                    rounds,
+                    attempts = interrupted + 1,
+                    "completed interruption sweep"
+                );
                 break;
             }
         }

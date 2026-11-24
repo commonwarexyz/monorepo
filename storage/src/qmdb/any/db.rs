@@ -86,14 +86,14 @@ fn match_read_ops<F: Family, U: Update, T>(
     }
 }
 
-/// Batch read `keys`, which must not be empty, through `snapshot` and `reader`, mapping each
+/// Batch read `keys`, which must not be empty, through `index` and `reader`, mapping each
 /// matched update through `map` along with the location it was read from. A key repeated in
 /// `keys` receives a clone of its update in every slot but the last.
 ///
 /// Positions the page cache holds are served without awaiting, split across `strategy` when the
 /// batch is large enough. One batched read then serves the rest.
 pub(crate) async fn read_many_map<F, R, I, U, S, T>(
-    snapshot: &I,
+    index: &I,
     reader: &R,
     strategy: &S,
     keys: &[impl Borrow<U::Key> + Sync],
@@ -116,9 +116,7 @@ where
             let mut shards = batches
                 .map_collect_vec(
                     |ranges| ranges,
-                    |range| {
-                        resolve_cached(snapshot, reader, &keys[range.clone()], &map, range.start)
-                    },
+                    |range| resolve_cached(index, reader, &keys[range.clone()], &map, range.start),
                 )
                 .into_iter();
 
@@ -164,7 +162,7 @@ where
 /// the cache could not serve. A miss is recorded even when its key already resolved so the
 /// fallback read still validates the position.
 fn resolve_cached<F, R, I, U, T>(
-    snapshot: &I,
+    index: &I,
     reader: &R,
     keys: &[impl Borrow<U::Key>],
     map: &(impl Fn(U, Location<F>) -> T + Send + Sync),
@@ -180,7 +178,7 @@ where
     // Probe the in-memory index with the bytes a write indexes each key by. Each key may map
     // to multiple locations due to hash collisions.
     let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-    snapshot.get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
+    index.get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
         candidates.push((key_idx, *loc))
     });
 
@@ -245,15 +243,15 @@ pub struct Db<
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location<F>,
 
-    /// A snapshot of all currently active operations in the form of a map from each key to the
+    /// An index of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
     /// # Invariant
     ///
     /// - Only references `Operation::Update`s.
-    pub(crate) snapshot: I,
+    pub(crate) index: I,
 
-    /// The number of active keys in the snapshot.
+    /// The number of active keys in the index.
     pub(crate) active_keys: usize,
 
     /// Activity bitmap over the applied operations. Rebuilt from the journal on init and never
@@ -263,7 +261,7 @@ pub struct Db<
     /// # Invariants
     ///
     /// - `bitmap.len() == log.size()`.
-    /// - For every unpruned location `i`, `bitmap[i] == 1` if and only if `snapshot` maps a
+    /// - For every unpruned location `i`, `bitmap[i] == 1` if and only if `index` maps a
     ///   key to `i` or `i` is the last commit.
     pub(crate) bitmap: Arc<Shared<N>>,
 
@@ -317,7 +315,7 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Whether the snapshot currently has no active keys.
+    /// Whether the index currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
@@ -368,7 +366,7 @@ where
     ) -> impl Future<Output = Result<Option<(U, Location<F>)>, crate::qmdb::Error<F>>> + Send {
         async move {
             // Translated keys can collide, so read candidates until the full key matches.
-            for loc in self.snapshot.get(key.as_ref()).copied() {
+            for loc in self.index.get(key.as_ref()).copied() {
                 let update = self.read_update(loc).await?;
                 if update.key() == key {
                     return Ok(Some((update, loc)));
@@ -379,7 +377,7 @@ where
         }
     }
 
-    /// Reads the update at `loc`, which must hold one, as every snapshot location does.
+    /// Reads the update at `loc`, which must hold one, as every index location does.
     pub(crate) async fn read_update(&self, loc: Location<F>) -> Result<U, crate::qmdb::Error<F>> {
         match self.log.read(*loc).await? {
             Operation::Update(update) => Ok(update),
@@ -413,7 +411,7 @@ where
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(keys.len() as u64);
 
-        Ok(read_many_map(&self.snapshot, &self.log, self.strategy(), keys, map).await?)
+        Ok(read_many_map(&self.index, &self.log, self.strategy(), keys, map).await?)
     }
 
     /// Return the retained operation range `[start, end)`.
@@ -480,7 +478,7 @@ where
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
+    /// index.
     ///
     /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///
@@ -573,7 +571,7 @@ where
 
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
-    /// from grafted metadata). `init_concurrency` is the snapshot build's task budget (see
+    /// from grafted metadata). `init_concurrency` is the index build's task budget (see
     /// [crate::qmdb::any::Config::init_concurrency]).
     ///
     /// # Panics
@@ -593,10 +591,10 @@ where
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
         E: Spawner,
-        I: crate::qmdb::SnapshotBuild<F>,
+        I: crate::qmdb::IndexBuild<F>,
         C: 'static,
     {
-        // Share the log so the snapshot build can hand it to each of its tasks. Sole ownership
+        // Share the log so the index build can hand it to each of its tasks. Sole ownership
         // is recovered (`Arc::into_inner`) once the build has dropped every task's clone.
         let log = Arc::new(log);
         let (inactivity_floor_loc, active_keys, activity) = {
@@ -608,9 +606,9 @@ where
                 crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
                     .await?;
 
-            // Build the snapshot, collecting each replayed location's activity status.
+            // Build the index, collecting each replayed location's activity status.
             let (active_keys, activity) = index
-                .build_snapshot(
+                .build_index(
                     context,
                     inactivity_floor_loc,
                     &log,
@@ -623,8 +621,8 @@ where
         };
 
         // The build has returned, so every worker clone of the log is dropped. Reclaim it.
-        let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
-        Self::from_snapshot(
+        let log = Arc::into_inner(log).expect("index build retained a log reference");
+        Self::from_index(
             log,
             index,
             inactivity_floor_loc,
@@ -638,7 +636,7 @@ where
     /// Build a [Db] from `log` and an `index` already rebuilt from `inactivity_floor_loc`.
     /// `activity` says which locations from the floor are active, and `active_keys` counts the
     /// active keys.
-    pub(crate) fn from_snapshot(
+    pub(crate) fn from_index(
         log: AuthenticatedLog<F, E, C, H, S>,
         index: I,
         inactivity_floor_loc: Location<F>,
@@ -687,7 +685,7 @@ where
             log,
             root,
             inactivity_floor_loc,
-            snapshot: index,
+            index,
             active_keys,
             bitmap,
             metrics,

@@ -21,6 +21,18 @@
 //! Dropping the last handle of an open performs no I/O. It records what the open left unflushed,
 //! and the next open of the blob establishes that durability before it returns.
 //!
+//! ## Durable Writes
+//!
+//! A nonempty [crate::WriteOptions::SYNC] write issues plain writes until all of its bytes are
+//! written, then one data sync of the whole file. A failure of either phase poisons the open, since
+//! either may have consumed the kernel's writeback error. A filesystem syncs within a write on a
+//! synchronous file or mount, so a failed write may be the only report of lost data. A failed write
+//! reports the kernel's error as [crate::Error::Io], or [crate::Error::WriteFailed] when the kernel
+//! gave none, and a failed sync reports [crate::Error::BlobSyncFailed]. Later durability requests
+//! and opens report the retained kernel error of either phase as [crate::Error::BlobSyncFailed].
+//! The sync also makes the writes completed before the request durable and the open credits them,
+//! but callers must not rely on that coverage, since `SYNC` is not a barrier for earlier writes.
+//!
 //! ## Uncached Reads
 //!
 //! Reads with [crate::ReadOptions::DONT_CACHE] use direct I/O where they can, and other reads are
@@ -69,8 +81,8 @@ use crate::{
     iouring::{
         operation::{self, Operation},
         request::{
-            Cache, IOVEC_BATCH_SIZE, ReadAtRequest, Request, RequestOutput, ResizeRequest,
-            SyncRequest, WriteAtRequest, WriteAtState,
+            Cache, ReadAtRequest, Request, RequestOutput, ResizeRequest, SyncRequest,
+            WriteAtRequest, WriteAtState,
         },
     },
 };
@@ -109,9 +121,10 @@ pub struct Config {
 /// Filesystem storage with one logical open per blob. Each request executes on the worker
 /// that registers it.
 ///
-/// Failed durability barriers during content sync remain errors on later opens through this
-/// instance until the blob is removed or recreated. Creation failures are retained only when
-/// the header is complete.
+/// Errors from a durability barrier during content sync, or from the filesystem write of a
+/// [crate::WriteOptions::SYNC] request, remain errors on later opens through this instance until
+/// the blob is removed or recreated. Creation failures are retained only when the header is
+/// complete.
 #[derive(Clone)]
 pub struct Storage {
     /// Serialize metadata operations across cloned contexts and workers.
@@ -374,49 +387,16 @@ impl Shared {
         Ok(dirty)
     }
 
-    /// Settle a write's mutation debt from the outcome the ring observed.
-    ///
-    /// The ring sees every completion, including those the caller stopped waiting for. A plain
-    /// write recorded its mutation before submission and completes it here. A durable write
-    /// covers itself, so a failure records a mutation. A failed barrier poisons the open:
-    /// it may have consumed the kernel's writeback error. Durable completions reject any
-    /// previously retained failure before acknowledging success.
-    pub(crate) fn wrote(
-        &self,
-        durable: bool,
-        synced: bool,
-        result: Result<(), Error>,
-    ) -> Result<(), Error> {
-        match (durable, &result) {
-            (false, Ok(())) => self.tracker.complete(),
-            (true, Err(error)) => {
-                self.tracker.write();
-
-                // Only a failed fused write or trailing sync may have consumed the kernel's
-                // writeback error.
-                if synced {
-                    self.sync_failed(error);
-                }
-            }
-            _ => {}
-        }
-        if durable
-            && result.is_ok()
-            && let Some(error) = self.tracker.failure()
-        {
-            return Err(error);
-        }
-        result
-    }
-
-    /// Retain a failed barrier under the name the caller sees.
-    pub(crate) fn sync_failed(&self, error: &Error) {
+    /// Retain a durability failure, naming its kernel error [Error::BlobSyncFailed], and return
+    /// the retained error.
+    pub(crate) fn sync_failed(&self, error: &Error) -> Error {
         let (partition, name) = &self.key;
         let error = match error {
             Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error.clone()),
             error => error.clone(),
         };
         self.tracker.poison(&error);
+        error
     }
 
     /// Establish a settled predecessor's debt through this open's file.
@@ -801,28 +781,23 @@ impl crate::Blob for Blob {
             Cache::Enabled
         };
 
-        // Sync writes that fit one vectored batch use per-write durability, which covers only
-        // their own range. Larger ones finish all batches before a trailing sync.
         let sync = options.contains(WriteOptions::SYNC);
         if sync && let Some(error) = self.shared.tracker.failure() {
             return Err(error);
         }
-        let state = if !sync {
-            WriteAtState::Writing
-        } else if bufs.chunk_count() > IOVEC_BATCH_SIZE {
+        let state = if sync {
             WriteAtState::WritingBeforeSync
         } else {
-            WriteAtState::WritingSync
+            WriteAtState::Writing
         };
 
         // A plain write records its mutation before submission. The ring settles the debt at
-        // completion, and credits a trailing sync while the request holds the open's durability
+        // completion, and credits a successful sync while the request holds the open's durability
         // permit, so a caller that stops waiting changes nothing.
         if !sync {
             self.shared.tracker.write();
         }
-        let trailing = state == WriteAtState::WritingBeforeSync;
-        let result = match Operation::register(Request::WriteAt(WriteAtRequest::new(
+        match Operation::register(Request::WriteAt(WriteAtRequest::new(
             self.shared.clone(),
             offset,
             bufs.into(),
@@ -834,15 +809,6 @@ impl crate::Blob for Blob {
             Ok(RequestOutput::WriteAt(result)) => result,
             Ok(_) => unreachable!("write request returned another output kind"),
             Err(_) => Err(Error::WriteFailed),
-        };
-
-        // In a multi-batch write, only the trailing sync reports `Error::Io`. Name it like `sync`.
-        match result {
-            Err(Error::Io(error)) if trailing => {
-                let (partition, name) = &self.shared.key;
-                Err(Error::BlobSyncFailed(partition.clone(), hex(name), error))
-            }
-            result => result,
         }
     }
 
@@ -894,10 +860,7 @@ impl crate::Blob for Blob {
         let RequestOutput::Sync(result) = output else {
             unreachable!("sync request returned another output kind");
         };
-        result.map_err(|error| match error {
-            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error),
-            error => error,
-        })
+        result
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -906,16 +869,8 @@ impl crate::Blob for Blob {
             Ok(None) => return Handle::ready(Ok(())),
             Err(error) => return Handle::ready(Err(error)),
         };
-        let (partition, name) = self.shared.key.clone();
         let receiver = operation::start_sync(request);
-        Handle::from_future(async move {
-            match receiver.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
-                Ok(Err(err)) => Err(err),
-                Err(_) => Err(Error::Closed),
-            }
-        })
+        Handle::from_future(async move { receiver.await.unwrap_or(Err(Error::Closed)) })
     }
 }
 
@@ -930,6 +885,7 @@ mod tests {
         iouring::{
             self,
             operation::tests::{admitted, close_current_worker},
+            request::IOVEC_BATCH_SIZE,
         },
         storage::{Header, Layout, shared, tests::run_storage_tests},
     };
@@ -2556,6 +2512,13 @@ mod tests {
         });
     }
 
+    /// Wait until every request on the blob's open has retired its file reference.
+    async fn retired(blob: &Blob) {
+        while Arc::strong_count(&blob.shared) > 1 {
+            crate::utils::reschedule().await;
+        }
+    }
+
     /// Wait until every settling open has published its outcome.
     async fn settle(pending: &Pending) {
         while pending.outstanding() > 0 {
@@ -2587,54 +2550,76 @@ mod tests {
     fn test_durable_writes_need_no_reopen_sync() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
-            shared::check_sync_writes(&storage, &storage.pending).await;
+            // A SYNC write ends in a whole-file data sync, which also covers an earlier plain write.
+            shared::check_sync_writes(&storage, &storage.pending, false).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });
     }
 
-    /// A durable write that fails after its caller stopped waiting dirties the open. A fused
-    /// write also poisons it, since its failure may have consumed the kernel's writeback error,
-    /// so its name retains the failure until removed or recreated. A batched write that fails
-    /// before its trailing sync only leaves the open dirty.
+    /// A failed durable write poisons the open in either phase, including when shutdown
+    /// finishes the request after its caller stopped waiting. A failed write reports the
+    /// kernel's error as is, and a failed data sync reports it as `BlobSyncFailed`. Later
+    /// durability requests and the next open return the retained failure.
     #[test]
-    fn test_orphaned_failed_durable_write_poisons_the_open() {
-        // One batch fuses the sync into the write. More batches end in a trailing sync.
-        for chunks in [1, IOVEC_BATCH_SIZE + 1] {
+    fn test_failed_durable_write_poisons_the_open() {
+        for (write_fails, orphan) in [(true, false), (true, true), (false, false), (false, true)] {
             let directory = create_test_directory();
-            let path = directory.join("readonly");
-            fs::write(&path, b"").unwrap();
             let hold = Hold::acquire(&directory).unwrap();
             let pending = Arc::new(Pending::default());
+
+            // A read-only descriptor fails the write. The null device accepts positioned
+            // writes and rejects the data sync.
+            let (file, code) = if write_fails {
+                let path = directory.join("readonly");
+                fs::write(&path, b"").unwrap();
+                (File::options().read(true).open(&path).unwrap(), libc::EBADF)
+            } else {
+                let file = File::options().write(true).open("/dev/null").unwrap();
+                (file, libc::EINVAL)
+            };
             let blob = Blob::new(
-                File::options().read(true).open(&path).unwrap(),
+                file,
                 hold,
                 0,
-                pending.admit("partition", b"readonly", false).unwrap().0,
+                pending.admit("partition", b"blob", false).unwrap().0,
             );
+            let retained = move |result: Result<(), Error>| {
+                matches!(
+                    result,
+                    Err(Error::BlobSyncFailed(partition, name, error))
+                        if partition == "partition"
+                            && name == hex(b"blob")
+                            && error.raw_os_error() == Some(code)
+                )
+            };
 
             iouring::Runner::default().start(|_| async move {
-                let bufs = IoBufs::from((0..chunks).map(|_| IoBuf::from(b"x")).collect::<Vec<_>>());
-                let mut write = Box::pin(blob.write_at(0, bufs, WriteOptions::SYNC));
-                assert!(futures::poll!(write.as_mut()).is_pending());
-                drop(write);
+                let mut write = Box::pin(blob.write_at(0, b"x", WriteOptions::SYNC));
+                if orphan {
+                    assert!(futures::poll!(write.as_mut()).is_pending());
+                    drop(write);
+                } else {
+                    let result = write.await;
+                    if write_fails {
+                        assert!(matches!(result, Err(Error::Io(error))
+                            if error.raw_os_error() == Some(code)));
+                    } else {
+                        assert!(retained(result));
+                    }
+                    assert!(retained(blob.sync().await));
+                    assert!(retained(blob.write_at(0, b"y", WriteOptions::SYNC).await));
+                }
                 drop(blob);
             });
 
-            // The write failed against the read-only descriptor after its caller left, so the
-            // retired request left the name dirty, and poisoned when the sync was fused.
-            assert!(pending.owes("partition", b"readonly"), "chunks={chunks}");
-            let admitted = pending.admit("partition", b"readonly", true);
-            if chunks == 1 {
-                assert!(
-                    matches!(admitted, Err(Error::BlobSyncFailed(_, _, error))
-                        if error.raw_os_error() == Some(libc::EBADF)),
-                    "chunks={chunks}"
-                );
-            } else {
-                let (_, wait, owed) = admitted.unwrap();
-                assert!(wait.is_none() && owed, "chunks={chunks}");
-            }
+            // The retired request left the name dirty and poisoned.
+            let case = format!("write_fails={write_fails} orphan={orphan}");
+            assert!(pending.owes("partition", b"blob"), "{case}");
+            assert!(
+                retained(pending.admit("partition", b"blob", true).map(|_| ())),
+                "{case}"
+            );
             std::fs::remove_dir_all(directory).unwrap();
         }
     }
@@ -2722,23 +2707,16 @@ mod tests {
         });
     }
 
-    /// Only a multi-batch durable write covers the plain writes before it.
+    /// A durable write's whole-file sync covers the plain writes before it, also when the write
+    /// spans several batches or carries the cache hint. An empty durable write issues no sync.
     #[test]
-    fn test_multibatch_durable_write_covers_prior_mutations() {
+    fn test_durable_write_covers_prior_mutations() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
-            for (case, (chunks, options, later_plain, expected)) in [
-                (1025, WriteOptions::SYNC, false, 0),
-                (
-                    1025,
-                    WriteOptions::SYNC | WriteOptions::DONT_CACHE,
-                    false,
-                    0,
-                ),
-                (1024, WriteOptions::SYNC, false, 1),
-                (0, WriteOptions::SYNC, false, 1),
-                (1025, WriteOptions::default(), false, 1),
-                (1025, WriteOptions::SYNC, true, 1),
+            for (case, (chunks, options, expected)) in [
+                (IOVEC_BATCH_SIZE + 1, WriteOptions::SYNC, 0),
+                (1, WriteOptions::SYNC | WriteOptions::DONT_CACHE, 0),
+                (0, WriteOptions::SYNC, 1),
             ]
             .into_iter()
             .enumerate()
@@ -2753,11 +2731,6 @@ mod tests {
                     bufs.append(IoBuf::from(vec![7u8]));
                 }
                 blob.write_at(6, bufs, options).await.unwrap();
-                if later_plain {
-                    blob.write_at(0, b"suffix", WriteOptions::default())
-                        .await
-                        .unwrap();
-                }
                 drop(blob);
                 let (blob, size) = storage.open("large_durable", &[case as u8]).await.unwrap();
                 assert_eq!(
@@ -2765,16 +2738,13 @@ mod tests {
                     expected,
                     "case={case}"
                 );
-                assert_eq!(size, 6 + chunks);
+                assert_eq!(size, 6 + chunks as u64);
                 let actual = blob
                     .read_at(0, size as usize, ReadOptions::default())
                     .await
                     .unwrap()
                     .coalesce();
-                assert_eq!(
-                    &actual.as_ref()[..6],
-                    if later_plain { b"suffix" } else { b"prefix" }
-                );
+                assert_eq!(&actual.as_ref()[..6], b"prefix");
                 assert!(actual.as_ref()[6..].iter().all(|byte| *byte == 7));
                 drop(blob);
             }
@@ -2783,42 +2753,42 @@ mod tests {
         });
     }
 
-    /// A multi-batch durable write credits the plain writes before it when its trailing sync
-    /// completes, not when its caller resumes. A dropped caller leaves no debt, and a failure
-    /// retained after completion does not fail the finished write.
+    /// A durable write credits the plain writes before it when its sync completes, not when
+    /// its caller resumes. A caller that stopped waiting leaves no debt, and a failure retained
+    /// after completion does not fail the finished write.
     #[test]
-    fn test_trailing_sync_credits_at_completion() {
+    fn test_durable_write_credits_at_completion() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
             for orphan in [true, false] {
                 let name = [u8::from(orphan)];
-                let (blob, _) = storage.open("trailing_credit", &name).await.unwrap();
+                let (blob, _) = storage.open("durable_credit", &name).await.unwrap();
                 blob.write_at(0, b"prefix", WriteOptions::default())
                     .await
                     .unwrap();
+                assert!(blob.shared.tracker.is_dirty());
 
-                // Submit a write spanning more than one iovec batch, then wait for the request
-                // to retire its file reference without polling the caller again.
-                let bufs = (0..IOVEC_BATCH_SIZE + 1)
-                    .map(|_| IoBuf::from(b"x"))
-                    .collect::<IoBufs>();
-                let mut write = Box::pin(blob.write_at(6, bufs, WriteOptions::SYNC));
+                // Submit the write, then wait for the request to retire its file reference. An
+                // orphaned caller stops waiting once the write is queued, and the other is not
+                // polled again.
+                let mut write = Box::pin(blob.write_at(6, b"x", WriteOptions::SYNC));
                 assert!(futures::poll!(write.as_mut()).is_pending());
-                while Arc::strong_count(&blob.shared) > 1 {
-                    crate::utils::reschedule().await;
-                }
-                assert!(!blob.shared.tracker.is_dirty());
-
                 if orphan {
-                    // The dropped caller leaves nothing for the next open to flush.
                     drop(write);
+                    retired(&blob).await;
+                    assert!(!blob.shared.tracker.is_dirty());
+
+                    // The orphaned write leaves nothing for the next open to flush.
                     drop(blob);
                     settle(&storage.pending).await;
-                    assert!(!storage.pending.owes("trailing_credit", &name));
+                    assert!(!storage.pending.owes("durable_credit", &name));
                     let completions = storage.pending.completions();
-                    drop(storage.open("trailing_credit", &name).await.unwrap());
+                    drop(storage.open("durable_credit", &name).await.unwrap());
                     assert_eq!(storage.pending.completions(), completions);
                 } else {
+                    retired(&blob).await;
+                    assert!(!blob.shared.tracker.is_dirty());
+
                     // A later barrier's failure does not fail the finished write. Later
                     // durability claims still observe it.
                     blob.shared.tracker.poison(&Error::Closed);
@@ -2827,7 +2797,7 @@ mod tests {
                     drop(blob);
                 }
             }
-            storage.remove("trailing_credit", None).await.unwrap();
+            storage.remove("durable_credit", None).await.unwrap();
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });
@@ -3027,12 +2997,12 @@ mod tests {
             let (unrelated, _) = storage.open("gate", b"second").await.unwrap();
             let permit = blob.shared.durability.try_lock().unwrap();
 
-            // A fused write leaves the tracker clean until its terminal result.
+            // A durable write leaves the tracker clean until its terminal result.
             let mut durable = Box::pin(blob.write_at(0, b"durable", WriteOptions::SYNC));
             assert!(futures::poll!(durable.as_mut()).is_pending());
             assert!(!blob.shared.tracker.is_dirty());
 
-            // Clean syncs owe no barrier for the unfinished fused write.
+            // Clean syncs owe no barrier for the unfinished durable write.
             let mut clean = Box::pin(async {
                 blob.sync().await?;
                 blob.start_sync().await.await

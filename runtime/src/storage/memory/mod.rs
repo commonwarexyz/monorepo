@@ -31,6 +31,7 @@ type BlobKey = (String, Vec<u8>);
 type Partition = BTreeMap<Vec<u8>, Vec<u8>>;
 
 /// Durable contents detached from all live storage and blob handles.
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub(crate) struct Snapshot(BTreeMap<String, Partition>);
 
 #[derive(Default)]

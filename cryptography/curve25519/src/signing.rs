@@ -6,9 +6,13 @@
 //!
 //! - The point encodings of the verifying key `A` and the signature component `R` are accepted
 //!   even when non-canonical (a `y` coordinate at or above `p`, or a negative-zero `x`), as long
-//!   as they decode to a curve point.
+//!   as they decode to a curve point. The criteria accept points of any order.
 //! - The scalar component `s` must be canonical (`s < L`), ruling out signature malleability.
 //! - The verification equation is cofactored: `[8](s*B - R - H(R || A || M)*A) == identity`.
+//!
+//! [`VerifyingKey`] decoding rejects an `A` that is not a curve point, so every [`VerifyingKey`]
+//! holds a curve point. [`Signature`] decoding accepts any 64 bytes, and verification rejects an
+//! `R` that is not a curve point or a non-canonical `s`.
 //!
 //! [`VerifyingKey::verify`] and [`VerifyingKey::verify_batch`] apply the same criteria.
 //! A non-empty batch of at most `u32::MAX` signatures is always accepted when every signature
@@ -21,9 +25,11 @@
 //! [ZIP215]: https://zips.z.cash/zip-0215
 
 mod core;
+#[cfg(any(test, feature = "arbitrary"))]
+mod zip215;
 
 use self::core::Scalar;
-use crate::curve::G;
+use crate::curve::{G, GAffine};
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
@@ -32,7 +38,9 @@ use ::core::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{Buf, FixedSize, Read, Write};
+use commonware_codec::{Buf, FixedSize, Read, Write, util::at_least_items};
+#[cfg(feature = "arbitrary")]
+use commonware_codec::{Copying, DecodeExt as _};
 use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -44,6 +52,8 @@ use sha2::{
     digest::{FixedOutput, Update},
 };
 use zeroize::{ZeroizeOnDrop, Zeroizing};
+#[cfg(any(test, feature = "arbitrary"))]
+pub(crate) use zip215::ZIP215_POINTS;
 
 /// An Ed25519 signing key.
 ///
@@ -92,11 +102,10 @@ impl SigningKey {
         wide_scalar[..32].copy_from_slice(&scalar_le_bytes[..]);
         let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide_scalar));
 
-        // Normalize before caching (see `VerifyingKey::point`).
         let point = G::mul_base_secret(&scalar_le_bytes).to_affine();
         let verifying_key = VerifyingKey {
             bytes: core::VerifyingKeyBytes::new(point.compress()),
-            point: Some(point.to_extended()),
+            point,
         };
 
         Self {
@@ -218,23 +227,21 @@ impl arbitrary::Arbitrary<'_> for SigningKey {
 
 /// A public key used to check signatures.
 ///
-/// Decoding accepts any 32 bytes and defers point validation until signature verification.
-/// Encodings that do not represent a curve point can never verify a signature.
+/// Decoding accepts exactly the encodings of curve points and rejects every other 32 bytes. The
+/// accepted encodings include non-canonical ones (a `y` coordinate at or above `p`, or a
+/// negative-zero `x`) and points of any order.
 /// Equality, ordering, and hashing use the original encoding: distinct encodings of the same
 /// point are distinct keys, and verification hashes the received bytes as required by ZIP215.
 #[derive(Clone)]
 pub struct VerifyingKey {
-    /// The encoded point.
-    ///
-    /// When deserializing, we just have the bytes, deferring parsing of them until
-    /// signature verification, so that we can more efficiently parse them in batch.
+    /// The encoding as received.
     bytes: core::VerifyingKeyBytes,
-    /// If available, the point associated with these bytes, normalized to `Z = 1`.
+    /// The point `bytes` encodes, in affine coordinates.
     ///
     /// The projective coordinates of a secret scalar multiplication depend on the scalar beyond
     /// the point itself, and this type is copied freely and never zeroized, so a cached point must
     /// carry only the point.
-    point: Option<G>,
+    point: GAffine,
 }
 
 impl PartialEq for VerifyingKey {
@@ -303,10 +310,24 @@ impl Read for VerifyingKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let bytes = <[u8; Self::SIZE]>::read_cfg(buf, cfg)?;
+        let point = GAffine::decompress(&bytes).ok_or(Self::NOT_A_POINT)?;
         Ok(Self {
-            bytes: core::VerifyingKeyBytes::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?),
-            point: None,
+            bytes: core::VerifyingKeyBytes::new(bytes),
+            point,
         })
+    }
+
+    // Decompresses the keys in batches. Accepts exactly the inputs, and produces exactly the keys,
+    // that repeated `read_cfg` would. The length check runs before allocating because `len`
+    // comes from the input.
+    fn read_vec(
+        buf: &mut impl Buf,
+        len: usize,
+        _: &Self::Cfg,
+    ) -> Result<Vec<Self>, commonware_codec::Error> {
+        at_least_items(buf, len, Self::SIZE)?;
+        core::read_points(buf, len, |bytes, point| Self { bytes, point }).ok_or(Self::NOT_A_POINT)
     }
 }
 
@@ -317,18 +338,32 @@ impl Array for VerifyingKey {}
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for VerifyingKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            bytes: core::VerifyingKeyBytes::new(u.arbitrary()?),
-            point: None,
-        })
+        // Random bytes almost never encode a small-order point or a non-canonical encoding, so
+        // draw those from the list of them.
+        let bytes: [u8; 32] = if u.ratio(1, 16)? {
+            *u.choose(&ZIP215_POINTS)?
+        } else {
+            u.arbitrary()?
+        };
+
+        // About half of all 32-byte strings encode a point, of any order. A key is derived from
+        // the rest.
+        Ok(Self::decode(Copying(&bytes[..]))
+            .unwrap_or_else(|_| SigningKey::from_seed(&bytes).verifying_key()))
     }
 }
 
 impl VerifyingKey {
+    /// The decoding error for an encoding that is not a curve point.
+    const NOT_A_POINT: commonware_codec::Error = commonware_codec::Error::Invalid(
+        "commonware_cryptography_curve25519::signing::VerifyingKey",
+        "encoding is not a curve point",
+    );
+
     fn verify_message(&self, msg: &[u8], sig: &Signature) -> bool {
         core::verify(
             &self.bytes,
-            self.point.as_ref(),
+            &self.point,
             &core::Signature::from_bytes(sig.bytes),
             msg,
         )
@@ -352,6 +387,13 @@ impl VerifyingKey {
         self.verify_message(msg, sig)
     }
 
+    /// Returns the canonical encoding of this key's point, so tests and fuzz targets can compare
+    /// decoded points.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn canonical_point(&self) -> [u8; 32] {
+        self.point.compress()
+    }
+
     /// Batch-verifies unframed messages for raw Ed25519 test-vector checks.
     #[cfg(test)]
     pub(crate) fn verify_batch_raw(
@@ -361,7 +403,7 @@ impl VerifyingKey {
     ) -> bool {
         let items: Vec<_> = items
             .iter()
-            .map(|&(key, signature, message)| signature.batch_item(&key.bytes, None, message))
+            .map(|&(key, signature, message)| signature.batch_item(key, None, message))
             .collect();
         core::verify_batch_bytes(rng, &items, strategy)
     }
@@ -445,11 +487,9 @@ impl BatchVerifier for VerifyingKey {
             .enumerate()
             .map(|(i, item)| {
                 let entry = project(i, item);
-                entry.signature.batch_item(
-                    &entry.public_key.bytes,
-                    Some(entry.namespace),
-                    entry.message,
-                )
+                entry
+                    .signature
+                    .batch_item(entry.public_key, Some(entry.namespace), entry.message)
             })
             .collect();
         core::verify_batch_bytes(rng, &items, strategy)
@@ -474,13 +514,14 @@ impl Signature {
     /// batch item.
     const fn batch_item<'a>(
         &'a self,
-        key: &'a core::VerifyingKeyBytes,
+        key: &'a VerifyingKey,
         namespace: Option<&'a [u8]>,
         message: &'a [u8],
     ) -> core::Item<'a> {
         let halves = self.bytes.as_chunks::<32>().0;
         core::Item {
-            key,
+            key: &key.bytes,
+            point: &key.point,
             r: &halves[0],
             s: &halves[1],
             namespace,
@@ -595,14 +636,13 @@ mod tests {
         assert!(!verify(&[(&b"nsm"[..], &b"essage"[..], signature)]));
     }
 
-    /// Equality, ordering, and hashing follow the encoding: a decoded copy equals the original
-    /// whatever its cached point, and two encodings of the same point stay distinct keys.
+    /// Equality, ordering, and hashing follow the encoding: a decoded copy equals the original,
+    /// and two encodings of the same point stay distinct keys.
     #[test]
     fn verifying_key_identity_follows_encoding() {
         let key =
             <SigningKey as commonware_math::algebra::Random>::random(test_rng()).verifying_key();
         let decoded = VerifyingKey::decode(key.encode()).unwrap();
-        assert!(key.point.is_some() && decoded.point.is_none());
         assert_eq!(key, decoded);
         assert_eq!(key.cmp(&decoded), Ordering::Equal);
         assert!(!HashSet::from([key]).insert(decoded));
@@ -638,6 +678,54 @@ mod tests {
             |_, _| unreachable!(),
             &Sequential
         ));
+    }
+
+    /// Decoding accepts every encoding of a curve point, including small-order points, `y`
+    /// encodings at or above `p`, and negative-zero `x`, and rejects every other encoding.
+    #[test]
+    fn verifying_key_decoding_requires_a_curve_point() {
+        let decode = |bytes: [u8; 32]| VerifyingKey::decode(Copying(&bytes[..]));
+
+        // Every small-order point, in canonical and non-canonical encodings.
+        for bytes in crate::test::ZIP215_POINTS {
+            assert_eq!(decode(bytes).unwrap().as_ref(), bytes);
+        }
+
+        // `x = 0` with the sign bit set (negative zero), for `y = 1` and `y = -1`.
+        let mut negative_zero = [0u8; 32];
+        negative_zero[0] = 1;
+        negative_zero[31] = 0x80;
+        assert!(decode(negative_zero).is_ok());
+        let mut negative_zero = [0xffu8; 32];
+        negative_zero[0] = 0xec;
+        assert!(decode(negative_zero).is_ok());
+
+        // `y + p` decodes exactly when `y` does, to the same point, whatever the sign bit.
+        let mut accepted = 0;
+        for y in 0..=18u8 {
+            for sign in [0, 0x80] {
+                let mut canonical = [0u8; 32];
+                canonical[0] = y;
+                canonical[31] = sign;
+                let mut noncanonical = [0xffu8; 32];
+                noncanonical[0] = 0xed + y;
+                noncanonical[31] = 0x7f | sign;
+                match (decode(canonical), decode(noncanonical)) {
+                    (Ok(canonical), Ok(noncanonical)) => {
+                        accepted += 1;
+                        assert_eq!(canonical.canonical_point(), noncanonical.canonical_point());
+                    }
+                    (Err(_), Err(error)) => assert!(matches!(
+                        error,
+                        commonware_codec::Error::Invalid(_, "encoding is not a curve point")
+                    )),
+                    _ => panic!("y = {y}, sign = {sign}"),
+                }
+            }
+        }
+
+        // The 38 pairs include both accepted and rejected encodings.
+        assert!((1..38).contains(&accepted));
     }
 
     /// A slice longer than the batch limit is rejected before its items are projected. Zero-sized
@@ -720,7 +808,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<SigningKey> => 1024,
-            CodecConformance<VerifyingKey>,
+            CodecConformance<VerifyingKey> => 16384,
             CodecConformance<Signature>,
         }
     }

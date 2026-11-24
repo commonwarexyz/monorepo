@@ -70,7 +70,7 @@ use std::{
 /// grinding or from honest growth once partitions fill: a spill is guaranteed past 256*511 = 130,816
 /// entries at `P=1`, past ~33M at `P=2`, and only past ~8.5B at `P=3` (so P=3 effectively never
 /// spills under honest load). See the module docs.
-const SPILL_THRESHOLD: usize = 512;
+pub(crate) const SPILL_THRESHOLD: usize = 512;
 
 /// The number of updates to each of a parallel-build worker's metrics that it batches into one
 /// update of the full index's metric. Until the worker's range is installed, the full index lacks
@@ -479,7 +479,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
-/// snapshot-build task (created by [Index::new_range], folded back into a full index by
+/// index-build task (created by [Index::new_range], folded back into a full index by
 /// [Index::install_range]). It accepts only bulk loads, which map a key's global partition index
 /// to the range's local slot. The [Unordered] operations index partitions globally and are
 /// deliberately unavailable, so they cannot be miscalled on a range.

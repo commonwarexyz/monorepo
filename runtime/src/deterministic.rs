@@ -475,10 +475,22 @@ impl Checkpoint {
     pub fn auditor(&self) -> Arc<Auditor> {
         self.auditor.clone()
     }
+
+    /// Create a fresh default runner with an independent copy of this checkpoint's durable storage.
+    /// Each runner gets its own clock, RNG, auditor, and fault configuration.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fork_storage(&self) -> Runner {
+        Runner {
+            state: State::Config(
+                Config::default(),
+                MemStorage::from_snapshot(self.storage.clone()),
+            ),
+        }
+    }
 }
 
 enum State {
-    Config(Config),
+    Config(Config, MemStorage),
     Checkpoint(Checkpoint),
 }
 
@@ -507,7 +519,7 @@ impl Runner {
         // Ensure config is valid
         cfg.assert();
         Self {
-            state: State::Config(cfg),
+            state: State::Config(cfg, MemStorage::new()),
         }
     }
 
@@ -536,7 +548,7 @@ impl Runner {
     {
         // Setup context and return strong reference to executor
         let (context, executor, panicked) = match self.state {
-            State::Config(config) => Context::new(config),
+            State::Config(config, storage) => Context::new(config, storage),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
@@ -927,7 +939,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
+    fn new(cfg: Config, storage: MemStorage) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -944,7 +956,7 @@ impl Context {
         let rng = Arc::new(Mutex::new(cfg.rng));
 
         let storage = build_storage(
-            MemStorage::new(),
+            storage,
             rng.clone(),
             cfg.storage_fault_cfg,
             auditor.clone(),
@@ -2316,6 +2328,25 @@ mod tests {
                 .unwrap();
             assert_eq!(read.coalesce(), data);
         });
+    }
+
+    #[test]
+    fn test_fork_storage_isolated() {
+        let (_, checkpoint) = Runner::default().start_and_recover(|context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"seed", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+        });
+
+        // Removing the blob in one fork leaves the original contents available to the next.
+        for _ in 0..2 {
+            checkpoint.fork_storage().start(|context| async move {
+                assert_eq!(context.logical_blob("partition", b"blob").unwrap(), b"seed");
+                context.remove("partition", Some(b"blob")).await.unwrap();
+            });
+        }
     }
 
     #[test]
