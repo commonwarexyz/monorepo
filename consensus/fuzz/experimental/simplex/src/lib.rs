@@ -2229,8 +2229,8 @@ impl FuzzMode for Byzzfuzz {
 /// bounded by a whole-episode CONTAINER (distinct-finalization) budget.
 ///
 /// Each episode selects one adversary environment for the faultable identity
-/// (node 0): honest, or one of six Byzantine profiles (Disrupter, Conflicter,
-/// Nuller, Equivocator, Impersonator, Outdated). It then drives a reactive loop of
+/// (node 0): honest, or one of seven Byzantine profiles (Disrupter, Conflicter,
+/// Nuller, Equivocator, Impersonator, Outdated, NullifyOnly). It then drives a reactive loop of
 /// observe-orient-decide-act steps. Each step observes the honest happens-before
 /// fingerprint (the Q-state) and protocol-state descriptor, then decodes the step's
 /// fault from the input's action byte against a legal mask over the stable catalog
@@ -3252,6 +3252,7 @@ mod tests {
                 AdversaryRole::Equivocator,
                 AdversaryRole::Impersonator,
                 AdversaryRole::Outdated,
+                AdversaryRole::NullifyOnly,
             ] {
                 assert_acted(role.actor(), || {
                     fuzz::<SimplexCertificateMock, MalloryContainer, CodeCoverage>(mallory_input(

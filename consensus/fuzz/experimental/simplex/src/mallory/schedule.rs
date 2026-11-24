@@ -9,7 +9,7 @@
 //! Layout of `FuzzInput::raw_bytes` for a Mallory episode:
 //!
 //! ```text
-//! raw_bytes[0]                     role byte:    AdversaryRole::from_index(b % COUNT)
+//! raw_bytes[0]                     role byte:    Schedule::role
 //! raw_bytes[1 ..= SCHEDULE_STEPS]  action bytes: step k enacts legal_ids[b_k % legal_ids.len()]
 //! raw_bytes[SCHEDULE_LEN ..]       runtime entropy: the deterministic runtime's FuzzRng seed
 //! ```
@@ -28,12 +28,17 @@ use commonware_consensus_fuzz_core::MAX_REQUIRED_CONTAINERS;
 pub(crate) const SCHEDULE_STEPS: usize = MAX_REQUIRED_CONTAINERS as usize;
 /// Length of the schedule prefix: the role byte plus the action bytes.
 pub(crate) const SCHEDULE_LEN: usize = 1 + SCHEDULE_STEPS;
+/// Modulus for role bytes at or past [`AdversaryRole::COUNT`]: the role count the
+/// stored corpora were written with, so those bytes keep their meaning and each
+/// newer role takes only the byte equal to its index.
+const BASE_ROLE_COUNT: usize = 7;
 
 const _: () = assert!(N_FAULTS <= 256, "an action byte must index every fault");
 const _: () = assert!(
     AdversaryRole::COUNT <= 256,
     "a role byte must index every role"
 );
+const _: () = assert!(BASE_ROLE_COUNT <= AdversaryRole::COUNT);
 
 /// The decoded schedule prefix of one input, zero-padded to [`SCHEDULE_LEN`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,9 +56,16 @@ impl Schedule {
         (Self { bytes }, &raw[n..])
     }
 
-    /// The episode role the role byte selects.
+    /// The episode role the role byte selects: a byte below
+    /// [`AdversaryRole::COUNT`] is the role's index, a larger byte is taken modulo
+    /// [`BASE_ROLE_COUNT`].
     pub(crate) fn role(&self) -> AdversaryRole {
-        AdversaryRole::from_index(usize::from(self.bytes[0]) % AdversaryRole::COUNT)
+        let byte = usize::from(self.bytes[0]);
+        if byte < AdversaryRole::COUNT {
+            AdversaryRole::from_index(byte)
+        } else {
+            AdversaryRole::from_index(byte % BASE_ROLE_COUNT)
+        }
     }
 
     /// The raw action byte of `step`, decoded against the step's legal mask by
@@ -116,6 +128,19 @@ mod tests {
         let (long, tail) = Schedule::split(&raw);
         assert_eq!(tail, &raw[SCHEDULE_LEN..]);
         assert_eq!(long.action_byte(SCHEDULE_STEPS - 1), SCHEDULE_LEN as u8 - 1);
+    }
+
+    #[test]
+    fn role_bytes_keep_their_meaning_except_the_nullify_only_byte() {
+        for byte in 0..=u8::MAX {
+            let (schedule, _) = Schedule::split(&[byte]);
+            let expected = if byte == 7 {
+                AdversaryRole::NullifyOnly
+            } else {
+                AdversaryRole::from_index(usize::from(byte) % 7)
+            };
+            assert_eq!(schedule.role(), expected, "role byte {byte}");
+        }
     }
 
     #[test]

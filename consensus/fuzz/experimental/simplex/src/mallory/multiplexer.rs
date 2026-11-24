@@ -26,7 +26,7 @@
 //!
 //! # Scope
 //!
-//! The multiplexer only ever hosts the six Byzantine profiles; `BYZANTINE_IDX` stays
+//! The multiplexer only ever hosts the seven Byzantine profiles; `BYZANTINE_IDX` stays
 //! Byzantine throughout the episode, so the oracle treatment is unchanged
 //! (`ambiguous = [0]`, safety excludes `BYZANTINE_IDX`). An Honest<->Byzantine mid-episode
 //! transition is out of scope (it would need an amnesia-style oracle flip).

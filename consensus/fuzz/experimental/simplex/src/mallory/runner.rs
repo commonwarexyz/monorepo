@@ -818,7 +818,7 @@ fn run_inner<P: Simplex>(
         // another Byzantine profile. It keys the role region of the Q-state every step
         // (`env_tag(current_role, ..)`), so a switch connects the role regions of the
         // MDP. `byz`, `ambiguous`, and the role bandit's credit stay pinned to the
-        // INITIAL `role` (all six profiles are Byzantine, so `byz` never changes, and
+        // INITIAL `role` (all seven profiles are Byzantine, so `byz` never changes, and
         // the bandit is credited for the role the input's role byte fixed).
         let mut current_role = role;
         // The byzantine node cannot send messages under another node's identity, so its messages are
@@ -1754,6 +1754,7 @@ mod tests {
             adversary::AdversaryRole::Equivocator,
             adversary::AdversaryRole::Impersonator,
             adversary::AdversaryRole::Outdated,
+            adversary::AdversaryRole::NullifyOnly,
         ] {
             assert_ne!(
                 amnesiac,
@@ -1965,7 +1966,7 @@ mod tests {
 
     /// Acceptance criterion 3 (structural): the role is a MUTABLE Q-state component.
     /// The runner folds `env_tag(current_role, ..)` into every Q-state / novelty
-    /// fingerprint, and each of the six Byzantine roles has a distinct tag, so a
+    /// fingerprint, and each of the seven Byzantine roles has a distinct tag, so a
     /// SwapByzantineRole swap changes the role component of the key, the post-switch steps key
     /// a distinct role region of the MDP.
     #[test]
@@ -1977,6 +1978,7 @@ mod tests {
             adversary::AdversaryRole::Equivocator,
             adversary::AdversaryRole::Impersonator,
             adversary::AdversaryRole::Outdated,
+            adversary::AdversaryRole::NullifyOnly,
         ];
         for (i, a) in byz.iter().enumerate() {
             for b in &byz[i + 1..] {

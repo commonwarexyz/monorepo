@@ -11,7 +11,7 @@
 //! no [`ManagedValidator`](commonware_consensus_fuzz_core::ManagedValidator). The other three nodes stay
 //! honest and form the N4F0C4 quorum of three.
 //!
-//! Six profiles, each an existing mock:
+//! Seven profiles, each an existing mock:
 //!
 //! - [`AdversaryRole::Disrupter`]: a full byzantine engine ([`commonware_consensus_fuzz_core::disrupter`])
 //!   that emits on ALL THREE consensus channels (vote, certificate, resolver).
@@ -26,18 +26,23 @@
 //!   signer index on the VOTE channel only (`impersonator`).
 //! - [`AdversaryRole::Outdated`]: re-notarizes/finalizes a stale (earlier-view)
 //!   proposal on the VOTE channel only (`outdated`).
+//! - [`AdversaryRole::NullifyOnly`]: answers every notarize it receives with a
+//!   nullify for that round and never finalizes, on the VOTE channel only
+//!   (`nullify_only`).
 //!
 //! # Single-owner rule
 //!
 //! Each channel mailbox is single-consumer, so exactly one owner is spawned at
 //! `BYZANTINE_IDX`. The Disrupter consumes all three channels; the Equivocator consumes the
 //! vote and certificate channels (dropping resolver); the Conflicter, Nuller,
-//! Impersonator, and Outdated consume only the vote channel and explicitly drop the
+//! Impersonator, Outdated, and NullifyOnly consume only the vote channel and explicitly drop the
 //! certificate and resolver channels (freeing those receivers rather than leaving a
 //! second owner).
 
 use commonware_consensus::{
-    simplex::mocks::{conflicter, equivocator, impersonator, nuller, outdated, relay},
+    simplex::mocks::{
+        conflicter, equivocator, impersonator, nuller, nullify_only, outdated, relay,
+    },
     types::{Epoch, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
@@ -81,42 +86,47 @@ pub(crate) enum AdversaryRole {
     /// `BYZANTINE_IDX` is an outdated adversary re-notarizing/finalizing a stale proposal on
     /// the vote channel.
     Outdated,
+    /// `BYZANTINE_IDX` answers every notarize with a nullify for that round and never
+    /// finalizes, on the vote channel.
+    NullifyOnly,
 }
 
 impl AdversaryRole {
     /// The number of distinct roles: the [`RoleBandit`] arm count and the width of
     /// every per-role array. Matches the stable [`index`](Self::index) /
     /// [`from_index`](Self::from_index) / [`sample`](Self::sample) order.
-    pub(crate) const COUNT: usize = 7;
+    pub(crate) const COUNT: usize = 8;
 
     /// Uniformly sample a role from the runtime RNG. Drawn once at setup, before the
     /// per-node loop, so the whole episode runs under one fixed environment.
     pub(crate) fn sample(rng: &mut impl Rng) -> Self {
-        match rng.random_range(0..7u8) {
+        match rng.random_range(0..8u8) {
             0 => AdversaryRole::Honest,
             1 => AdversaryRole::Disrupter,
             2 => AdversaryRole::Conflicter,
             3 => AdversaryRole::Nuller,
             4 => AdversaryRole::Equivocator,
             5 => AdversaryRole::Impersonator,
-            _ => AdversaryRole::Outdated,
+            6 => AdversaryRole::Outdated,
+            _ => AdversaryRole::NullifyOnly,
         }
     }
 
     /// Uniformly sample a BYZANTINE role from the runtime RNG, never
     /// [`Honest`](Self::Honest). The target of a per-step
     /// [`SwapByzantineRole`](super::fault::Fault::SwapByzantineRole) role switch: the multiplexer
-    /// only ever hosts one of the six Byzantine profiles, so an
+    /// only ever hosts one of the seven Byzantine profiles, so an
     /// Honest<->Byzantine transition (which would need an oracle flip) is out of
     /// scope. Drawn from the runtime RNG so a replay reproduces the target.
     pub(crate) fn sample_byzantine(rng: &mut impl Rng) -> Self {
-        match rng.random_range(0..6u8) {
+        match rng.random_range(0..7u8) {
             0 => AdversaryRole::Disrupter,
             1 => AdversaryRole::Conflicter,
             2 => AdversaryRole::Nuller,
             3 => AdversaryRole::Equivocator,
             4 => AdversaryRole::Impersonator,
-            _ => AdversaryRole::Outdated,
+            5 => AdversaryRole::Outdated,
+            _ => AdversaryRole::NullifyOnly,
         }
     }
 
@@ -132,6 +142,7 @@ impl AdversaryRole {
             AdversaryRole::Equivocator => 4,
             AdversaryRole::Impersonator => 5,
             AdversaryRole::Outdated => 6,
+            AdversaryRole::NullifyOnly => 7,
         }
     }
 
@@ -146,6 +157,7 @@ impl AdversaryRole {
             4 => AdversaryRole::Equivocator,
             5 => AdversaryRole::Impersonator,
             6 => AdversaryRole::Outdated,
+            7 => AdversaryRole::NullifyOnly,
             _ => panic!("role index out of range: {i}"),
         }
     }
@@ -163,6 +175,7 @@ impl AdversaryRole {
             AdversaryRole::Equivocator => 0x2545_f491_4f6c_dd1d,
             AdversaryRole::Impersonator => 0xff51_afd7_ed55_8ccd,
             AdversaryRole::Outdated => 0xc4ce_b9fe_1a85_ec53,
+            AdversaryRole::NullifyOnly => 0x94d0_49bb_1331_11eb,
         }
     }
 
@@ -191,6 +204,7 @@ impl AdversaryRole {
             AdversaryRole::Equivocator => "equivocator",
             AdversaryRole::Impersonator => "impersonator",
             AdversaryRole::Outdated => "outdated",
+            AdversaryRole::NullifyOnly => "nullify_only",
         }
     }
 }
@@ -321,7 +335,7 @@ pub(crate) fn reset_role_bandit() {
 ///
 /// Single-owner: the Disrupter takes all three channels; the Equivocator takes the
 /// vote and certificate channels (dropping resolver); the Conflicter, Nuller,
-/// Impersonator, and Outdated take only the vote channel and explicitly drop the
+/// Impersonator, Outdated, and NullifyOnly take only the vote channel and explicitly drop the
 /// certificate and resolver channels.
 ///
 /// `relay` and `elector` are used only by the [`AdversaryRole::Equivocator`], which
@@ -437,6 +451,15 @@ pub(crate) fn spawn_adversary<P: Simplex>(
             );
             actor.start((Counting::new(vote_sender, role.actor()), vote_receiver))
         }
+        AdversaryRole::NullifyOnly => {
+            drop((certificate_sender, certificate_receiver));
+            drop(resolver_network);
+            let actor = nullify_only::NullifyOnly::<_, P::Scheme, Sha256>::new(
+                context.child("adversary_nullify_only"),
+                nullify_only::Config { scheme },
+            );
+            actor.start((Counting::new(vote_sender, role.actor()), vote_receiver))
+        }
     }
 }
 
@@ -446,7 +469,7 @@ mod tests {
     use commonware_utils::FuzzRng;
 
     /// Every role, in a stable order, for exhaustive test coverage.
-    const ALL_ROLES: [AdversaryRole; 7] = [
+    const ALL_ROLES: [AdversaryRole; 8] = [
         AdversaryRole::Honest,
         AdversaryRole::Disrupter,
         AdversaryRole::Conflicter,
@@ -454,16 +477,17 @@ mod tests {
         AdversaryRole::Equivocator,
         AdversaryRole::Impersonator,
         AdversaryRole::Outdated,
+        AdversaryRole::NullifyOnly,
     ];
 
     #[test]
     fn sample_is_deterministic_and_covers_every_role() {
         // Same seed reproduces the same role sequence (replay determinism) and the
-        // uniform draw reaches all seven roles over a modest number of samples.
+        // uniform draw reaches all eight roles over a modest number of samples.
         let seed = vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15];
         let mut a = FuzzRng::new(seed.clone());
         let mut b = FuzzRng::new(seed);
-        let mut seen = [false; 7];
+        let mut seen = [false; 8];
         for _ in 0..256 {
             let role = AdversaryRole::sample(&mut a);
             assert_eq!(
@@ -482,12 +506,12 @@ mod tests {
 
     #[test]
     fn sample_byzantine_is_deterministic_and_never_honest() {
-        // The SwapByzantineRole target sampler covers all six Byzantine roles, never Honest,
+        // The SwapByzantineRole target sampler covers all seven Byzantine roles, never Honest,
         // and a fixed seed reproduces the sequence (replay determinism).
         let seed = vec![0x24, 0x8b, 0xf1, 0x0e, 0x77, 0x35, 0xac, 0x51];
         let mut a = FuzzRng::new(seed.clone());
         let mut b = FuzzRng::new(seed);
-        let mut seen = [false; 6];
+        let mut seen = [false; 7];
         for _ in 0..256 {
             let role = AdversaryRole::sample_byzantine(&mut a);
             assert_eq!(
@@ -499,7 +523,7 @@ mod tests {
                 role.is_byzantine(),
                 "sample_byzantine must never yield Honest"
             );
-            // index 1..=6 are the byzantine roles; map to a 0..6 slot.
+            // index 1..=7 are the byzantine roles; map to a 0..7 slot.
             seen[role.index() - 1] = true;
         }
         assert!(
@@ -528,6 +552,7 @@ mod tests {
         assert_eq!(AdversaryRole::Equivocator.label(), "equivocator");
         assert_eq!(AdversaryRole::Impersonator.label(), "impersonator");
         assert_eq!(AdversaryRole::Outdated.label(), "outdated");
+        assert_eq!(AdversaryRole::NullifyOnly.label(), "nullify_only");
         // Distinct across all roles (a shared label would confuse the decision log).
         let mut labels: Vec<&str> = ALL_ROLES.iter().map(|r| r.label()).collect();
         labels.sort_unstable();

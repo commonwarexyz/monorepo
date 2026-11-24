@@ -141,7 +141,7 @@ pub(crate) enum Fault {
     /// Byzantine amnesia. Counts as BYZANTINE: the node runs but is excluded from the
     /// honest safety and liveness sets for the rest of the episode. Not terminal.
     AmnesiaRestart,
-    /// Swap `BYZANTINE_IDX`'s active Byzantine profile mid-episode to another of the six
+    /// Swap `BYZANTINE_IDX`'s active Byzantine profile mid-episode to another of the seven
     /// Byzantine roles (see [`AdversaryRole`]). Legal ONLY in a byzantine episode
     /// (`BYZANTINE_IDX` is the adversary multiplexer) and only until the per-episode switch
     /// cap ([`MALLORY_MAX_ROLE_SWITCHES`]) is reached. Persists (not a heal-able
@@ -400,7 +400,7 @@ impl Fault {
             Fault::CrashStop => FaultPlan::CrashStop,
             Fault::CrashRestartDurable => FaultPlan::CrashRestartDurable,
             Fault::AmnesiaRestart => FaultPlan::AmnesiaRestart,
-            // The role switch draws one target uniformly among the six Byzantine
+            // The role switch draws one target uniformly among the seven Byzantine
             // roles (never Honest) from the runtime RNG, so the multiplexer applies a
             // deterministic swap on replay.
             Fault::SwapByzantineRole => {
@@ -732,7 +732,7 @@ mod tests {
     fn swap_byzantine_role_samples_a_byzantine_target() {
         // SwapByzantineRole samples a FaultPlan::SwapByzantineRole whose target is always a Byzantine
         // role (never Honest); it is not a heal-able transient fault; and over many
-        // draws it reaches every one of the six Byzantine profiles.
+        // draws it reaches every one of the seven Byzantine profiles.
         let mut rng = FuzzRng::new(vec![0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15]);
         let mut seen_disrupter = false;
         let mut seen_other = false;
