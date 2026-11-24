@@ -670,10 +670,17 @@ mod tests {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
             let peers = MockPeers::new();
-            let mut limited = LimitedSender::new(sender, quota_per_second(10), context, peers);
+            let mut limited =
+                LimitedSender::new(sender.clone(), quota_per_second(10), context, peers);
 
-            // Empty recipients should pass through
-            limited.check(Recipients::Some(Vec::new())).unwrap();
+            // Empty recipients pass through and are submitted as an empty set
+            let checked = limited.check(Recipients::Some(Vec::new())).unwrap();
+            assert!(checked.recipients().is_empty());
+            let receipt = checked.send_with_receipt(IoBuf::from(b"empty"), false);
+            assert_eq!(receipt.feedback(), Unreliable::new(Feedback::Ok));
+            assert!(receipt.recipients().is_empty());
+            assert_eq!(sender.sent_messages().len(), 1);
+            assert_sent_to(&sender, 0, &[]);
         });
     }
 
@@ -843,28 +850,30 @@ mod tests {
                 LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
             let peer1 = key(1);
             let peer2 = key(2);
+            let both = Recipients::Some(vec![peer1.clone(), peer2.clone()]);
 
             for feedback in [Unreliable::Rejected, Unreliable::new(Feedback::Closed)] {
                 sender.set_feedback(feedback);
-                let checked = limited.check(Recipients::One(peer1.clone())).unwrap();
-                assert_eq!(checked.send(IoBuf::from(b"dropped"), false), feedback);
-                let checked = limited
-                    .check(Recipients::Some(vec![peer1.clone(), peer2.clone()]))
-                    .unwrap();
-                assert_eq!(checked.send(IoBuf::from(b"dropped"), false), feedback);
+                for recipients in [Recipients::One(peer1.clone()), both.clone()] {
+                    let receipt = limited
+                        .check(recipients)
+                        .unwrap()
+                        .send_with_receipt(IoBuf::from(b"dropped"), false);
+                    assert_eq!(receipt.feedback(), feedback);
+                    assert!(receipt.recipients().is_empty());
+                }
             }
 
-            // Both peers still have their full quota, and accepted overflow is charged
+            // Every peer still has its full quota, and accepted overflow is charged
             sender.set_feedback(Unreliable::new(Feedback::Backoff));
-            let checked = limited
-                .check(Recipients::Some(vec![peer1.clone(), peer2.clone()]))
-                .unwrap();
-            assert_eq!(
-                checked.send(IoBuf::from(b"sent"), false),
-                Unreliable::new(Feedback::Backoff)
-            );
-            assert_sent_to(&sender, 0, &[peer1.clone(), peer2.clone()]);
-            assert!(limited.check(Recipients::Some(vec![peer1, peer2])).is_err());
+            let receipt = limited
+                .check(both.clone())
+                .unwrap()
+                .send_with_receipt(IoBuf::from(b"sent"), false);
+            assert_eq!(receipt.feedback(), Unreliable::new(Feedback::Backoff));
+            assert_eq!(receipt.recipients(), [peer1.clone(), peer2.clone()]);
+            assert_sent_to(&sender, 0, &[peer1, peer2]);
+            assert!(limited.check(both).is_err());
         });
     }
 
@@ -955,35 +964,6 @@ mod tests {
             assert_eq!(receipt.feedback(), Unreliable::Rejected);
             assert!(receipt.recipients().is_empty());
             assert_eq!(sender.sent_messages().len(), 1);
-        });
-    }
-
-    #[test]
-    fn unaccepted_send_receipt_has_no_recipients() {
-        Runner::default().start(|context| async move {
-            let sender = MockSender::new();
-            let peers = MockPeers::new();
-            let mut limited =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
-            let peer = key(1);
-
-            for feedback in [Unreliable::Rejected, Unreliable::new(Feedback::Closed)] {
-                sender.set_feedback(feedback);
-                let receipt = limited
-                    .check(Recipients::One(peer.clone()))
-                    .unwrap()
-                    .send_with_receipt(IoBuf::from(b"hello"), false);
-                assert_eq!(receipt.feedback(), feedback);
-                assert!(receipt.recipients().is_empty());
-            }
-
-            // Nothing was charged
-            sender.set_feedback(Unreliable::new(Feedback::Ok));
-            let receipt = limited
-                .check(Recipients::One(peer.clone()))
-                .unwrap()
-                .send_with_receipt(IoBuf::from(b"hello"), false);
-            assert_eq!(receipt.into_recipients(), vec![peer]);
         });
     }
 
