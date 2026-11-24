@@ -24,9 +24,8 @@ use std::{
 };
 use tracing::debug;
 
-/// Wait after a scan that found eligible peers but submitted nothing and received no rate-limit
-/// deadline, used only when the configured retry delay is zero. Without it, a sender that keeps
-/// rejecting or closing would be polled continuously, because rejected submissions spend no quota.
+/// Retry delay for a failed submission when the configured delay is zero. Without it, a sender
+/// that keeps rejecting or closing would be polled continuously because rejections spend no quota.
 const ZERO_DELAY_FALLBACK: Duration = Duration::from_millis(1);
 
 /// When a fetcher with pending keys may next scan for peers.
@@ -403,7 +402,6 @@ where
         // or failed submission, the queue waits for an external change.
         let now = self.context.current();
         let mut next_deadline = SystemTime::limit();
-        let mut earliest_rate_limit: Option<SystemTime> = None;
         let mut failed_submission = false;
 
         // Detach the queue to leave skipped entries untouched and remove only the sent key.
@@ -437,8 +435,7 @@ where
                     Ok(checked) => checked,
                     Err(not_until) => {
                         // Peer is rate-limited, track earliest retry time
-                        earliest_rate_limit =
-                            Some(earliest_rate_limit.map_or(not_until, |t| t.min(not_until)));
+                        next_deadline = next_deadline.min(not_until);
                         continue;
                     }
                 };
@@ -484,9 +481,6 @@ where
         }
 
         // Keep future keys reachable even when every due key is unavailable.
-        if let Some(rate_limit_time) = earliest_rate_limit {
-            next_deadline = next_deadline.min(rate_limit_time);
-        }
         if failed_submission {
             let delay = if self.retry_delay.is_zero() {
                 ZERO_DELAY_FALLBACK
