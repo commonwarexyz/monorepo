@@ -857,9 +857,9 @@ where
     /// Caches `batch` as the state of `anchor`, discards cached state that does not descend from
     /// it, and makes `anchor` the branch anchor.
     ///
-    /// The caller must have let every request outside this branch finish, and must keep the root
-    /// cached until its finalization completes so retained requests can fork from it while the
-    /// databases change.
+    /// Requests outside this branch may still be running. They go stale at their next batch read
+    /// or cache attempt. The caller must keep the root cached until its finalization completes
+    /// so requests on this branch can fork from it while the databases change.
     fn retain_branch(
         &self,
         anchor: Anchor<BlockDigest<A, E>>,
@@ -921,9 +921,9 @@ where
     ///
     /// An existing entry keeps its state. A new entry is cached only if it is at a later round
     /// than the branch anchor and its parent is the anchor or another cached block, and caching
-    /// it updates the pending-state gauge. Returns [`PrepareBatchesError::Invalid`] for a round
-    /// at or before the anchor's, which no descendant of the anchor can have, and
-    /// [`PrepareBatchesError::Stale`] for a parent that a finalization discarded.
+    /// it updates the pending-state gauge. The anchor itself counts as cached. Returns
+    /// [`PrepareBatchesError::Stale`] if a finalization overtook the entry while it processed:
+    /// its round is at or before the anchor's, or its parent was discarded.
     ///
     /// Panics if `digest` is already cached with a different parent or round.
     fn cache_pending(
@@ -938,8 +938,11 @@ where
             assert_eq!(existing.round, round, "pending round changed for digest");
             return Ok(());
         }
+        if digest == state.branch.digest {
+            return Ok(());
+        }
         if round <= state.branch.round {
-            return Err(PrepareBatchesError::Invalid);
+            return Err(PrepareBatchesError::Stale);
         }
         if parent != state.branch.digest && !state.pending.contains_key(&parent) {
             return Err(PrepareBatchesError::Stale);
@@ -1006,8 +1009,9 @@ where
     ///
     /// Forks from `parent`'s cached state, or from the applied databases if `parent` is the branch
     /// anchor. During finalization the new branch anchor is still cached, so forks use its cached
-    /// state until its `finalized` hook completes. Returns [`PrepareBatchesError::Invalid`] if
-    /// `parent` is neither cached nor the branch anchor.
+    /// state until its `finalized` hook completes. Returns [`PrepareBatchesError::Stale`] if
+    /// `parent` is neither cached nor the branch anchor, since only a finalization discards
+    /// cached state.
     ///
     /// A finalization moves the branch anchor before it applies, so a fork from the applied
     /// databases checks the anchor again once its batches exist. If it moved, the batches may
@@ -1022,7 +1026,7 @@ where
                 return Ok(A::Databases::fork_batches(&entry.merkleized));
             }
             if state.branch.digest != *parent {
-                return Err(PrepareBatchesError::Invalid);
+                return Err(PrepareBatchesError::Stale);
             }
         }
 
@@ -1036,11 +1040,11 @@ where
     /// Processes the first block of `ancestry` on its parent's state as a candidate and caches the
     /// result.
     ///
-    /// Returns [`PrepareBatchesError::Invalid`] if the block's round is not after the branch
-    /// anchor's, if the parent's state cannot be forked, if the application rejects the block, or
-    /// if the result does not match the block's commitments. Returns
-    /// [`PrepareBatchesError::Stale`] if a finalization made the parent's state stale while the
-    /// block processed, including when the result can no longer be cached.
+    /// Returns immediately if the block is the branch anchor. Returns
+    /// [`PrepareBatchesError::Invalid`] if the block is above the anchor's height with a round
+    /// not after the anchor's, if the application rejects the block, or if the result does not
+    /// match the block's commitments. Returns [`PrepareBatchesError::Stale`] if a finalization
+    /// overtook the block or its parent, before or while it processed.
     async fn process_candidate(
         &self,
         mut app: A,
@@ -1050,13 +1054,23 @@ where
         let block = ancestry
             .peek()
             .expect("candidate ancestry must start with its block");
-        let (digest, parent_digest) = (block.digest(), block.parent());
+        let (digest, parent_digest, height) = (block.digest(), block.parent(), block.height());
         let consensus_context = block.context();
         let round = consensus_context.round();
         let sync_targets = A::sync_targets(block.inner());
 
-        // No descendant of the branch anchor has a round at or before the anchor's.
-        if round <= self.branch_anchor().round {
+        // A finalization may have overtaken the block since the request chose it. The anchor
+        // itself is valid. Any other block at or below the anchor's height is answered from the
+        // canonical chain once the request acquires again. Above it, no descendant of the anchor
+        // has a round at or before the anchor's.
+        let anchor = self.branch_anchor();
+        if digest == anchor.digest {
+            return Ok(());
+        }
+        if height <= anchor.height {
+            return Err(PrepareBatchesError::Stale);
+        }
+        if round <= anchor.round {
             return Err(PrepareBatchesError::Invalid);
         }
         let batches = self.fork_batches(&parent_digest).await?;
@@ -2639,6 +2653,42 @@ mod tests {
         });
     }
 
+    /// A flight for a block created while that block's finalization reconstructs it, and first
+    /// polled after the block became the anchor, succeeds without processing the block again.
+    #[test]
+    fn flight_for_block_finalized_before_its_first_poll_succeeds() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            harness.provider.insert(block.clone());
+
+            // The gate holds the finalization's reconstruction of the block.
+            let (gate, started, release) = apply_gate();
+            let probe = ApplicationProbe::new(block.digest(), [gate]);
+            harness.processor.app.process_probe = Some(probe.clone());
+            let execution = harness.processor.execution.clone();
+            let app = harness.processor.app.clone();
+            let flight_context = harness.context_cell.as_present().child("flight");
+            let mut finalize = Box::pin(harness.finalize(block.clone()));
+            assert!(futures::poll!(&mut finalize).is_pending());
+            started.await.unwrap();
+
+            // A request joins the block while it reconstructs, and the finalization completes
+            // before the request's flight is first polled.
+            let flight = join_flight(
+                &execution,
+                &app,
+                &flight_context,
+                marshal_ancestry::from_iter([digested(block.clone())]),
+            );
+            release.send(()).unwrap();
+            assert!(finalize.await);
+            assert_eq!(flight.await, Ok(()));
+            assert_eq!(probe.calls(), 1);
+        });
+    }
+
     #[test]
     fn execution_rejects_late_losing_fork_publication() {
         deterministic::Runner::default().start(|context| async move {
@@ -2819,13 +2869,15 @@ mod tests {
         );
     }
 
+    /// A parent that is neither cached nor the anchor can only have been discarded by a
+    /// finalization, so a fork from it is stale and its request acquires again.
     #[test]
-    fn execution_fork_batches_rejects_unknown_parent() {
+    fn execution_fork_batches_reports_unknown_parent_as_stale() {
         deterministic::Runner::default().start(|context| async move {
             let harness = Harness::new(context).await;
             assert!(matches!(
                 harness.processor.fork_batches(&u64_to_digest(999)).await,
-                Err(PrepareBatchesError::Invalid),
+                Err(PrepareBatchesError::Stale),
             ));
         });
     }
