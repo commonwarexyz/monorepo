@@ -2541,7 +2541,9 @@ version = "2026.11.0"
 dependencies = [
  "arbitrary",
  "commonware-parallel",
+ "commonware-utils",
  "libfuzzer-sys",
+ "rand_core 0.10.1",
 ]
 
 [[package]]

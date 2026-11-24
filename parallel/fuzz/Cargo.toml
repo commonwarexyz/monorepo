@@ -14,12 +14,21 @@ unused_dependencies = "allow"
 
 [dependencies]
 arbitrary.workspace = true
-commonware-parallel = { workspace = true, features = ["fuzz"] }
+commonware-parallel = { workspace = true, features = ["fuzz", "test-utils"] }
+commonware-utils = { workspace = true, features = ["arbitrary", "std"] }
 libfuzzer-sys.workspace = true
+rand_core.workspace = true
 
 [[bin]]
 name = "parallel"
 path = "fuzz_targets/parallel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parallel_sort"
+path = "fuzz_targets/parallel_sort.rs"
 test = false
 doc = false
 bench = false
