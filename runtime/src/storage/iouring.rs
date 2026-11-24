@@ -26,13 +26,12 @@
 //! A nonempty [crate::WriteOptions::SYNC] write issues plain writes until all of its bytes are
 //! written, then one data sync of the whole file. A failure of either phase poisons the open, since
 //! either may have consumed the kernel's writeback error. A filesystem syncs within a write on a
-//! synchronous inode or mount, and a network filesystem can check for the error there, so a failed
-//! write may be the only report of lost data. A failed write reports the kernel's error as
-//! [crate::Error::Io], or [crate::Error::WriteFailed] when the kernel gave none, and a failed sync
-//! reports [crate::Error::BlobSyncFailed]. Later durability requests and opens report the retained
-//! kernel error of either phase as [crate::Error::BlobSyncFailed]. The sync also makes the writes
-//! completed before the request durable and the open credits them, but callers must not rely on
-//! that coverage, since `SYNC` is not a barrier for earlier writes.
+//! synchronous file or mount, so a failed write may be the only report of lost data. A failed write
+//! reports the kernel's error as [crate::Error::Io], or [crate::Error::WriteFailed] when the kernel
+//! gave none, and a failed sync reports [crate::Error::BlobSyncFailed]. Later durability requests
+//! and opens report the retained kernel error of either phase as [crate::Error::BlobSyncFailed].
+//! The sync also makes the writes completed before the request durable and the open credits them,
+//! but callers must not rely on that coverage, since `SYNC` is not a barrier for earlier writes.
 //!
 //! ## Uncached Reads
 //!
@@ -388,14 +387,16 @@ impl Shared {
         Ok(dirty)
     }
 
-    /// Name a durability failure's kernel error [Error::BlobSyncFailed], as a failed data sync
-    /// reports it and as the open retains it.
-    pub(crate) fn sync_error(&self, error: Error) -> Error {
+    /// Retain a durability failure, naming its kernel error [Error::BlobSyncFailed], and return
+    /// the retained error.
+    pub(crate) fn sync_failed(&self, error: &Error) -> Error {
         let (partition, name) = &self.key;
-        match error {
-            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error),
-            error => error,
-        }
+        let error = match error {
+            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error.clone()),
+            error => error.clone(),
+        };
+        self.tracker.poison(&error);
+        error
     }
 
     /// Establish a settled predecessor's debt through this open's file.

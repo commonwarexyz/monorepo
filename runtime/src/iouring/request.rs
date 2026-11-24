@@ -327,29 +327,25 @@ impl Request {
                         Ok(())
                     }
                     (WriteAtState::Writing, Err(error)) => Err(error),
-
                     // The data sync also covers the mutations completed before the request.
                     // Credit them before the durability permit is released.
                     (WriteAtState::Syncing, Ok(())) => r.file.tracker.end_sync(r.seen),
                     (WriteAtState::WritingBeforeSync, Ok(())) => {
                         unreachable!("durable write finished before its data sync")
                     }
-
                     // A durable write covers itself, so a failure records a mutation. Either
                     // phase may have consumed the kernel's writeback error: the data sync, and
-                    // also a write when the filesystem syncs within it, as on a synchronous
-                    // inode or mount, or checks for the error there, as a network filesystem
-                    // can. The open retains either phase's error as `BlobSyncFailed`, and the
-                    // caller of a failed write gets the kernel's error as is.
-                    (state, Err(error)) => {
+                    // also a write when the filesystem syncs within it, as on a synchronous file
+                    // or mount. The open retains either failure, and the caller of a failed
+                    // write gets the kernel's error as is.
+                    (WriteAtState::WritingBeforeSync, Err(error)) => {
                         r.file.tracker.write();
-                        let retained = r.file.sync_error(error.clone());
-                        r.file.tracker.poison(&retained);
-                        if *state == WriteAtState::Syncing {
-                            Err(retained)
-                        } else {
-                            Err(error)
-                        }
+                        r.file.sync_failed(&error);
+                        Err(error)
+                    }
+                    (WriteAtState::Syncing, Err(error)) => {
+                        r.file.tracker.write();
+                        Err(r.file.sync_failed(&error))
                     }
                 };
                 (
@@ -363,11 +359,7 @@ impl Request {
             Self::Sync(r) => {
                 let result = match result {
                     Ok(()) => r.file.tracker.end_sync(r.seen),
-                    Err(error) => {
-                        let error = r.file.sync_error(error);
-                        r.file.tracker.poison(&error);
-                        Err(error)
-                    }
+                    Err(error) => Err(r.file.sync_failed(&error)),
                 };
                 (
                     RequestOutput::Sync(result),
