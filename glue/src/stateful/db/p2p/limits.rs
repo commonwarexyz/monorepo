@@ -23,7 +23,8 @@ use std::num::NonZeroU64;
 ///
 /// # Panics
 ///
-/// Panics if `max_serve_ops` exceeds `u32::MAX`.
+/// Panics if `max_serve_ops` exceeds `u32::MAX`, or if the largest response exceeds
+/// `u32::MAX` bytes.
 pub fn max_payload_size<F: Family, D: Digest>(
     max_serve_ops: NonZeroU64,
     max_operation_size: usize,
@@ -126,5 +127,11 @@ mod tests {
     #[should_panic(expected = "operations per request must fit in u32")]
     fn too_many_operations() {
         max_payload_size::<mmr::Family, sha256::Digest>(NZU64!(1 << 32), Op::SIZE);
+    }
+
+    #[test]
+    #[should_panic(expected = "value must fit the u32 length prefix")]
+    fn response_too_large() {
+        max_payload_size::<mmr::Family, sha256::Digest>(NZU64!(16), 256 << 20);
     }
 }
