@@ -2740,7 +2740,7 @@ pub mod tests {
 
     #[test]
     fn test_same_open_sync_waits_for_failure_accounting() {
-        for chunks in [None, Some(1), Some(IOVEC_BATCH_SIZE + 1)] {
+        for write in [false, true] {
             let (directory, held) = make_file("sync_order");
             held.tracker.write();
             held.tracker.complete();
@@ -2748,19 +2748,17 @@ pub mod tests {
             // Both barriers are accepted while staging capacity remains available.
             let mut harness = Harness::new(2);
             let first = harness.admit(Request::Sync(SyncRequest::new(held.clone())), 0);
-            let successor = chunks.map_or_else(
-                || Request::Sync(SyncRequest::new(held.clone())),
-                |chunks| {
-                    let bufs: IoBufs = (0..chunks).map(|_| IoBuf::from(b"x")).collect();
-                    Request::WriteAt(WriteAtRequest::new(
-                        held.clone(),
-                        0,
-                        bufs.into(),
-                        WriteAtState::WritingBeforeSync,
-                        Cache::Enabled,
-                    ))
-                },
-            );
+            let successor = if write {
+                Request::WriteAt(WriteAtRequest::new(
+                    held.clone(),
+                    0,
+                    IoBufs::from(IoBuf::from(b"new")).into(),
+                    WriteAtState::WritingBeforeSync,
+                    Cache::Enabled,
+                ))
+            } else {
+                Request::Sync(SyncRequest::new(held.clone()))
+            };
             let second = harness.admit(successor, 1);
             assert_eq!(harness.driver.len(), 2);
             assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
@@ -2796,7 +2794,7 @@ pub mod tests {
             assert_eq!(harness.completed.len(), 2);
             assert!(matches!(
                 &harness.completed[0].output,
-                RequestOutput::Sync(Err(Error::Io(error)))
+                RequestOutput::Sync(Err(Error::BlobSyncFailed(_, _, error)))
                     if error.raw_os_error() == Some(libc::EIO)
             ));
             assert!(matches!(

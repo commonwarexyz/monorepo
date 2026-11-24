@@ -696,9 +696,12 @@ impl crate::Blob for Blob {
             if fused {
                 file.wait_after_sync();
             }
-            if fused && let Err(error) = &result {
-                // A failed fused write may have consumed the kernel's writeback error.
-                file.tracker.write();
+            if sync && let Err(error) = &result {
+                // A failed durable write may have consumed the kernel's writeback error, in its
+                // fused barrier or within the write itself, as on a synchronous inode or mount.
+                if fused {
+                    file.tracker.write();
+                }
                 let (partition, name) = &file.key;
                 let error = match error {
                     Error::Io(error) => {
@@ -2013,6 +2016,48 @@ mod tests {
             if partition == "partition" && name == hex(b"readonly")
                 && error.raw_os_error() == Some(libc::EBADF))
         );
+    }
+
+    /// A durable write too large to fuse its barrier also poisons the open when its write
+    /// fails, since the write may have consumed the kernel's writeback error.
+    #[tokio::test]
+    async fn test_failed_unfused_durable_write_poisons_the_open() {
+        let (storage, directory) = storage_for_reopen_test("unfused_write_error", Layout::ALL);
+        let path = directory.join("readonly");
+        std::fs::write(&path, b"").unwrap();
+        let blob = Blob::new(
+            File::options().read(true).open(&path).unwrap(),
+            0,
+            storage.hold.clone(),
+            storage
+                .pending
+                .admit("partition", b"readonly", false)
+                .unwrap()
+                .0,
+        );
+        let retained = |result: Result<(), Error>| {
+            matches!(result, Err(Error::BlobSyncFailed(partition, name, error))
+                if partition == "partition" && name == hex(b"readonly")
+                    && error.raw_os_error() == Some(libc::EBADF))
+        };
+
+        let bufs: IoBufs = (0..IOVEC_BATCH_SIZE + 1)
+            .map(|_| crate::IoBuf::from(b"x"))
+            .collect();
+        let result = blob.write_at(0, bufs, WriteOptions::SYNC).await;
+        assert!(
+            matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(libc::EBADF))
+        );
+        assert!(retained(blob.sync().await));
+        drop(blob);
+        assert!(retained(
+            storage
+                .pending
+                .admit("partition", b"readonly", true)
+                .map(|_| ())
+        ));
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
