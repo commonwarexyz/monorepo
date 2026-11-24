@@ -1703,10 +1703,10 @@ pub(crate) mod tests {
         let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
 
-        let snapshot = db.to_batch();
-        assert_eq!(snapshot.root(), db.root());
+        let view = db.to_batch();
+        assert_eq!(view.root(), db.root());
 
-        let child_batch = snapshot.new_batch::<Sha256>();
+        let child_batch = view.new_batch::<Sha256>();
         let loc2 = child_batch.size();
         let child_batch = child_batch.append(V::Value::make(20));
         let merkleized = child_batch.merkleize(&db).await.unwrap();

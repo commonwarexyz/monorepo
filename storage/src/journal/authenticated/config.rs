@@ -39,8 +39,8 @@ pub struct Config<S: Strategy> {
     pub partition: String,
     /// Lowest Merkle node height kept in memory.
     pub resident_height: ResidentHeight,
-    /// Read buffer size for replaying operations. A snapshot build that hashes the operations as
-    /// it reads them uses its own buffer instead.
+    /// Read buffer size for replaying operations. When QMDB hashes operations while rebuilding its key
+    /// index, it uses its own `init_buffer`.
     pub replay_buffer: NonZeroUsize,
     /// Strategy used for Merkle hashing.
     pub strategy: S,

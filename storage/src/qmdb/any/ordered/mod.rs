@@ -98,9 +98,9 @@ where
                 return Ok(None);
             }
 
-            // If the translated key is in the snapshot, search its conflicts for the span.
+            // If the translated key is in the index, search its conflicts for the span.
             if let Some(span) = self
-                .find_span(self.snapshot.get(key.as_ref()).copied(), key)
+                .find_span(self.index.get(key.as_ref()).copied(), key)
                 .await?
             {
                 return Ok(Some(span));
@@ -108,7 +108,7 @@ where
 
             // The remaining span owner is in the previous translated key. Allow wrapping because
             // spans connect the last active key back to the first.
-            let Some((iter, _)) = self.snapshot.prev_translated_key(key.as_ref()) else {
+            let Some((iter, _)) = self.index.prev_translated_key(key.as_ref()) else {
                 // DB is empty.
                 return Ok(None);
             };
@@ -143,7 +143,7 @@ where
         async move {
             // The strict predecessor can share the query's translated key.
             if let Some(prev) = self
-                .find_strict_prev_key(self.snapshot.get(key.as_ref()).copied(), key)
+                .find_strict_prev_key(self.index.get(key.as_ref()).copied(), key)
                 .await?
             {
                 return Ok(Some(prev));
@@ -151,7 +151,7 @@ where
 
             // The previous translated key is the only remaining candidate. Reject wrapping so
             // queries at or below the first active key have no predecessor.
-            let Some((iter, false)) = self.snapshot.prev_translated_key(key.as_ref()) else {
+            let Some((iter, false)) = self.index.prev_translated_key(key.as_ref()) else {
                 return Ok(None);
             };
 
@@ -159,7 +159,7 @@ where
         }
     }
 
-    /// Returns the database's strict predecessor of `key` if it is among these snapshot entries.
+    /// Returns the database's strict predecessor of `key` if it is among these index entries.
     async fn find_strict_prev_key(
         &self,
         locs: impl Iterator<Item = Location<F>> + Send,
@@ -256,12 +256,12 @@ where
         let updates = match cursor {
             Cursor::Done => return Ok(None),
             Cursor::Next(key) => {
-                self.fetch_all_updates(self.snapshot.get(key.as_ref()).copied())
+                self.fetch_all_updates(self.index.get(key.as_ref()).copied())
                     .await?
             }
             Cursor::Start => match start {
                 Unbounded => {
-                    let Some(iter) = self.snapshot.first_translated_key() else {
+                    let Some(iter) = self.index.first_translated_key() else {
                         return Ok(None);
                     };
                     self.fetch_all_updates(iter.copied()).await?
@@ -269,11 +269,11 @@ where
                 Included(start) | Excluded(start) => {
                     // The bound's own bucket may hold keys below it. When no active key shares
                     // its translated key, the following bucket starts.
-                    let mut locs = self.snapshot.get(start.as_ref()).copied().peekable();
+                    let mut locs = self.index.get(start.as_ref()).copied().peekable();
                     if locs.peek().is_some() {
                         self.fetch_all_updates(locs).await?
                     } else {
-                        let Some((iter, false)) = self.snapshot.next_translated_key(start.as_ref())
+                        let Some((iter, false)) = self.index.next_translated_key(start.as_ref())
                         else {
                             return Ok(None);
                         };
@@ -1067,14 +1067,14 @@ mod test {
         any::ordered::fixed::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
         any::test::fixed_db_config_partitioned::<OneCap>,
         SPILL_THRESHOLD + 8,
-        |db| db.snapshot.spilled_count()
+        |db| db.index.spilled_count()
     );
     test_neighbors!(
         test_neighbors_any_variable_partitioned,
         any::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
         any::test::variable_db_config_partitioned::<OneCap>,
         SPILL_THRESHOLD + 8,
-        |db| db.snapshot.spilled_count()
+        |db| db.index.spilled_count()
     );
 
     // Current delegates neighbor lookups to Any. Check that each wrapper queries the right view.
@@ -2050,7 +2050,7 @@ mod test {
             log,
             root,
             inactivity_floor_loc,
-            snapshot,
+            index,
             active_keys,
             bitmap,
             metrics,
@@ -2081,7 +2081,7 @@ mod test {
                 log,
                 root,
                 inactivity_floor_loc,
-                snapshot,
+                index,
                 active_keys,
                 bitmap,
                 metrics,
@@ -2149,7 +2149,7 @@ mod test {
         #[values(Mode::Error, Mode::Cancel, Mode::Reorder)] mode: Mode,
     ) {
         deterministic::Runner::default().start(|context| async move {
-            // Production batches take either path, because the snapshot iterators of `OrderedIndex`
+            // Production batches take either path, because the index iterators of `OrderedIndex`
             // report an unknown size hint while those of the partitioned ordered index report an
             // exact one. This test passes an exact-size slice, so the 30 case runs on the small
             // collector and the larger cases on the unordered path. Error and Reorder batches must
