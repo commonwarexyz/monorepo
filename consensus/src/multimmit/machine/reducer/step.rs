@@ -290,6 +290,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                 self.complete_certificate_resolution(completion)
             }
             Input::ProductionTimerFired(timer) => self.fire_production_timer(timer),
+            Input::PaceFired(timer) => self.fire_pace_timer(timer),
             // Recovery and aggregation completions stage a durable change, so they always park
             // and drain through the scheduler: one FIFO decides staging order for every durable
             // transition, whether or not a barrier sync happens to be in flight.

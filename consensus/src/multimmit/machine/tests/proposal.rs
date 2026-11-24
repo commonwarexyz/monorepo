@@ -16,7 +16,7 @@ use crate::{
         machine::{
             ProposalParent,
             artifact::Dependency,
-            capability::{Capability, ResolverCommand},
+            capability::{Capability, ResolverCommand, TimerCommand},
             core_state::{CoreState, CoreTurn},
             durability::{
                 Change, DurableEffect, EffectCompletion, PersistDirective, SignEffect, SignRequest,
@@ -49,7 +49,7 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use core::num::NonZeroUsize;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[test]
 fn vqc_does_not_supersede_a_vote_needed_for_lqc() {
@@ -497,6 +497,54 @@ fn leader_proposal_choice_is_durable() {
             .is_some()),
         "the choice acknowledgement must not release signing a second time"
     );
+}
+
+#[test]
+fn paced_leader_proposes_only_after_its_minimum_view_duration() {
+    let duration = Duration::from_millis(100);
+    let mut machine = Machine::new(Harness::validator(0).min_view_duration(duration).profile());
+    let start = machine.step(Input::Start).unwrap();
+    // Entering view one arms the pace timer, and the entry's acknowledgement chooses no proposal.
+    let pace = start
+        .find(|effect| match effect {
+            Capability::Timer(TimerCommand::Pace(timer)) => Some(*timer),
+            _ => None,
+        })
+        .expect("the view-one leader must arm its pace timer");
+    assert_eq!(pace.round().view(), View::new(1));
+    assert_eq!(pace.delay(), duration);
+    let started = machine.persist(&start.persist_job(), Until::CursorAdvance);
+    assert!(
+        !started.has(|effect| matches!(effect, Capability::Journal(_))),
+        "the leader must not choose a proposal before its view's minimum duration"
+    );
+
+    let paced = machine.step(Input::PaceFired(pace)).unwrap();
+    let paced = machine.settle(paced, Until::CursorAdvance);
+    let proposal = paced.persist_job();
+    let Change::OutboxQueued { effect, .. } = proposal.events()[0].change() else {
+        panic!("the paced leader must durably queue its proposal choice");
+    };
+    let Some(SignRequest::LeaderBlock(request)) = effect.as_ref().sign_one() else {
+        panic!("the paced leader must choose one exact proposal");
+    };
+    assert_eq!(request.block(), &leader(&machine, 1));
+}
+
+#[test]
+fn unpaced_and_non_leading_validators_arm_no_pace_timer() {
+    let leader = LeaderSchedule::round_robin(6).unwrap().leader(View::new(1));
+    let follower = (leader.get() + 1) % 6;
+    for harness in [
+        Harness::validator(0),
+        Harness::validator(follower)
+            .participants(6)
+            .min_view_duration(Duration::from_millis(100)),
+    ] {
+        let mut machine = Machine::<Sha256, Bls<MinPk>>::new(harness.profile());
+        let start = machine.step(Input::Start).unwrap();
+        assert!(!start.has(|effect| matches!(effect, Capability::Timer(TimerCommand::Pace(_)))));
+    }
 }
 
 #[test]

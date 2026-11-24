@@ -676,4 +676,19 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         self.wake_components();
         Ok(Step::from(StepStatus::Accepted))
     }
+
+    pub(super) fn fire_pace_timer(
+        &mut self,
+        timer: ViewTimer,
+    ) -> Result<Step<S, H::Digest>, StepError> {
+        let current = timer.generation() == self.durable.state.generation
+            && timer.round()
+                == Round::new(self.profile.protocol().epoch(), self.durable.state.view);
+        if !current {
+            return Ok(Step::stale());
+        }
+        self.views.pace(self.durable.state.view);
+        self.wake_components();
+        Ok(Step::from(StepStatus::Accepted))
+    }
 }

@@ -190,6 +190,8 @@ pub struct ClusterOptions {
     pub chain_limits: Option<Vec<PathLimits>>,
     /// Whether chains with `d = 0` and `e = 0` are payment chains.
     pub payments: bool,
+    /// The least time a view each engine leads runs before it proposes.
+    pub min_view_duration: Option<Duration>,
 }
 
 impl Default for ClusterOptions {
@@ -210,6 +212,7 @@ impl Default for ClusterOptions {
             limits: PathLimits::new(2, 1),
             chain_limits: None,
             payments: false,
+            min_view_duration: None,
         }
     }
 }
@@ -669,6 +672,7 @@ impl<S: Fixture> Cluster<S> {
         Tuning {
             production_interval: self.options.production,
             view_retention: self.options.view_retention,
+            min_view_duration: self.options.min_view_duration,
             ..Tuning::new(Duration::from_millis(500))
         }
     }

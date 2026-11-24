@@ -504,7 +504,10 @@ impl<H: Hasher, S: Scheme> CoreState<H, S> {
 const fn input_lane<S: Scheme, D: Digest>(input: &Input<S, D>) -> Lane {
     match input {
         Input::Persisted(_) => Lane::PersistenceCompletion,
-        Input::TimerFired(_) | Input::ProducerWake | Input::ProductionTimerFired(_) => Lane::Timer,
+        Input::TimerFired(_)
+        | Input::PaceFired(_)
+        | Input::ProducerWake
+        | Input::ProductionTimerFired(_) => Lane::Timer,
         Input::ResolutionCompleted(_) | Input::CertificateResolved(_) => Lane::ResolverResult,
         Input::Observe(_) => Lane::PeerObservation,
         Input::Start

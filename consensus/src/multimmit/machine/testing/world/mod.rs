@@ -1872,6 +1872,9 @@ impl<'a> World<'a> {
                     self.replicas[replica].driver.production_timer = Some(timer);
                     continue;
                 }
+                Capability::Timer(TimerCommand::Pace(_)) => {
+                    unreachable!("world tunings do not pace leaders")
+                }
                 // The data-availability recovery tasks run on tasks the pure-Core world does
                 // not host, so forwarded shares and anchor confirmations have no collaborator
                 // here. Dropping them matches the pre-sharding machine, which pooled shares

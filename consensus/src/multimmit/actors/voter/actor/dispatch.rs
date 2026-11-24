@@ -304,6 +304,10 @@ where
                 };
                 self.timers.arm_view(timer, deadline, reason);
             }
+            TimerCommand::Pace(timer) => {
+                let deadline = self.context.current().saturating_add_ext(timer.delay());
+                self.timers.arm_pace(timer, deadline);
+            }
             TimerCommand::Production(timer) => {
                 self.hooks.production_timer_armed(root);
                 let deadline = self.context.current().saturating_add_ext(timer.delay());

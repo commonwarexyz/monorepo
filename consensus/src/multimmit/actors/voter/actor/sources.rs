@@ -192,6 +192,7 @@ impl ReadinessCursor {
             RuntimeEvent::ChainTask(_) => self.completion = CompletionArm::ChainTask.next_index(),
             RuntimeEvent::ViewTimer => self.timer = TimerKind::View.next_index(),
             RuntimeEvent::ProductionTimer => self.timer = TimerKind::Production.next_index(),
+            RuntimeEvent::PaceTimer => self.timer = TimerKind::Pace.next_index(),
             _ => {}
         }
         if let Some(source) = source {
@@ -228,6 +229,7 @@ pub(crate) enum RuntimeEvent<P: PublicKey, S: Scheme, D: Digest> {
     ChainTask(ChainUpdate<S, D>),
     ViewTimer,
     ProductionTimer,
+    PaceTimer,
     Publication,
     Heartbeat,
     Verification(Completed<S, D>),
@@ -245,7 +247,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> RuntimeEvent<P, S, D> {
             Self::Application(_) | Self::Crypto(_) | Self::Verification(_) | Self::ChainTask(_) => {
                 Some(Lane::LocalCompletion)
             }
-            Self::ViewTimer | Self::ProductionTimer => Some(Lane::Timer),
+            Self::ViewTimer | Self::ProductionTimer | Self::PaceTimer => Some(Lane::Timer),
             Self::Resolution(_) => Some(Lane::ResolverResult),
             Self::Observation(_) => Some(Lane::PeerObservation),
             Self::Persistence(_)
@@ -493,6 +495,7 @@ where
                         Poll::Ready(match kind {
                             TimerKind::View => RuntimeEvent::ViewTimer,
                             TimerKind::Production => RuntimeEvent::ProductionTimer,
+                            TimerKind::Pace => RuntimeEvent::PaceTimer,
                         })
                     }),
                 Source::Resolution => self.poll_arm(Arm::Resolution, &mut Probe::Now),
@@ -554,6 +557,11 @@ where
                 .then(|| self.timers.deadline(TimerKind::Production))
                 .flatten()
         ));
+        let mut pace = pin!(sleep(
+            timers
+                .then(|| self.timers.deadline(TimerKind::Pace))
+                .flatten()
+        ));
         let mut publication = pin!(sleep(self.egress.next_attempt()));
         let mut heartbeat = pin!(sleep(Some(self.timers.heartbeat_at())));
         let (source, event) = poll_fn(|cx| {
@@ -578,6 +586,9 @@ where
             }
             if poll_optional(production.as_mut(), cx).is_ready() {
                 return Poll::Ready((Some(Source::Timer), RuntimeEvent::ProductionTimer));
+            }
+            if poll_optional(pace.as_mut(), cx).is_ready() {
+                return Poll::Ready((Some(Source::Timer), RuntimeEvent::PaceTimer));
             }
             if poll_optional(publication.as_mut(), cx).is_ready() {
                 return Poll::Ready((Some(Source::Publication), RuntimeEvent::Publication));
@@ -766,7 +777,7 @@ mod tests {
         assert_eq!(cursor.timer, 1);
 
         cursor.record(Some(Source::Timer), &Event::ProductionTimer);
-        assert_eq!(cursor.timer, 0);
+        assert_eq!(cursor.timer, 2);
         cursor.record(Some(Source::Observation), &Event::InputClosed);
         assert_eq!(cursor.source, Source::Publication as usize);
         cursor.advance_past(Source::Inspection);
@@ -830,7 +841,7 @@ mod tests {
         cursor.timer = 1;
         assert_eq!(
             cursor.timers().collect::<Vec<_>>(),
-            [TimerKind::Production, TimerKind::View]
+            [TimerKind::Production, TimerKind::Pace, TimerKind::View]
         );
     }
 }

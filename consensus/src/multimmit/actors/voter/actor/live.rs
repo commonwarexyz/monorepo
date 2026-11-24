@@ -209,6 +209,12 @@ where
                 self.submit_view_timeout(armed.timer, armed.reason.as_str())
                     .at(self.telemetry.round_span())?;
             }
+            RuntimeEvent::PaceTimer => {
+                let timer = self.timers.take_pace().expect("armed timer fired");
+                let root = self.round_span();
+                self.track_transition(|core| core.enqueue(Input::PaceFired(timer)), &root)
+                    .at(&root)?;
+            }
             RuntimeEvent::ProductionTimer => {
                 let armed = self.timers.take_production().expect("armed timer fired");
                 let root = armed.trace.root.clone();

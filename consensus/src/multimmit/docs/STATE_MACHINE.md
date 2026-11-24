@@ -465,6 +465,11 @@ record, and a lost send is repeated at a later view entry.
    receiver cannot rely on an earlier transmission of that same V-QC; selecting an updated V-QC
    requires transmitting it.
 5. A proposal becomes externally visible only after its signing reservation is durable.
+6. With `Tuning::min_view_duration` set, a leader begins its proposal only after its pace timer
+   for the view fires (`Input::PaceFired`). The timer is armed at view entry and is volatile:
+   recovery re-arms it for the view it re-enters. It is local policy that voters neither enforce nor
+   observe, so it cannot change validity, and it should stay unset unless nothing else bounds the
+   view rate, as in a single-node network.
 
 Leaders follow the deterministic `LeaderSchedule`. Randomized election is not supported: an
 unpredictable election needs a unique per-view value, and the ordinary exit path produces none. A

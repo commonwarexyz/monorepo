@@ -174,6 +174,7 @@ fn next_persist(
                 }
                 Capability::Timer(TimerCommand::View(_))
                 | Capability::Timer(TimerCommand::Production(_))
+                | Capability::Timer(TimerCommand::Pace(_))
                 | Capability::Acknowledged { .. }
                 | Capability::Retain(_)
                 | Capability::Retire(_)

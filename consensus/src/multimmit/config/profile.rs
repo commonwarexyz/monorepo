@@ -218,6 +218,15 @@ pub struct Tuning {
     /// delays. `None` takes five view timeouts, and disables early timeouts only when that
     /// overflows.
     pub skip_timeout: Option<Duration>,
+    /// The least time a view this node leads runs before it proposes.
+    ///
+    /// Keep this `None` unless views would otherwise advance as fast as the machine runs, such as
+    /// in a single-node network, where a leader's own vote certifies each view at once. Every
+    /// view this node leads then waits this long after entry before its proposal, which adds the
+    /// same latency to every finalized block. Peers neither enforce nor observe it. It must be
+    /// below `view_timeout`, and should be far enough below it that peers receive the proposal
+    /// before they time out the view.
+    pub min_view_duration: Option<Duration>,
 }
 
 impl Tuning {
@@ -230,6 +239,7 @@ impl Tuning {
             view_retention: ViewDelta::new(64),
             max_artifact_bytes: None,
             skip_timeout: None,
+            min_view_duration: None,
         }
     }
 
@@ -280,6 +290,8 @@ pub struct ResolvedTuning {
     /// The recent-activity window for early timeouts of remote leaders, or `None` when the
     /// default window overflows.
     pub(crate) skip_timeout: Option<Duration>,
+    /// The least time a view this node leads runs before it proposes.
+    pub(crate) min_view_duration: Option<Duration>,
 }
 
 impl ResolvedTuning {
@@ -295,6 +307,7 @@ impl ResolvedTuning {
             skip_timeout: tuning
                 .skip_timeout
                 .or_else(|| tuning.view_timeout.checked_mul(SKIP_TIMEOUT_VIEWS)),
+            min_view_duration: tuning.min_view_duration,
         }
     }
 }
@@ -533,6 +546,14 @@ impl<D: Digest> Profile<D> {
         }
         if tuning.view_retention.get() == 0 {
             return Err(Error::ZeroViewRetention);
+        }
+        if let Some(min_view_duration) = tuning.min_view_duration
+            && min_view_duration >= tuning.view_timeout
+        {
+            return Err(Error::MinViewDurationTooLong {
+                view_timeout: tuning.view_timeout,
+                actual: min_view_duration,
+            });
         }
         // Exceeding the retry ceiling also exceeds the view timeout.
         let retry_ceiling = tuning.view_timeout.saturating_mul(RETRY_CEILING_VIEWS);
@@ -1126,6 +1147,36 @@ mod tests {
             assert_eq!(
                 Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, tuning).unwrap_err(),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_view_duration_must_be_below_the_view_timeout() {
+        let view_timeout = Duration::from_millis(500);
+        let with_minimum = |min_view_duration| Tuning {
+            view_timeout,
+            min_view_duration,
+            ..tuning(64)
+        };
+        for accepted in [None, Some(Duration::ZERO), Some(Duration::from_millis(499))] {
+            let profile =
+                Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, with_minimum(accepted))
+                    .expect("a minimum below the view timeout is valid");
+            assert_eq!(profile.tuning().min_view_duration, accepted);
+        }
+        for rejected in [view_timeout, Duration::from_secs(1)] {
+            assert_eq!(
+                Profile::new::<Bls<MinPk>>(
+                    protocol(6),
+                    Role::Observer,
+                    with_minimum(Some(rejected))
+                )
+                .unwrap_err(),
+                Error::MinViewDurationTooLong {
+                    view_timeout,
+                    actual: rejected,
+                }
             );
         }
     }

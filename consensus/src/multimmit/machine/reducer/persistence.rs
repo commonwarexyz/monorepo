@@ -311,11 +311,22 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         ) || (matches!(event.change(), Change::FinalityFloorAdvanced { .. })
             && self.durable.state.view != view_before);
         if entered {
+            let round = Round::new(self.profile.protocol().epoch(), self.durable.state.view);
             capabilities.push(Capability::Timer(TimerCommand::View(ViewTimer::new(
                 self.durable.state.generation,
-                Round::new(self.profile.protocol().epoch(), self.durable.state.view),
+                round,
                 self.profile.tuning().view_timeout,
             ))));
+            if let Some(delay) = self.profile.tuning().min_view_duration
+                && self.profile.role()
+                    == Role::Validator(self.profile.protocol().leader(round.view()))
+            {
+                capabilities.push(Capability::Timer(TimerCommand::Pace(ViewTimer::new(
+                    self.durable.state.generation,
+                    round,
+                    delay,
+                ))));
+            }
         }
     }
 
