@@ -1017,11 +1017,13 @@ pub mod tests {
         commit_writes(db, pending).await
     }
 
-    /// Build a random database, close and reopen it, and return the auditor state.
+    /// Build a random history over `num_keys` keys, sync and reopen the database,
+    /// verify its root, and return the runtime auditor state.
     #[boxed]
     async fn build_random_close_reopen_round<M, C, F, Fut>(
         mut context: Context,
         mut open_db: F,
+        num_keys: u64,
     ) -> String
     where
         M: merkle::Graftable + 'static,
@@ -1031,12 +1033,10 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
-        const ELEMENTS: u64 = 1000;
-
         let partition = "build-random".to_string();
         let rng_seed = context.next_u64();
         let db: C = open_db(context.child("first"), partition.clone()).await;
-        let db = apply_random_ops::<M, C>(ELEMENTS, rng_seed, db)
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed, db)
             .await
             .unwrap();
         let merkleized = db.new_batch().merkleize(&db).await.unwrap();
@@ -1055,12 +1055,17 @@ pub mod tests {
         context.auditor().state()
     }
 
-    /// Run `test_build_random_close_reopen` against a database factory.
+    /// Build the same random history over `num_keys` keys twice, checking each time that the root
+    /// survives a reopen, and require both runs to leave the same runtime audit hash. The second
+    /// run uses a fresh default runner, so `context` must come from one too.
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
-    pub async fn test_build_random_close_reopen<M, C, F, Fut>(context: Context, open_db: F)
-    where
+    pub async fn test_build_random_close_reopen<M, C, F, Fut>(
+        context: Context,
+        open_db: F,
+        num_keys: u64,
+    ) where
         M: merkle::Graftable,
         C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
@@ -1070,12 +1075,14 @@ pub mod tests {
     {
         // Run on the provided runner.
         let state1 =
-            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db.clone()).await;
+            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db.clone(), num_keys)
+                .await;
 
         // Run again on a fresh runner to verify determinism.
         let executor = deterministic::Runner::default();
-        let state2 = executor
-            .start(|context| build_random_close_reopen_round::<M, C, F, Fut>(context, open_db));
+        let state2 = executor.start(|context| {
+            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db, num_keys)
+        });
 
         assert_eq!(state1, state2);
     }
@@ -2118,7 +2125,8 @@ pub mod tests {
         };
     }
 
-    // Ordered variants. The last field is the recovery workload in keys.
+    // Ordered variants. The last field sets the history size in keys for both the write-recovery
+    // and close/reopen determinism tests.
     // The four long histories across both lists cover every
     // ordered/unordered and fixed/variable combination, both Merkle families, and all index layouts.
     macro_rules! with_ordered_variants {
@@ -2138,7 +2146,7 @@ pub mod tests {
         };
     }
 
-    // Unordered variants, with the same recovery workload field.
+    // Unordered variants, with the same history size field.
     macro_rules! with_unordered_variants {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, uf, UnorderedFixedDb, fixed_config, 128);
@@ -2165,7 +2173,7 @@ pub mod tests {
     }
 
     // Emit one slow test per variant. Each gets a fresh runner and database opener.
-    // Recovery tests also show the number of keys in their name and pass it to the test.
+    // Pass the optional key count to the test and include it in its name.
     macro_rules! run_variant {
         ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident $(, $keys:literal)?) => {
             paste::paste! {
@@ -2185,7 +2193,7 @@ pub mod tests {
 
     // Other tests choose their own workload.
     macro_rules! test_for_variant {
-        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident, $_recovery_keys:literal) => {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident, $_history_keys:literal) => {
             run_variant!($f, $traced, $label, $db, $cfg);
         };
     }
@@ -2236,7 +2244,7 @@ pub mod tests {
         test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
 
-    test_for_all_variants!(test_build_random_close_reopen, "WARN");
+    with_all_variants!(run_variant!(test_build_random_close_reopen, "WARN"));
     with_all_variants!(run_variant!(test_simulate_write_failures, "WARN"));
     test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
     test_for_all_variants!(test_commit_after_sync_recovery, "WARN");
