@@ -93,6 +93,11 @@ where
                 *hint = Some((run.tip(), low));
             }
         }
+        for tip in fed.finals.into_iter().flatten() {
+            if self.finals.final_tip(tip) {
+                self.finals_dirty = true;
+            }
+        }
         for (chain, released) in fed.released.into_iter().enumerate() {
             if let Some(released) = released {
                 let known = &mut self.released[chain];
