@@ -2336,7 +2336,8 @@ mod tests {
         let mut request = Request::Sync(SyncRequest::new(make_file()));
         assert!(request.on_cqe(ACTIVE, -libc::EINTR).is_none());
 
-        // A sync names the kernel error code like `sync`, including unsolicited ECANCELED.
+        // A failed sync reports the kernel's error as `BlobSyncFailed`, including unsolicited
+        // ECANCELED.
         for code in [libc::ECANCELED, libc::EIO] {
             let request = Request::Sync(SyncRequest::new(make_file()));
             let RequestOutput::Sync(Err(Error::BlobSyncFailed(_, _, error))) =

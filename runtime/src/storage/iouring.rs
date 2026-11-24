@@ -386,7 +386,7 @@ impl Shared {
         Ok(dirty)
     }
 
-    /// Name a failed barrier's kernel error like `sync`.
+    /// Name a failed data sync's kernel error [Error::BlobSyncFailed].
     pub(crate) fn sync_error(&self, error: Error) -> Error {
         let (partition, name) = &self.key;
         match error {
