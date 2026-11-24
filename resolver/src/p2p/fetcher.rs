@@ -168,9 +168,9 @@ pub struct Config<P: PublicKey> {
     /// Maximum wait for a response.
     pub fetch_timeout: NonZeroDuration,
 
-    /// Delay before retrying an unresolved fetch or a failed send.
-    /// With zero delay, an unsuccessful scan waits for the earliest rate-limit deadline.
-    /// If it found eligible peers but received no such deadline, it retries after 1ms.
+    /// Delay before retrying an unresolved fetch or failed submission.
+    /// After a failed submission, retry uses the earlier of this delay and any rate-limit
+    /// deadline. A zero delay uses a 1ms fallback because rejected submissions spend no quota.
     pub retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages.
@@ -389,23 +389,22 @@ where
     /// eligible peers in selection order. On success, the key moves from pending
     /// to active. On failure, the key remains pending for retry.
     ///
-    /// If no send succeeds, waits for the earliest peer rate-limit expiry, or
-    /// `retry_delay` after failed sends. A zero `retry_delay` waits 1ms instead, since rejected
-    /// submissions spend no quota. An earlier pending deadline wakes the
-    /// queue sooner. With no eligible peers or future deadlines, waits for an
-    /// external change.
+    /// If no send succeeds, waits for the earliest peer rate-limit expiry and, after a failed
+    /// submission, `retry_delay`. A zero `retry_delay` waits 1ms after a failed submission, since
+    /// rejected submissions spend no quota. An earlier pending deadline wakes the queue sooner.
+    /// With no eligible peers or future deadlines, waits for an external change.
     pub fn fetch<NetS: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,
     ) {
         self.waiter = Waiter::Ready;
 
-        // Track when an unsuccessful scan can try again. Without a future deadline or
-        // eligible peer, the queue waits for an external change.
+        // Track independent retry opportunities. Without a future deadline, rate-limited peer,
+        // or failed submission, the queue waits for an external change.
         let now = self.context.current();
         let mut next_deadline = SystemTime::limit();
         let mut earliest_rate_limit: Option<SystemTime> = None;
-        let mut found_eligible_peers = false;
+        let mut failed_submission = false;
 
         // Detach the queue to leave skipped entries untouched and remove only the sent key.
         let pending = mem::replace(&mut self.pending, PrioritySet::new());
@@ -427,7 +426,6 @@ where
 
             // Mark that an eligible peer was found
             self.requests_created.inc(Status::Success);
-            found_eligible_peers = true;
 
             // If sending fails, try another eligible peer until one accepts the request.
             let mut selection = candidates.select(&mut self.participants.weights);
@@ -463,6 +461,7 @@ where
                     feedback @ (Unreliable::Rejected | Unreliable::Outcome(Feedback::Closed)) => {
                         // Send was not handled, try next peer
                         self.requests_sent.inc(Status::Dropped);
+                        failed_submission = true;
                         debug!(?peer, ?feedback, "send failed");
                     }
                 }
@@ -487,7 +486,8 @@ where
         // Keep future keys reachable even when every due key is unavailable.
         if let Some(rate_limit_time) = earliest_rate_limit {
             next_deadline = next_deadline.min(rate_limit_time);
-        } else if found_eligible_peers {
+        }
+        if failed_submission {
             let delay = if self.retry_delay.is_zero() {
                 ZERO_DELAY_FALLBACK
             } else {
@@ -2229,6 +2229,72 @@ mod tests {
                 Some(context.current() + Duration::from_secs(1))
             );
         });
+    }
+
+    /// A failed available-peer submission must retry before a later quota deadline.
+    #[test]
+    fn test_failed_submission_retry_precedes_later_rate_limit() {
+        #[derive(Clone)]
+        struct Toggle(Arc<AtomicBool>);
+
+        impl UnlimitedSender for Toggle {
+            type PublicKey = PublicKey;
+
+            fn send(
+                &mut self,
+                _recipients: Recipients<Self::PublicKey>,
+                _message: impl Into<IoBufs> + Send,
+                _priority: bool,
+            ) -> Unreliable<Feedback> {
+                if self.0.load(Ordering::SeqCst) {
+                    Unreliable::new(Feedback::Ok)
+                } else {
+                    Unreliable::Rejected
+                }
+            }
+        }
+
+        for retry_delay in [
+            Duration::from_millis(100),
+            Duration::ZERO,
+            Duration::from_secs(2),
+        ] {
+            Runner::default().start(|context| async move {
+                let mut fetcher = create_test_fetcher(context.child("fetcher"));
+                fetcher.retry_delay = retry_delay;
+                let limited_peer = PrivateKey::from_seed(1).public_key();
+                let rejecting_peer = PrivateKey::from_seed(2).public_key();
+                fetcher.reconcile(&[limited_peer.clone(), rejecting_peer.clone()]);
+                let accept = Arc::new(AtomicBool::new(true));
+                let mut sender = WrappedSender::new(LimitedMockSender::new(
+                    Toggle(accept.clone()),
+                    Quota::per_second(NZU32!(1)),
+                    context.child("rate_limiter"),
+                ));
+
+                // Spend the first peer's token, leaving the second peer available.
+                fetcher.add_targets(MockKey(99), [limited_peer.clone()]);
+                fetcher.add_ready(MockKey(99));
+                let (id, peer) = send_next(&mut fetcher, &mut sender);
+                assert_eq!(fetcher.pop_missing(id, &peer), Some(MockKey(99)));
+
+                // Neither candidate can complete this scan: one is rate-limited and the other
+                // rejects submission. The retry should use the earlier of the two deadlines.
+                accept.store(false, Ordering::SeqCst);
+                fetcher.add_targets(MockKey(1), [limited_peer, rejecting_peer]);
+                fetcher.add_ready(MockKey(1));
+                fetcher.fetch(&mut sender);
+                let fallback = if retry_delay.is_zero() {
+                    Duration::from_millis(1)
+                } else {
+                    retry_delay
+                };
+                assert_eq!(
+                    fetcher.get_pending_deadline(),
+                    Some(context.current() + fallback.min(Duration::from_secs(1)))
+                );
+            });
+        }
     }
 
     #[test]
