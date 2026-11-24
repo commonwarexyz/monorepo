@@ -298,6 +298,21 @@ impl Blob {
         self.shared.tracker.skipped()
     }
 
+    /// Run the blocking `read` on this thread when the current task opted into inline I/O, and on
+    /// the blocking pool otherwise.
+    async fn run_read<T: Send + 'static>(
+        read: impl FnOnce() -> Result<T, Error> + Send + 'static,
+    ) -> Result<T, Error> {
+        // A dedicated task that opted in owns its thread, so the read runs on it directly and
+        // skips the blocking-pool handoff (a pool wake plus a park of this thread per read).
+        if crate::utils::thread::INLINE_IO.with(|inline| inline.get()) {
+            return read();
+        }
+        task::spawn_blocking(read)
+            .await
+            .map_err(|_| Error::ReadFailed)?
+    }
+
     #[cfg(target_os = "linux")]
     fn read_exact_at(
         mut cache: Cache,
@@ -474,7 +489,7 @@ impl crate::Blob for Blob {
                 .checked_add(self.data_offset)
                 .ok_or(Error::OffsetOverflow)?;
             let file = self.shared.clone();
-            return task::spawn_blocking(move || {
+            return Self::run_read(move || {
                 if let Some(buf) = aio::read_direct(&file, offset, len) {
                     return Ok(buf.into());
                 }
@@ -487,8 +502,7 @@ impl crate::Blob for Blob {
                 Self::read_exact_at(Cache::Disabled, &file, buf.as_mut(), offset)?;
                 Ok(buf.into())
             })
-            .await
-            .map_err(|_| Error::ReadFailed)?;
+            .await;
         }
 
         self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
@@ -517,7 +531,7 @@ impl crate::Blob for Blob {
         } else {
             Cache::Enabled
         };
-        task::spawn_blocking(move || {
+        let read = move || {
             // An uncached read first tries a direct read of the range's aligned superset, then
             // copies the range into the caller's buffers.
             #[cfg(target_os = "linux")]
@@ -541,9 +555,8 @@ impl crate::Blob for Blob {
                 bufs.copy_from_slice(temp.as_ref());
             }
             Ok(bufs)
-        })
-        .await
-        .map_err(|_| Error::ReadFailed)?
+        };
+        Self::run_read(read).await
     }
 
     fn read_many(
