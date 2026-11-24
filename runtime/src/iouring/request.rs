@@ -339,7 +339,8 @@ impl Request {
                     // phase may have consumed the kernel's writeback error: the data sync, and
                     // also a write when the filesystem syncs within it, as on a synchronous
                     // inode or mount, or checks for the error there, as a network filesystem
-                    // can. Only the data sync's error is named like `sync`.
+                    // can. The open retains either phase's error as `BlobSyncFailed`, and the
+                    // caller of a failed write gets the kernel's error as is.
                     (state, Err(error)) => {
                         r.file.tracker.write();
                         let retained = r.file.sync_error(error.clone());

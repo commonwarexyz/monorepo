@@ -29,9 +29,10 @@
 //! synchronous inode or mount, and a network filesystem can check for the error there, so a failed
 //! write may be the only report of lost data. A failed write reports the kernel's error as
 //! [crate::Error::Io], or [crate::Error::WriteFailed] when the kernel gave none, and a failed sync
-//! reports [crate::Error::BlobSyncFailed]. The sync also makes the writes completed before the
-//! request durable and the open credits them, but callers must not rely on that coverage, since
-//! `SYNC` is not a barrier for earlier writes.
+//! reports [crate::Error::BlobSyncFailed]. Later durability requests and opens report the retained
+//! kernel error of either phase as [crate::Error::BlobSyncFailed]. The sync also makes the writes
+//! completed before the request durable and the open credits them, but callers must not rely on
+//! that coverage, since `SYNC` is not a barrier for earlier writes.
 //!
 //! ## Uncached Reads
 //!
@@ -121,9 +122,10 @@ pub struct Config {
 /// Filesystem storage with one logical open per blob. Each request executes on the worker
 /// that registers it.
 ///
-/// Failed durability barriers during content sync remain errors on later opens through this
-/// instance until the blob is removed or recreated. Creation failures are retained only when
-/// the header is complete.
+/// Errors from a durability barrier during content sync, or from the filesystem write of a
+/// [crate::WriteOptions::SYNC] request, remain errors on later opens through this instance until
+/// the blob is removed or recreated. Creation failures are retained only when the header is
+/// complete.
 #[derive(Clone)]
 pub struct Storage {
     /// Serialize metadata operations across cloned contexts and workers.
@@ -386,7 +388,8 @@ impl Shared {
         Ok(dirty)
     }
 
-    /// Name a failed data sync's kernel error [Error::BlobSyncFailed].
+    /// Name a durability failure's kernel error [Error::BlobSyncFailed], as a failed data sync
+    /// reports it and as the open retains it.
     pub(crate) fn sync_error(&self, error: Error) -> Error {
         let (partition, name) = &self.key;
         match error {
@@ -2555,8 +2558,8 @@ mod tests {
 
     /// A failed durable write poisons the open in either phase, including when shutdown
     /// finishes the request after its caller stopped waiting. A failed write reports the
-    /// kernel's error as is, and a failed data sync reports it like `sync`. Later durability
-    /// requests and the next open return the retained failure.
+    /// kernel's error as is, and a failed data sync reports it as `BlobSyncFailed`. Later
+    /// durability requests and the next open return the retained failure.
     #[test]
     fn test_failed_durable_write_poisons_the_open() {
         for (write_fails, orphan) in [(true, false), (true, true), (false, false), (false, true)] {

@@ -689,7 +689,9 @@ impl crate::Blob for Blob {
 
             // A durable write holds the open's durability guard until it retains a failure, so a
             // concurrent barrier cannot certify earlier writes after the write consumed the
-            // kernel's writeback error.
+            // kernel's writeback error. It keeps the caller's buffers until the guard is released,
+            // so no buffer destructor runs under the guard.
+            let owners = sync.then(|| bufs.clone());
             let durability = if sync { Some(file.durability()?) } else { None };
             let result = Self::write_vectored_at(cache, &file, offset, &mut bufs, flags);
             #[cfg(test)]
@@ -716,6 +718,7 @@ impl crate::Blob for Blob {
                 file.tracker.complete();
             }
             drop(durability);
+            drop(owners);
             if sync && !fused {
                 let seen = file.tracker.begin_sync();
                 file.flush(seen)?;
@@ -2190,6 +2193,68 @@ mod tests {
             let _ = self.release.recv();
             panic!("buffer owner dropped");
         }
+    }
+
+    /// Pauses as the write releases its buffer.
+    struct PausingOwner {
+        entered: Option<oneshot::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl AsRef<[u8]> for PausingOwner {
+        fn as_ref(&self) -> &[u8] {
+            b"x"
+        }
+    }
+
+    impl Drop for PausingOwner {
+        fn drop(&mut self) {
+            let _ = self.entered.take().unwrap().send(());
+            let _ = self.release.recv();
+        }
+    }
+
+    /// A durable write releases the caller's buffers outside the open's durability guard, so a
+    /// buffer destructor may wait for a sync on the same open.
+    #[tokio::test]
+    async fn test_durable_write_releases_buffers_outside_durability() {
+        // On Linux, two chunks fuse the barrier into the write and the larger write does not.
+        let (storage, directory) = storage_for_reopen_test("owner_sync", Layout::ALL);
+        for chunks in [2, IOVEC_BATCH_SIZE + 1] {
+            let name = chunks.to_be_bytes();
+            let (blob, _) = storage.open("partition", &name).await.unwrap();
+            blob.write_at(0, b"prefix", WriteOptions::default())
+                .await
+                .unwrap();
+            let (entered, entering) = oneshot::channel();
+            let (release, released) = mpsc::channel();
+            let mut bufs = vec![crate::IoBuf::from(bytes::Bytes::from_owner(PausingOwner {
+                entered: Some(entered),
+                release: released,
+            }))];
+            for _ in 1..chunks {
+                bufs.push(crate::IoBuf::from(vec![b'x']));
+            }
+            let blob = Arc::new(blob);
+            let writing_blob = Arc::clone(&blob);
+            let writing =
+                ::tokio::spawn(
+                    async move { writing_blob.write_at(6, bufs, WriteOptions::SYNC).await },
+                );
+
+            // The destructor runs after the write released the guard, and a sync completes
+            // while it waits.
+            entering.await.unwrap();
+            assert!(
+                blob.shared.durability.try_lock().is_some(),
+                "buffer destructor ran under the durability guard, chunks={chunks}"
+            );
+            blob.sync().await.unwrap();
+            release.send(()).unwrap();
+            writing.await.unwrap().unwrap();
+        }
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
