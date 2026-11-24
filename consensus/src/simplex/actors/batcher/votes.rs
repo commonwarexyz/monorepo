@@ -1,8 +1,8 @@
 //! Per-view vote tracking for the batcher.
 
 use crate::{
-    simplex::types::{Attributable, AttributableMap, Finalize, Notarize, Nullify, Proposal, Vote},
-    types::Participant,
+    simplex::types::{AttributableMap, Finalize, Notarize, Nullify, Proposal, Vote},
+    types::{Attributable, Participant},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 
