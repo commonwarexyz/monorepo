@@ -23,7 +23,7 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{Digested, Digestible};
-use commonware_macros::{select, select_loop};
+use commonware_macros::{boxed, select, select_loop};
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
@@ -275,6 +275,7 @@ where
     /// Hands the converged state to [`Processing`].
     ///
     /// Returns without recording completion if shutdown interrupts the handoff barrier.
+    #[boxed]
     async fn transition(
         mut self,
         artifact: Artifact<E, A>,
@@ -361,11 +362,12 @@ where
 
         // Completion is an irreversible startup floor. Persist it only after every handoff through
         // `completed_height` is durable and before pruning or exposing the databases.
-        let Some(plan) = until_stopped(context, self.plan.set_completed(completed_height)).await
-        else {
+        if until_stopped(context, self.plan.set_completed(completed_height))
+            .await
+            .is_none()
+        {
             return;
-        };
-        self.plan = plan;
+        }
         let _ = self.metrics.sync_done.try_set(1);
         if let Some(prune) = pending_prune {
             if until_stopped(context, processor.prune(prune, &self.marshal))

@@ -37,7 +37,7 @@ use commonware_consensus::{
     types::{Height, Round},
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
-use commonware_macros::select;
+use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, Spawner,
@@ -423,6 +423,7 @@ where
     }
 
     /// Prunes the databases and marshal to `prune`'s targets (see [`Prune::run`]).
+    #[boxed]
     pub(super) async fn prune<S, V>(
         &mut self,
         prune: Prune<SyncTargets<A, E>>,
@@ -442,6 +443,7 @@ where
 
     /// Capture a snapshot of the database set's applied state and publish it at the branch
     /// anchor's height.
+    #[boxed]
     pub(super) async fn publish_snapshot(&mut self) {
         let (databases, snapshots) = self.take_databases().snapshot().await;
         self.databases = Some(databases);
@@ -452,6 +454,7 @@ where
     /// Capture and publish applied state, and start the barrier that makes it durable.
     ///
     /// The caller must await the previous barrier before starting another.
+    #[boxed]
     pub(super) async fn start_sync(&mut self) -> Barrier {
         let (databases, snapshots, barrier) = self.take_databases().finalize().await;
         self.databases = Some(databases);
@@ -492,6 +495,7 @@ where
     /// the branch anchor, and returns without answering if `proposal` is cancelled first.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
+    #[boxed]
     pub(super) async fn propose(
         &mut self,
         context: &E,
@@ -693,6 +697,7 @@ where
     ///
     /// Panics if `block` does not have the next height and the branch anchor as its parent, or if
     /// an uncached block fails to process or match its commitments.
+    #[boxed]
     pub(super) async fn finalize<P>(
         &mut self,
         context: &E,
@@ -1104,7 +1109,8 @@ where
     /// Returns [`PrepareBatchesError::Invalid`] if the walk reaches the anchor height without
     /// meeting the branch anchor, or if `provider` returns a block that is not the parent at the
     /// preceding height. Returns [`PrepareBatchesError::Incomplete`] if `provider` stops before
-    /// delivering a parent.
+    /// delivering a parent. Returns [`PrepareBatchesError::Stale`] if a finalization moves the
+    /// branch anchor during the walk, since a block the walk passed may have become the anchor.
     ///
     /// Each parent is requested under `target`'s round. Once marshal's processed round floor
     /// covers that round, every ancestor of `target` is processed or can never be finalized.
@@ -1123,6 +1129,7 @@ where
 
         let mut replay_path = Vec::new();
         let mut cursor = target;
+        let start = self.branch_anchor().digest;
         loop {
             let (known, anchor) = {
                 let state = self.state.lock();
@@ -1134,6 +1141,13 @@ where
             };
             if known {
                 break;
+            }
+            if anchor.digest != start {
+                debug!(
+                    ?target_digest,
+                    "branch anchor moved during the ancestry walk"
+                );
+                return Err(PrepareBatchesError::Stale);
             }
 
             let cursor_height = cursor.height();
@@ -1827,6 +1841,35 @@ mod tests {
                     .and_then(VecDeque::pop_front)
                     .flatten()
                     .map(digested)
+            }
+        }
+    }
+
+    /// A [MapProvider] that holds the parent request of one child until released.
+    #[derive(Clone)]
+    struct GatedParentProvider {
+        inner: MapProvider,
+        child: Digest,
+        gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl BlockProvider for GatedParentProvider {
+        type Block = Block;
+
+        fn subscribe_parent(
+            &self,
+            block: &Digested<Self::Block>,
+            bound: Option<Round>,
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+            let gate = (block.digest() == self.child)
+                .then(|| self.gate.lock().take())
+                .flatten();
+            let parent = self.inner.subscribe_parent(block, bound);
+            async move {
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                parent.await
             }
         }
     }
@@ -3546,6 +3589,55 @@ mod tests {
                 1,
                 "closed ancestry should not be retried"
             );
+        });
+    }
+
+    /// A walk that passes a block before that block is finalized, and then reaches the old
+    /// anchor, is stale rather than invalid.
+    #[test]
+    fn replay_walk_is_stale_when_the_anchor_moves_past_it() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let parent = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let (target, _) = harness.build_child(&parent, View::new(2)).await;
+            harness.provider.insert(genesis.clone());
+            harness.provider.insert(target.clone());
+            harness
+                .processor
+                .execution
+                .state
+                .lock()
+                .pending
+                .remove(&parent.digest());
+
+            // The walk passes `parent` while genesis is the anchor, then waits for its parent.
+            let (release, gate) = oneshot::channel();
+            let provider = GatedParentProvider {
+                inner: harness.provider.clone(),
+                child: parent.digest(),
+                gate: Arc::new(Mutex::new(Some(gate))),
+            };
+            let execution = harness.processor.execution.clone();
+            let walk_context = harness.context_cell.as_present().child("walk");
+            let mut walk = Box::pin(execution.prepare_replay(
+                &walk_context,
+                &provider,
+                digested(target.clone()),
+            ));
+            assert!(futures::poll!(&mut walk).is_pending());
+
+            // `parent` becomes the anchor before the walk reaches genesis.
+            assert!(harness.finalize(parent.clone()).await);
+            release.send(()).unwrap();
+            assert!(matches!(walk.await, Err(PrepareBatchesError::Stale)));
+
+            // Walking again from the new anchor finds `target` alone.
+            let path = execution
+                .prepare_replay(&walk_context, &harness.provider, digested(target))
+                .await
+                .expect("the walk must reach the new anchor");
+            assert_eq!(path.blocks.len(), 1);
         });
     }
 }

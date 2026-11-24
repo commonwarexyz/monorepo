@@ -23,7 +23,7 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
 };
-use commonware_macros::select;
+use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
@@ -243,6 +243,7 @@ where
     }
 
     /// Runs state sync toward `finalization`, then processing.
+    #[boxed]
     async fn sync(self, finalization: Finalization<A::SigningScheme, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
@@ -277,6 +278,7 @@ where
     }
 
     /// Opens the database set from marshal, records completion, then runs processing.
+    #[boxed]
     async fn recover(self) {
         let (marshal, _) = self.marshal;
         let Some(Artifact { databases, anchor }) = until_stopped(
