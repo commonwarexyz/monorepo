@@ -17,10 +17,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::simplex::{
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Floor, Mailbox as MarshalMailbox, Variant},
-    },
+    marshal::core::{Floor, Mailbox as MarshalMailbox, RoundBounded, Variant},
     types::Finalization,
 };
 use commonware_parallel::Strategy;
@@ -166,7 +163,7 @@ where
     A::Databases: StateSyncSet<E, R>,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: RoundBounded<Block = A::Block>,
     T: Strategy,
 {
     /// Creates a [`Stateful`] actor and its [`Mailbox`].
@@ -305,11 +302,8 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Handoff, Reporter as _,
-        simplex::{
-            marshal::{Update, ancestry},
-            mocks::scheme as scheme_mocks,
-        },
+        Application as _, CertifiableBlock as _, Handoff, Reporter as _, ancestry,
+        simplex::{marshal::Update, mocks::scheme as scheme_mocks},
     };
     use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;

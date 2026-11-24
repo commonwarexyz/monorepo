@@ -234,10 +234,10 @@ pub use config::{Config, Start};
 mod limits;
 pub use limits::max_payload_size;
 
-pub mod ancestry;
 pub(crate) mod application;
 pub mod coding;
 pub mod core;
+commonware_macros::stability_mod!(ALPHA, mod ledger);
 pub mod resolver;
 pub mod standard;
 pub mod store;

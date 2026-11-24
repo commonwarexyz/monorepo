@@ -16,10 +16,7 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Heightable, Viewable,
-    simplex::marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    simplex::marshal::core::{Mailbox as MarshalMailbox, RoundBounded, Variant},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_macros::{select, select_loop};
@@ -108,7 +105,7 @@ where
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: RoundBounded<Block = A::Block>,
     T: Strategy,
 {
     pub async fn run(mut self) {
@@ -412,10 +409,10 @@ mod tests {
     };
     use commonware_actor::{Feedback, mailbox as actor_mailbox};
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Heightable, Reporter as _,
+        Application as _, CertifiableBlock as _, Heightable, Reporter as _, ancestry,
         simplex::{
             marshal::{
-                self, Update, ancestry,
+                self, Update,
                 core::{Mailbox as MarshalMailbox, Processed},
             },
             mocks::scheme as scheme_mocks,

@@ -5,8 +5,7 @@
 //! both standard and coding variants.
 
 use crate::{
-    Block, CertifiableBlock, Epochable, Handoff, Heightable, simplex::marshal::ancestry::Ancestry,
-    types::Height,
+    Block, CertifiableBlock, Epochable, Handoff, Heightable, ancestry::Ancestry, types::Height,
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_parallel::Sequential;
@@ -107,7 +106,6 @@ where
 {
     type Block = B;
     type Context = B::Context;
-    type SigningScheme = S;
     type Input = ();
 
     async fn prepare(
@@ -194,7 +192,6 @@ where
 {
     type Block = B;
     type Context = B::Context;
-    type SigningScheme = S;
     type Input = ();
 
     async fn propose(
@@ -284,7 +281,6 @@ where
 {
     type Block = B;
     type Context = B::Context;
-    type SigningScheme = S;
     type Input = ();
 
     async fn propose(
@@ -357,7 +353,6 @@ where
 {
     type Block = B;
     type Context = B::Context;
-    type SigningScheme = S;
     type Input = ();
 
     async fn propose(

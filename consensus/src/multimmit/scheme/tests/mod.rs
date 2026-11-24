@@ -32,9 +32,8 @@ mod subjects;
 mod threshold;
 
 use super::{
-    Available, DaCertificateOf, DaRecoveryError, Error, Generic, Namespace, NullifyFaults,
-    OrdinarySignature, OrdinarySubject, Scheme, SignatureVerification, Verified, bls12381,
-    ed25519 as ed25519_suite,
+    Available, DaCertificateOf, DaRecoveryError, Error, Generic, Namespace, OrdinarySignature,
+    OrdinarySubject, Scheme, SignatureVerification, Verified, bls12381, ed25519 as ed25519_suite,
 };
 use crate::{
     Epochable as _, Viewable as _,
