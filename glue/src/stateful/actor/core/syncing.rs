@@ -5,6 +5,7 @@ use crate::stateful::{
         core::{
             mailbox::{Message, ProposalRequest},
             processing::Processing,
+            until_stopped,
             verifications::VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
@@ -295,7 +296,13 @@ where
 
         // Serving must not wait for the next finalization, so the synced state
         // alone publishes first.
-        processor.publish_snapshot().await;
+        let context = self.context.as_present();
+        if until_stopped(context, processor.publish_snapshot())
+            .await
+            .is_none()
+        {
+            return;
+        }
 
         let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
@@ -308,9 +315,14 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
-                        let Applied { barrier, prune } = processor
-                            .finalize(self.context.as_present(), &self.marshal, &block, false)
-                            .await;
+                        let Some(Applied { barrier, prune }) = until_stopped(
+                            context,
+                            processor.finalize(context, &self.marshal, &block, false),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
 
                         assert!(
                             barrier.is_none(),
@@ -327,8 +339,15 @@ where
         // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
         // durable.
         if !pending_acknowledgements.is_empty() {
-            let barrier = processor.start_sync().await;
+            let Some(barrier) = until_stopped(context, processor.start_sync()).await else {
+                return;
+            };
             if !barrier.durable().await {
+                // A barrier ends without durability only when the runtime shuts down.
+                assert!(
+                    context.stopped().now_or_never().is_some(),
+                    "handoff barrier ended without durability while running",
+                );
                 return;
             }
             for acknowledgement in pending_acknowledgements {
@@ -342,14 +361,28 @@ where
 
         // Completion is an irreversible startup floor. Persist it only after every handoff through
         // `completed_height` is durable and before pruning or exposing the databases.
-        self.plan = self.plan.set_completed(completed_height).await;
+        let Some(plan) = until_stopped(context, self.plan.set_completed(completed_height)).await
+        else {
+            return;
+        };
+        self.plan = plan;
         let _ = self.metrics.sync_done.try_set(1);
         if let Some(prune) = pending_prune {
-            processor.prune(prune, &self.marshal).await;
+            if until_stopped(context, processor.prune(prune, &self.marshal))
+                .await
+                .is_none()
+            {
+                return;
+            }
             // The published snapshots were captured before this prune. Republish
             // so serving stops pinning the pruned state. Every handoff barrier
             // was awaited above, so the republished state is already durable.
-            processor.publish_snapshot().await;
+            if until_stopped(context, processor.publish_snapshot())
+                .await
+                .is_none()
+            {
+                return;
+            }
         }
 
         for subscriber in self.database_subscribers.drain(..) {
@@ -864,9 +897,20 @@ mod tests {
         });
     }
 
+    /// A runner whose spawned tasks' panics resolve their handles with an error.
+    fn panicking_runner() -> deterministic::Runner {
+        deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_timeout(Some(Duration::from_secs(10)))
+                .with_catch_panics(true),
+        )
+    }
+
+    /// A handoff barrier that ends without durability while the actor runs panics. Marshal's
+    /// acknowledgement is cancelled and completion is not recorded.
     #[test]
     fn aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete() {
-        deterministic::Runner::default().start(|context| async move {
+        panicking_runner().start(|context| async move {
             let (harness, mut artifact) =
                 TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             artifact.databases =
@@ -874,16 +918,20 @@ mod tests {
 
             let (acknowledgement, waiter) = Exact::handle();
             let sync_done = harness.syncing.metrics.sync_done.clone();
-            harness
-                .syncing
-                .transition(
+            let syncing = harness.syncing;
+            let transition = context.child("transition").spawn(move |_| {
+                syncing.transition(
                     artifact,
                     Some(FinalizedHandoff::Apply(
                         digested(TestBlock::child(&TestBlock::new(7, 9), 10)),
                         acknowledgement,
                     )),
                 )
-                .await;
+            });
+            assert!(
+                transition.await.is_err(),
+                "an aborted handoff flush must panic"
+            );
 
             assert!(
                 waiter.await.is_err(),
@@ -907,7 +955,7 @@ mod tests {
     #[case::success(true)]
     #[case::failure(false)]
     fn live_floor_reports_handoff_once_after_durability(#[case] succeeds: bool) {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        panicking_runner().start(|context| async move {
             let mut signing = context.child("signing");
             let fixture =
                 scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR", 1);
@@ -1063,10 +1111,13 @@ mod tests {
                 Some(Processed::Block(Height::new(1)))
             );
             if !succeeds {
-                // A failed flush stops the handoff. After restart, marshal is still at block 1
-                // and state sync is still in progress.
+                // A flush that ends without durability while running panics the handoff. After
+                // restart, marshal is still at block 1 and state sync is still in progress.
                 drop(release);
-                transition.await.expect("failed durability stops handoff");
+                assert!(
+                    transition.await.is_err(),
+                    "an aborted handoff flush must panic"
+                );
                 marshal.abort().await;
                 let restarted = fixtures::marshal_fixture_with_reporter(
                     context.child("restart"),

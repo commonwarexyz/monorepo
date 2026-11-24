@@ -23,7 +23,7 @@ use commonware_consensus::marshal::{
     core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_macros::select;
-use commonware_runtime::{Clock, Supervisor};
+use commonware_runtime::{Clock, Spawner};
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use std::{
     collections::VecDeque,
@@ -181,7 +181,7 @@ where
 
 impl<E, A, V> Handler<E, A, V>
 where
-    E: Supervisor + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,

@@ -3,6 +3,7 @@ use crate::stateful::{
     actor::{
         core::{
             mailbox::{Message, Proposal, ProposalRequest},
+            until_stopped,
             verifications::{Handler as Verifications, Request, VerificationRequest},
         },
         processor::{Applied, Processor, Prune},
@@ -29,7 +30,7 @@ use futures::{
     future::{Either, pending, ready},
 };
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
-use tracing::{Instrument as _, debug, info_span};
+use tracing::{Instrument as _, debug, info_span, warn};
 
 /// Work selected for one iteration of the processing loop.
 enum Step<M, P> {
@@ -135,11 +136,13 @@ impl Durability {
 
     /// Clears the active barrier and acknowledges every height it made durable.
     ///
-    /// Returns `false` without advancing the durable height if `completion` is `None`. Panics if no
-    /// barrier is active.
-    fn complete(&mut self, completion: Option<Height>) -> bool {
+    /// Returns `false` without advancing the durable height if `completion` is `None`, which only
+    /// a runtime shutdown causes. Panics if no barrier is active, or if `completion` is `None`
+    /// while the actor is not `stopping`.
+    fn complete(&mut self, completion: Option<Height>, stopping: bool) -> bool {
         assert!(self.barrier.take().is_some(), "barrier not active");
         let Some(height) = completion else {
+            assert!(stopping, "barrier ended without durability while running");
             return false;
         };
         assert!(height > self.durable && height <= self.applied());
@@ -245,7 +248,7 @@ where
             self.context,
             on_start => {
                 if let Some(completion) = durability.completion().now_or_never()
-                    && !durability.complete(completion)
+                    && !durability.complete(completion, self.context.stopped().now_or_never().is_some())
                 {
                     return;
                 }
@@ -388,10 +391,11 @@ where
                     loop {
                         if receive_messages {
                             select! {
+                                _ = self.context.stopped() => return,
                                 _ = &mut build => break,
                                 _ = verifications.complete_next(&mut actions) => {},
                                 completion = durability.completion() => {
-                                    if !durability.complete(completion) {
+                                    if !durability.complete(completion, self.context.stopped().now_or_never().is_some()) {
                                         return;
                                     }
                                 },
@@ -405,10 +409,11 @@ where
                             }
                         } else {
                             select! {
+                                _ = self.context.stopped() => return,
                                 _ = &mut build => break,
                                 _ = verifications.complete_next(&mut actions) => {},
                                 completion = durability.completion() => {
-                                    if !durability.complete(completion) {
+                                    if !durability.complete(completion, self.context.stopped().now_or_never().is_some()) {
                                         return;
                                     }
                                 },
@@ -430,39 +435,40 @@ where
                     } else {
                         // Requests keep running while the block applies. Those on a competing
                         // branch go stale and start over against the new branch anchor.
+                        // A shutdown mid-finalization leaves the block unacknowledged, so marshal
+                        // redelivers it after restart.
                         let process = info_span!(parent: &span, "stateful.actor.finalized");
-                        async {
-                            let Applied { barrier, prune } = verifications
-                                .drive(
-                                    self.processor.finalize(
-                                        &self.context,
-                                        &self.marshal,
-                                        &block,
-                                        durability.barrier.is_none(),
-                                    ),
-                                    &mut actions,
-                                )
-                                .await;
-                            debug!(
-                                height = block.height().get(),
-                                "applied finalized database batch"
-                            );
+                        let finalize = verifications
+                            .drive(
+                                self.processor.finalize(
+                                    &self.context,
+                                    &self.marshal,
+                                    &block,
+                                    durability.barrier.is_none(),
+                                ),
+                                &mut actions,
+                            )
+                            .instrument(process.clone());
+                        let Some(Applied { barrier, prune }) =
+                            until_stopped(self.context.as_present(), finalize).await
+                        else {
+                            warn!(height = block.height().get(), "stopped mid-finalization");
+                            return;
+                        };
+                        let _process = process.enter();
+                        debug!(height = block.height().get(), "applied finalized database batch");
 
-                            // Acknowledge once a barrier covers this height, so marshal's processed
-                            // height never passes durable state and a restart replays the unsynced
-                            // suffix.
-                            let height = block.height();
-                            durability.record(height, acknowledgement);
-                            if let Some(barrier) = barrier {
-                                durability.set_barrier(height, barrier);
-                            }
-
-                            if let Some(prune) = prune {
-                                pending_prune = Some(prune);
-                            }
+                        // Acknowledge once a barrier covers this height, so marshal's processed
+                        // height never passes durable state and a restart replays the unsynced
+                        // suffix.
+                        let height = block.height();
+                        durability.record(height, acknowledgement);
+                        if let Some(barrier) = barrier {
+                            durability.set_barrier(height, barrier);
                         }
-                        .instrument(process)
-                        .await;
+                        if let Some(prune) = prune {
+                            pending_prune = Some(prune);
+                        }
                     }
                 }
                 Step::Action(Action::Message(Message::SubscribeDatabases { response })) => {
@@ -476,9 +482,11 @@ where
                         durability.barrier.is_none() && durability.covers(prune.barrier_height),
                         "prune must wait for a completed barrier covering its target",
                     );
-                    verifications
-                        .drive(self.processor.prune(prune, &self.marshal), &mut actions)
-                        .await;
+                    let pruned = verifications
+                        .drive(self.processor.prune(prune, &self.marshal), &mut actions);
+                    if until_stopped(self.context.as_present(), pruned).await.is_none() {
+                        return;
+                    }
                     // The published snapshots predate this prune and pin the pruned storage, so
                     // capture and publish afresh right away. Starting the successor barrier now
                     // does both.
@@ -493,13 +501,15 @@ where
                             return;
                         }
                     } else {
-                        verifications
-                            .drive(self.processor.publish_snapshot(), &mut actions)
-                            .await;
+                        let published = verifications
+                            .drive(self.processor.publish_snapshot(), &mut actions);
+                        if until_stopped(self.context.as_present(), published).await.is_none() {
+                            return;
+                        }
                     }
                 }
                 Step::Barrier(completion) => {
-                    if !durability.complete(completion) {
+                    if !durability.complete(completion, self.context.stopped().now_or_never().is_some()) {
                         return;
                     }
                 }
@@ -964,6 +974,15 @@ mod tests {
             >,
     {
         assert!(queue_marker(context, mailbox).await.is_none());
+    }
+
+    /// A timed runner whose spawned tasks' panics resolve their handles with an error.
+    fn panicking_runner() -> deterministic::Runner {
+        deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_timeout(Some(Duration::from_secs(10)))
+                .with_catch_panics(true),
+        )
     }
 
     async fn spawn_gated_application(
@@ -4145,7 +4164,7 @@ mod tests {
     #[case::success(true)]
     #[case::failure(false)]
     fn duplicate_reports_wait_for_durability(#[case] succeeds: bool) {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        panicking_runner().start(|context| async move {
             let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "duplicate-durability", None).await;
 
@@ -4165,9 +4184,10 @@ mod tests {
 
             let release = control.flushes.lock().remove(0);
             if !succeeds {
-                // A failed flush stops processing and cancels the duplicate receipt.
+                // A flush that ends without durability while running panics, which cancels the
+                // duplicate receipt.
                 drop(release);
-                actor.await.expect("failed durability stops processing");
+                assert!(actor.await.is_err(), "an aborted flush must panic");
                 assert!(duplicate.await.is_err());
                 return;
             }
@@ -4637,7 +4657,7 @@ mod tests {
     /// An aborted target flush must stop processing before pruning can discard its recovery state.
     #[test]
     fn aborted_target_flush_prevents_prune() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        panicking_runner().start(|context| async move {
             let (mut mailbox, control, _subscriber, _marshal, actor) = spawn_processing(
                 &context,
                 "gated-aborted-prune",
@@ -4663,7 +4683,7 @@ mod tests {
             assert_eq!(control.flushes.lock().len(), 1);
 
             drop(control.flushes.lock().remove(0));
-            actor.await.expect("processing actor should stop");
+            assert!(actor.await.is_err(), "an aborted flush must panic");
             assert!(
                 waiter1.await.is_err(),
                 "aborted target flush must cancel the first acknowledgement",
@@ -4834,7 +4854,7 @@ mod tests {
     /// acknowledgement when processing stops.
     #[test]
     fn idle_acks_follow_flush_outcome() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        panicking_runner().start(|context| async move {
             let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "gated-idle", None).await;
 
@@ -4864,7 +4884,7 @@ mod tests {
             // flush as shutdown. The acknowledgement is canceled so marshal stops without
             // advancing its floor past unflushed state.
             drop(release2);
-            actor.await.expect("processing actor should stop");
+            assert!(actor.await.is_err(), "an aborted flush must panic");
             assert!(
                 waiter2.await.is_err(),
                 "unflushed block acknowledgement must be canceled",
@@ -4874,7 +4894,7 @@ mod tests {
 
     #[test]
     fn ready_aborted_flush_stops_processing() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        panicking_runner().start(|context| async move {
             let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "gated-ready-abort", None).await;
 
@@ -4897,7 +4917,7 @@ mod tests {
             );
             drop(release1);
 
-            actor.await.expect("processing actor should stop");
+            assert!(actor.await.is_err(), "an aborted flush must panic");
             assert!(control.flushes.lock().is_empty());
             assert!(
                 waiter1.await.is_err(),

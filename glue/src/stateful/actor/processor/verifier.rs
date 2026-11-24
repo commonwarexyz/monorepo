@@ -16,7 +16,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_runtime::{
-    Clock, Supervisor,
+    Clock, Spawner,
     telemetry::{metrics::histogram::Timer, traces::TracedExt as _},
 };
 use futures::StreamExt;
@@ -59,7 +59,7 @@ where
 
 impl<E, A> Verifier<E, A>
 where
-    E: Supervisor + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
 {
     /// Acquires a request's block, its parent when `verify` is set, and the missing path to

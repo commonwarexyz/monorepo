@@ -40,7 +40,8 @@ use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, Supervisor,
+    Clock, Spawner,
+    signal::Signal,
     telemetry::metrics::{GaugeExt, histogram::Timer},
 };
 use commonware_utils::{Widen, channel::fallible::OneshotExt, sync::Mutex};
@@ -220,6 +221,17 @@ pub(super) struct Applied<T> {
     pub(super) prune: Option<Prune<T>>,
 }
 
+/// Panics with `failure`, unless `stopped` has fired. A stopping runtime can fail storage
+/// mid-operation, so a failure during shutdown is logged instead and the operation never
+/// completes.
+async fn fail_unless_stopped<T>(stopped: Signal, failure: String) -> T {
+    if stopped.now_or_never().is_some() {
+        warn!(failure, "abandoning a failed operation during shutdown");
+        return std::future::pending().await;
+    }
+    panic!("{failure}");
+}
+
 /// Marshal and database prune targets selected from finalized history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Prune<T> {
@@ -353,7 +365,7 @@ where
 
 impl<E, A, T> Processor<E, A, T>
 where
-    E: Supervisor + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
     T: Strategy,
 {
@@ -543,7 +555,10 @@ where
                         );
                         Handoff::Wait
                     }
-                    Err(err) => panic!("prepare failed: {err}"),
+                    Err(err) => {
+                        fail_unless_stopped(context.stopped(), format!("prepare failed: {err}"))
+                            .await
+                    }
                 };
                 let prepared = match prepared {
                     Handoff::Vote(proposed) => {
@@ -582,7 +597,10 @@ where
                         );
                         None
                     }
-                    Err(err) => panic!("propose failed: {err}"),
+                    Err(err) => {
+                        fail_unless_stopped(context.stopped(), format!("propose failed: {err}"))
+                            .await
+                    }
                 };
                 if block.is_some() {
                     timer.observe(context);
@@ -733,7 +751,7 @@ where
                 [block.clone()],
                 block_context.round(),
             );
-            let batch = self
+            let batch = match self
                 .app
                 .process(
                     (context.child("finalize_reconstruct"), block_context),
@@ -742,8 +760,17 @@ where
                     Finality::Finalized,
                 )
                 .await
-                .unwrap_or_else(|err| panic!("finalize reconstruction failed: {err}"))
-                .expect("finalize reconstruction must process the block");
+            {
+                Ok(batch) => batch,
+                Err(err) => {
+                    fail_unless_stopped(
+                        context.stopped(),
+                        format!("finalize reconstruction failed: {err}"),
+                    )
+                    .await
+                }
+            }
+            .expect("finalize reconstruction must process the block");
             assert!(
                 A::Databases::matches_sync_targets(&batch, &sync_targets),
                 "finalize reconstruction must match block commitments",
@@ -815,7 +842,7 @@ where
 
 impl<E, A> Execution<E, A>
 where
-    E: Supervisor + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
 {
     fn branch_anchor(&self) -> Anchor<BlockDigest<A, E>> {
@@ -1028,6 +1055,7 @@ where
             return Err(PrepareBatchesError::Invalid);
         }
         let batches = self.fork_batches(&parent_digest).await?;
+        let stopped = context.stopped();
         let merkleized = match app
             .process(
                 (context, consensus_context),
@@ -1050,7 +1078,9 @@ where
                 debug!(block = ?digest, "block execution went stale");
                 return Err(PrepareBatchesError::Stale);
             }
-            Err(err @ ExecutionError::Fatal(_)) => panic!("process failed: {err}"),
+            Err(err @ ExecutionError::Fatal(_)) => {
+                fail_unless_stopped(stopped, format!("process failed: {err}")).await
+            }
         };
 
         if !A::Databases::matches_sync_targets(&merkleized, &sync_targets) {
