@@ -574,12 +574,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::{
-        mocks::{Consumer as MockConsumer, Key as MockKey, Producer as MockProducer},
-        tests::ClosedBlocker,
-    };
+    use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey, Producer as MockProducer};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-    use commonware_p2p::utils::StaticProvider;
+    use commonware_p2p::utils::{StaticProvider, mocks::NoopBlocker};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZDuration, NZUsize, non_empty_vec, ordered::Set};
     use futures::{FutureExt as _, future::Aborted};
@@ -599,7 +596,7 @@ mod tests {
                 context,
                 Config {
                     peer_provider: StaticProvider::new(0, Set::default()),
-                    blocker: ClosedBlocker,
+                    blocker: NoopBlocker::default(),
                     consumer,
                     producer: MockProducer::<MockKey, Bytes>::default(),
                     mailbox_size: NZUsize!(1),
