@@ -25,80 +25,6 @@ use core::{convert::Infallible, num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, pin_mut};
 use std::{collections::VecDeque, sync::Arc};
 
-/// Builds the database's index by replaying the log starting at the inactivity floor. Assumes
-/// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
-/// operation, indicating activity status updates. The first argument of the callback is the
-/// activity status of the operation, and the second argument is the location of the operation it
-/// inactivates (if any). Returns the number of active keys in the db.
-///
-/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
-/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
-/// instead of re-reading the log; `None` disables it.
-pub(crate) async fn build_index_from_log<F, C, I, Fn>(
-    inactivity_floor_loc: crate::merkle::Location<F>,
-    reader: &C,
-    index: &mut I,
-    init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
-    mut callback: Fn,
-) -> Result<usize, Error<F>>
-where
-    F: crate::merkle::Family,
-    C: Contiguous<Item: Operation<F>>,
-    I: Index<Value = crate::merkle::Location<F>>,
-    Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
-{
-    let bounds = reader.bounds();
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
-    let stream = reader
-        .replay(
-            *inactivity_floor_loc..bounds.end,
-            init_buffer,
-            ReadOptions::DONT_CACHE,
-        )
-        .await?;
-    pin_mut!(stream);
-    let last_commit_loc = bounds.end.saturating_sub(1);
-
-    // Memoize `(location -> key)` for replayed update ops so collision resolution in
-    // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
-    // log.
-    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
-
-    let mut active_keys: usize = 0;
-    while let Some(batch) = stream.next().await {
-        for (loc, op) in batch? {
-            if let Some(key) = op.key() {
-                if op.is_delete() {
-                    let old_loc = delete_key(index, reader, key, cache.as_mut()).await?;
-                    callback(false, old_loc);
-                    if old_loc.is_some() {
-                        active_keys -= 1;
-                    }
-                } else if op.is_update() {
-                    let new_loc = crate::merkle::Location::new(loc);
-                    let old_loc = update_key(index, reader, key, new_loc, cache.as_mut()).await?;
-                    callback(true, old_loc);
-                    if old_loc.is_none() {
-                        active_keys += 1;
-                    }
-
-                    // This update op is now a `find_update_op` candidate for later ops of its
-                    // key.
-                    if let Some(cache) = cache.as_mut() {
-                        cache.put(loc, op.into_key().expect("operation without key"));
-                    }
-                }
-            } else if op.is_commit() {
-                callback(loc == last_commit_loc, None);
-            }
-        }
-    }
-
-    Ok(active_keys)
-}
-
 /// Delete `key` from the index if it exists, using a stable log reader, and return the
 /// previously associated location.
 pub(super) async fn delete_key<F, I, R>(
@@ -525,9 +451,13 @@ where
     Ok((index, active_keys))
 }
 
-/// Build an index serially on the calling task via [build_index_from_log], collecting each
-/// replayed location's activity status into a [BitMap]. Returns the number of active keys and the
-/// activity bitmap (see [Rebuild::build_index]).
+/// Build an index serially on the calling task by replaying the log from the inactivity floor,
+/// which the log must still retain. Returns the number of active keys and the activity bitmap
+/// (see [Rebuild::build_index]).
+///
+/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
+/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
+/// instead of re-reading the log; `None` disables it.
 async fn build_index_serial<F, C, I>(
     inactivity_floor_loc: Location<F>,
     reader: &C,
@@ -540,24 +470,56 @@ where
     C: Contiguous<Item: Operation<F>>,
     I: Index<Value = Location<F>>,
 {
-    // Track per-op transitions locally: push each op's status and clear the bit of any location it
-    // supersedes. The state after the last op is each location's final status.
-    let mut activity = BitMap::new();
     let floor = *inactivity_floor_loc;
-    let active_keys = build_index_from_log(
-        inactivity_floor_loc,
-        reader,
-        index,
-        init_buffer,
-        cache_size,
-        |is_active, old_loc| {
-            activity.push(is_active);
-            if let Some(loc) = old_loc {
-                activity.set(*loc - floor, false);
+    let bounds = reader.bounds();
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
+    let stream = reader
+        .replay(floor..bounds.end, init_buffer, ReadOptions::DONT_CACHE)
+        .await?;
+    pin_mut!(stream);
+    let last_commit_loc = bounds.end.saturating_sub(1);
+
+    // Memoize `(location -> key)` for replayed update ops so collision resolution in
+    // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
+    // log.
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
+
+    // Push each replayed op's status and clear the bit of any location it supersedes. The state
+    // after the last op is each location's final status.
+    let mut activity = BitMap::new();
+    let mut active_keys: usize = 0;
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            if let Some(key) = op.key() {
+                if op.is_delete() {
+                    let old_loc = delete_key(index, reader, key, cache.as_mut()).await?;
+                    activity.push(false);
+                    if let Some(old_loc) = old_loc {
+                        activity.set(*old_loc - floor, false);
+                        active_keys -= 1;
+                    }
+                } else if op.is_update() {
+                    let new_loc = Location::new(loc);
+                    let old_loc = update_key(index, reader, key, new_loc, cache.as_mut()).await?;
+                    activity.push(true);
+                    match old_loc {
+                        Some(old_loc) => activity.set(*old_loc - floor, false),
+                        None => active_keys += 1,
+                    }
+
+                    // This update op is now a `find_update_op` candidate for later ops of its
+                    // key.
+                    if let Some(cache) = cache.as_mut() {
+                        cache.put(loc, op.into_key().expect("operation without key"));
+                    }
+                }
+            } else if op.is_commit() {
+                activity.push(loc == last_commit_loc);
             }
-        },
-    )
-    .await?;
+        }
+    }
+
     Ok((active_keys, activity))
 }
 
