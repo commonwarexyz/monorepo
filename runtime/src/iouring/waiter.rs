@@ -291,8 +291,8 @@ impl Waiters {
 
     /// Detach local or forwarded observation, returning whether cancellation is needed.
     ///
-    /// Pending writes and syncs keep running without their observer. Other
-    /// newly orphaned requests return `true` so the driver can cancel them.
+    /// Pending writes, syncs, and resizes keep running without their observer.
+    /// Other newly orphaned requests return `true` so the driver can cancel them.
     /// A retained result is removed and deferred for destruction. Stale IDs,
     /// detached syncs, and already orphaned requests are left alone.
     pub fn orphan(&mut self, id: WaiterId, deferred: &mut Deferred) -> bool {
@@ -327,8 +327,8 @@ impl Waiters {
 
     /// Remove local and forwarded observers, returning pending cancellation IDs.
     ///
-    /// Writes and syncs remain owned until they finish. Detached sync senders
-    /// stay installed. Surviving observers are notified of closure.
+    /// Writes, syncs, and resizes remain owned until they finish. Detached sync
+    /// senders stay installed. Surviving observers are notified of closure.
     pub fn close(&mut self, deferred: &mut Deferred) -> Vec<WaiterId> {
         let mut cancel = Vec::new();
         for index in 0..self.entries.slots() {
@@ -345,7 +345,8 @@ impl Waiters {
             }
 
             // Orphaning reports closure to forwarded observers and releases retained
-            // results. Writes and syncs keep running without requesting cancellation.
+            // results. Writes, syncs, and resizes keep running without requesting
+            // cancellation.
             if self.orphan(id, deferred) {
                 cancel.push(id);
             }

@@ -12,7 +12,7 @@
 //!
 //! An operation may be polled or dropped on any thread after registration.
 //! Dropping it releases its observer. The driver decides whether to cancel the
-//! request or finish retained work such as writes and syncs.
+//! request or finish retained work such as writes, syncs, and resizes.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -291,6 +291,12 @@ pub mod tests {
         owner.borrow().driver.as_ref().unwrap().len()
     }
 
+    /// Mark the current worker as closing, so it rejects new registrations as during shutdown.
+    pub fn close_current_worker() {
+        let owner = Local::current().expect("io_uring I/O requires a current worker");
+        owner.borrow_mut().closing = true;
+    }
+
     /// Arbitrary waker callbacks that reenter the current worker's local state.
     ///
     /// RawWaker exposes clone and drop as well as wake, so every callback can
@@ -557,7 +563,7 @@ pub mod tests {
             let waker = callbacks.waker();
             let mut cx = Context::from_waker(&waker);
 
-            Local::current().unwrap().borrow_mut().closing = true;
+            close_current_worker();
             assert!(matches!(
                 operation.poll_unpin(&mut cx),
                 Poll::Ready(Err(Error::Closed))

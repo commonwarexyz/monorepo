@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    index::{Cursor as _, Unordered as _, unordered::Index},
+    index::{Cursor as _, Factory as IndexFactory, Unordered as UnorderedIndex},
     journal::{
         authenticated::{Backing as _, BackingRecovery as _},
         contiguous::{
@@ -10,12 +10,13 @@ use crate::{
     },
     merkle::mmr::Location,
     qmdb::{
+        SnapshotBuild,
         any::{
             BITMAP_CHUNK_BYTES, read_many_map,
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
-        build_snapshot_from_log, delete_known_loc,
+        delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         metrics::Metrics,
         operation::{Committable as _, Key, Operation as _},
@@ -28,10 +29,13 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::{Widen, bitmap};
 use core::{borrow::Borrow, num::NonZeroUsize};
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tracing::{debug, warn};
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
@@ -54,6 +58,10 @@ pub struct Config<T: Translator, C, S: Strategy> {
 
     /// The strategy used to parallelize batched reads.
     pub strategy: S,
+
+    /// The number of tasks a partitioned index may build its snapshot on during init. Any other
+    /// index builds on the calling task.
+    pub init_concurrency: NonZeroUsize,
 }
 
 /// A finalized batch of writes and deletes ready to be applied to the store.
@@ -78,28 +86,28 @@ impl<K: Key, V: CodecShared + Clone, const N: usize> From<[(K, Option<V>); N]> f
 }
 
 /// A mutable batch of writes and deletes staged against the current store state.
-pub struct Batch<'a, E, K, V, T, S>
+pub struct Batch<'a, E, K, V, I, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
-    T: Translator,
+    I: UnorderedIndex<Value = Location>,
     S: Strategy,
 {
-    db: &'a Db<E, K, V, T, S>,
+    db: &'a Db<E, K, V, I, S>,
     diff: BTreeMap<K, Option<V>>,
     metadata: Option<V>,
 }
 
-impl<'a, E, K, V, T, S> Batch<'a, E, K, V, T, S>
+impl<'a, E, K, V, I, S> Batch<'a, E, K, V, I, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
-    T: Translator,
+    I: UnorderedIndex<Value = Location>,
     S: Strategy,
 {
-    const fn new(db: &'a Db<E, K, V, T, S>) -> Self {
+    const fn new(db: &'a Db<E, K, V, I, S>) -> Self {
         Self {
             db,
             diff: BTreeMap::new(),
@@ -167,12 +175,12 @@ where
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
-pub struct Db<E, K, V, T, S>
+pub struct Db<E, K, V, I, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
-    T: Translator,
+    I: UnorderedIndex<Value = Location>,
     S: Strategy,
 {
     /// A log of all [Operation]s that have been applied to the store.
@@ -189,7 +197,7 @@ where
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Update].
-    snapshot: Index<T, Location>,
+    snapshot: I,
 
     /// The number of active keys in the store.
     active_keys: usize,
@@ -214,12 +222,12 @@ where
     strategy: S,
 }
 
-impl<E, K, V, T, S> std::fmt::Debug for Db<E, K, V, T, S>
+impl<E, K, V, I, S> std::fmt::Debug for Db<E, K, V, I, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
-    T: Translator,
+    I: UnorderedIndex<Value = Location>,
     S: Strategy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -230,12 +238,12 @@ where
     }
 }
 
-impl<E, K, V, T, S> Db<E, K, V, T, S>
+impl<E, K, V, I, S> Db<E, K, V, I, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
-    T: Translator,
+    I: UnorderedIndex<Value = Location>,
     S: Strategy,
 {
     /// Get the value of `key` in the db, or None if it has no value.
@@ -275,7 +283,7 @@ where
     }
 
     /// Returns a new empty batch of changes.
-    pub const fn new_batch(&self) -> Batch<'_, E, K, V, T, S> {
+    pub const fn new_batch(&self) -> Batch<'_, E, K, V, I, S> {
         Batch::new(self)
     }
 
@@ -318,10 +326,9 @@ where
         Ok(metadata)
     }
 
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
+    /// Prune historical operations prior to `prune_loc`, preserving the current snapshot.
     ///
-    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable, but
     /// uncommitted operations are not guaranteed to survive.
     #[tracing::instrument(name = "qmdb.store.db.prune", level = "info", skip_all)]
     #[boxed]
@@ -366,12 +373,19 @@ where
     /// Initializes a new [Db] with the given configuration.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
+    ///
+    /// All index variants take a [Spawner] context. The unpartitioned index rebuilds on the
+    /// calling task.
     #[boxed]
     pub async fn init(
         context: E,
-        cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg, S>,
+        cfg: Config<I::Translator, <Operation<crate::mmr::Family, K, V> as Read>::Cfg, S>,
         max_size: Option<Location>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        E: Spawner,
+        I: IndexFactory<Value = Location> + SnapshotBuild<crate::mmr::Family>,
+    {
         // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
         // recovery owner unpublished until that commit and its replay floor are validated.
         validate_initialization_bound(max_size)?;
@@ -392,7 +406,7 @@ where
         } else {
             Some(pending.read(size - 1).await?)
         };
-        validate_initialization_commit(
+        let floor = validate_initialization_commit(
             bounds.start,
             size,
             bounds == (0..0),
@@ -410,50 +424,52 @@ where
             );
         }
         let mut log = pending.finish(size).await?;
-        if size == 0 {
-            warn!("Log is empty, initializing new db");
-            (log, _) = log.append(&Operation::initial_commit()).await?;
-        }
+
+        // Only a fresh log has no selected commit. Its floor is its initial commit's.
+        let inactivity_floor_loc = match floor {
+            Some(floor) => floor,
+            None => {
+                warn!("Log is empty, initializing new db");
+                let commit = Operation::initial_commit();
+                let floor = commit
+                    .inactivity_floor()
+                    .expect("the initial commit carries a floor");
+                (log, _) = log.append(&commit).await?;
+                floor
+            }
+        };
 
         // Persist recovery repairs and any genesis commit so the next startup need not repeat them.
         let log = log.sync().await?;
 
-        let size = Location::new(log.size());
-        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&log, size)
-            .await?
-            .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-
         // Build the snapshot only from the durable selected prefix.
-        let cache_size = cfg.init_cache;
-        let init_buffer = cfg.init_buffer;
-        let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
+        let mut snapshot = I::new(context.child("snapshot"), cfg.translator);
+
+        // Replay the log from the floor, collecting each replayed location's activity status.
+        // The log is shared so a parallel build can hand each worker its own reader, and sole
+        // ownership is recovered once the build has dropped every worker clone.
+        let log = Arc::new(log);
+        let (active_keys, activity) = snapshot
+            .build_snapshot(
+                context.child("snapshot_build"),
+                inactivity_floor_loc,
+                &log,
+                cfg.init_concurrency,
+                cfg.init_buffer,
+                cfg.init_cache,
+            )
+            .await?;
+        let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
 
         // Seed the bitmap so its pruned prefix matches the retained log boundary. Operations
-        // below the inactivity floor are inactive.
+        // below the inactivity floor are inactive, and the replayed suffix follows.
         let bounds = log.bounds();
         let pruned_chunks =
             (bounds.start / bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS) as usize;
         let mut bitmap = bitmap::Prunable::new_with_pruned_chunks(pruned_chunks)
             .expect("pruned chunk count fits in u64 bits");
         bitmap.extend_to(*inactivity_floor_loc);
-
-        // Replay the log from the floor, appending each operation's status and clearing the bit
-        // of any location it supersedes. The state after the last operation is each location's
-        // final status.
-        let active_keys = build_snapshot_from_log(
-            inactivity_floor_loc,
-            &log,
-            &mut snapshot,
-            init_buffer,
-            cache_size,
-            |is_active, old_loc| {
-                bitmap.push(is_active);
-                if let Some(loc) = old_loc {
-                    bitmap.set_bit(*loc, false);
-                }
-            },
-        )
-        .await?;
+        bitmap.extend_from_bitmap(&activity);
         assert_eq!(bitmap.len(), bounds.end);
 
         let db = Self {
@@ -797,8 +813,13 @@ mod test {
                 },
             },
             floor::{Bounded, Hold, Proportional},
+            store::{
+                partitioned,
+                unpartitioned::{Batch, Db},
+            },
         },
         translator::{OneCap, TwoCap},
+        utils::task_metrics::{SPAWNED, tasks},
     };
     use commonware_cryptography::{
         Hasher as _, Sha256,
@@ -809,7 +830,7 @@ mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Metrics as _, Runner, Spawner as _, Supervisor as _,
+        Metrics as _, Runner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -837,7 +858,10 @@ mod test {
     /// The type of the store used in tests.
     type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Sequential>;
 
-    /// The configuration type of [TestStore].
+    type PartitionedStore =
+        partitioned::Db<deterministic::Context, Digest, Vec<u8>, TwoCap, 1, Sequential>;
+
+    /// The configuration type of [TestStore] and [PartitionedStore].
     type TestConfig =
         Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg, Sequential>;
 
@@ -856,6 +880,15 @@ mod test {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
+            init_concurrency: NZUsize!(1),
+        }
+    }
+
+    /// [test_config] with `tasks` snapshot-build tasks.
+    fn test_config_with_tasks(tasks: usize) -> TestConfig {
+        Config {
+            init_concurrency: NZUsize!(tasks),
+            ..test_config()
         }
     }
 
@@ -1140,6 +1173,7 @@ mod test {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
+            init_concurrency: NZUsize!(1),
         };
         DelayedStore::init(
             DelayedSyncContext {
@@ -1720,6 +1754,94 @@ mod test {
             assert_eq!(values, [None, Some(v2), Some(v4)]);
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// A partitioned store rebuilds the same state at every build concurrency as the
+    /// unpartitioned store rebuilds serially.
+    #[test_traced("WARN")]
+    fn test_store_partitioned_init_matches_serial() {
+        deterministic::Runner::default().start(|mut context| async move {
+            // Seed creates, rewrites, and deletes across several commits so the replay from the
+            // floor supersedes and removes keys.
+            let keys: Vec<_> = (0..200).map(|_| Digest::random(&mut context)).collect();
+            let db = create_test_store(context.child("seed")).await;
+            let creates = keys
+                .iter()
+                .zip(0u8..)
+                .map(|(key, i)| (*key, Some(vec![i; 16])));
+            let (db, _) = apply_entries(db, creates).await;
+            let rewrites = keys
+                .iter()
+                .step_by(3)
+                .map(|key| (*key, Some(vec![0xff; 24])));
+            let (db, _) = apply_entries(db, rewrites).await;
+            let deletes = keys.iter().step_by(7).map(|key| (*key, None));
+            let (db, _) = apply_entries(db, deletes).await;
+            drop(db.sync().await.unwrap());
+
+            let serial = create_test_store(context.child("serial")).await;
+            let expected = serial.get_many(&keys).await.unwrap();
+            assert_bitmap_consistent(&serial).await;
+            let (active_keys, floor, bounds) = (
+                serial.active_keys,
+                serial.inactivity_floor(),
+                serial.bounds(),
+            );
+            drop(serial);
+
+            for concurrency in [1, 2, 3, 4, 8] {
+                let cfg = test_config_with_tasks(concurrency);
+                let before = tasks(&context.encode(), SPAWNED, "snapshot_worker");
+                let reopen = context
+                    .child("partitioned")
+                    .with_attribute("index", concurrency);
+                let db = PartitionedStore::init(reopen, cfg, None).await.unwrap();
+                let after = tasks(&context.encode(), SPAWNED, "snapshot_worker");
+                assert_eq!(after > before, concurrency > 1, "concurrency={concurrency}");
+                assert_eq!(db.active_keys, active_keys);
+                assert_eq!(db.inactivity_floor(), floor);
+                assert_eq!(db.bounds(), bounds);
+                assert_eq!(db.get_many(&keys).await.unwrap(), expected);
+                assert_bitmap_consistent(&db).await;
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_store_partitioned_collision_after_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            // Both keys share the partition byte and the two bytes used by TwoCap.
+            let a = Digest::from([0xab; 32]);
+            let mut b = a;
+            b.0[31] = 1;
+            let keys = [a, b];
+            let db = create_test_store(context.child("seed")).await;
+            let batch: Batch<'_, _, _, _, TwoCap, _> = db.new_batch();
+            let changes = batch
+                .write(a, Some(vec![1]))
+                .write(b, Some(vec![2]))
+                .finalize();
+            let db = db.apply_batch(changes).await.unwrap();
+            drop(db.commit().await.unwrap());
+
+            let open = |ctx| PartitionedStore::init(ctx, test_config_with_tasks(4), None);
+            let db = open(context.child("partitioned")).await.unwrap();
+            assert_eq!(
+                db.get_many(&keys).await.unwrap(),
+                [Some(vec![1]), Some(vec![2])]
+            );
+            let batch: partitioned::Batch<'_, _, _, _, TwoCap, 1, _> = db.new_batch();
+            let changes = batch.write(a, Some(vec![3])).write(b, None).finalize();
+            let db = db.apply_batch(changes).await.unwrap();
+            let expected = [Some(vec![3]), None];
+            assert_eq!(db.get_many(&keys).await.unwrap(), expected);
+            assert_bitmap_consistent(&db).await;
+            drop(db.commit().await.unwrap());
+
+            let db = open(context.child("reopened")).await.unwrap();
+            assert_eq!(db.get_many(&keys).await.unwrap(), expected);
+            assert_bitmap_consistent(&db).await;
         });
     }
 
@@ -2327,6 +2449,7 @@ mod test {
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
                 strategy: Sequential,
+                init_concurrency: NZUsize!(1),
             };
 
             // Commit two keys of different lengths that share a translated prefix.
@@ -2382,6 +2505,7 @@ mod test {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
+            init_concurrency: NZUsize!(1),
         };
         PolicyStore::init(context, cfg, None).await.unwrap()
     }
@@ -2534,6 +2658,7 @@ mod test {
                     init_cache: cfg.init_cache,
                     init_buffer: cfg.init_buffer,
                     strategy: cfg.strategy,
+                    init_concurrency: cfg.init_concurrency,
                 },
                 None,
             )
@@ -3067,12 +3192,12 @@ mod test {
     /// unpruned bit is set if and only if its location holds a live update or the last commit,
     /// and every live update lies at or above the inactivity floor. The snapshot maps each live
     /// key to its update and holds no other entry.
-    async fn assert_bitmap_consistent<E, K, V, T, S>(db: &Db<E, K, V, T, S>)
+    async fn assert_bitmap_consistent<E, K, V, I, S>(db: &super::Db<E, K, V, I, S>)
     where
         E: Context,
         K: Key,
         V: VariableValue,
-        T: Translator,
+        I: UnorderedIndex<Value = Location>,
         S: Strategy,
     {
         let bounds = db.log.bounds();

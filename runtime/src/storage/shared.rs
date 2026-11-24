@@ -184,6 +184,33 @@ pub(crate) async fn check_orphaned_write<S: crate::Storage>(storage: &S) {
     storage.remove("orphaned_write", None).await.unwrap();
 }
 
+/// A resize whose future was dropped lands before the next open reports the blob's length
+/// or exposes its bytes, whether it shrinks or grows the blob.
+pub(crate) async fn check_orphaned_resize<S: crate::Storage>(storage: &S) {
+    for (len, expected) in [(3, &b"orp"[..]), (10, &b"orphaned\0\0"[..])] {
+        let (blob, _) = storage.open("orphaned_resize", b"blob").await.unwrap();
+        blob.write_at(0, b"orphaned", WriteOptions::default())
+            .await
+            .unwrap();
+
+        // Poll once to submit the resize before abandoning its future and final handle.
+        let mut resize = Box::pin(blob.resize(len));
+        let _ = futures::poll!(resize.as_mut());
+        drop(resize);
+        drop(blob);
+
+        let (blob, size) = storage.open("orphaned_resize", b"blob").await.unwrap();
+        assert_eq!(size, len);
+        let read = blob
+            .read_at(0, expected.len(), ReadOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(read.coalesce().as_ref(), expected);
+        drop(blob);
+        storage.remove("orphaned_resize", None).await.unwrap();
+    }
+}
+
 /// Successful `SYNC` writes leave nothing for a reopen to flush.
 ///
 /// Mixing plain and durable writes must retain any debt the backend's write barrier

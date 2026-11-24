@@ -945,12 +945,12 @@ pub mod tests {
         variable_config_full(partition_prefix, NZUsize!(1))
     }
 
-    /// Commit a set of writes as a single batch.
+    /// Apply a set of writes as a single batch, without committing it.
     ///
-    /// Returns a boxed future so the merkleize/apply/commit chain does not inflate the futures
-    /// (and poll frames) of every test composing commits, which overflow the stack on platforms
-    /// with small defaults.
-    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<Family = F> + 'a>(
+    /// Returns a boxed future so the merkleize/apply chain does not inflate the futures (and poll
+    /// frames) of every test composing batches, which overflow the stack on platforms with small
+    /// defaults.
+    fn apply_writes<'a, F: merkle::Graftable, C: DbAny<Family = F> + 'a>(
         db: C,
         writes: impl IntoIterator<Item = (C::Key, Option<C::Value>)> + 'a,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>> + 'a>> {
@@ -960,17 +960,22 @@ pub mod tests {
                 batch = batch.write(k, v);
             }
             let merkleized = batch.merkleize(&db).await?;
-            let db = db.apply_batch(merkleized).await?;
-            db.commit().await
+            db.apply_batch(merkleized).await
         })
     }
 
-    /// Apply random operations to the given db, committing them (randomly and at the end) only if
-    /// `commit_changes` is true. Returns the db; callers should commit if needed.
+    /// Commit a set of writes as a single batch.
+    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<Family = F> + 'a>(
+        db: C,
+        writes: impl IntoIterator<Item = (C::Key, Option<C::Value>)> + 'a,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>> + 'a>> {
+        Box::pin(async move { apply_writes(db, writes).await?.commit().await })
+    }
+
+    /// Apply random operations to the database, committing periodically and at the end.
     #[boxed]
     pub async fn apply_random_ops<F, C>(
         num_elements: u64,
-        commit_changes: bool,
         rng_seed: u64,
         mut db: C,
     ) -> Result<C, Error<F>>
@@ -992,9 +997,7 @@ pub mod tests {
                 (k, Some(v))
             })
             .collect();
-        if commit_changes {
-            db = commit_writes(db, writes).await?;
-        }
+        db = commit_writes(db, writes).await?;
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency. Accumulate writes and commit periodically.
@@ -1007,21 +1010,20 @@ pub mod tests {
             }
             let v = TestValue::from_seed(rng.next_u64());
             pending.push((rand_key, Some(v)));
-            if commit_changes && rng.next_u32().is_multiple_of(20) {
+            if rng.next_u32().is_multiple_of(20) {
                 db = commit_writes(db, pending.drain(..)).await?;
             }
         }
-        if commit_changes {
-            db = commit_writes(db, pending).await?;
-        }
-        Ok(db)
+        commit_writes(db, pending).await
     }
 
-    /// Build a random database, close and reopen it, and return the auditor state.
+    /// Build a random history over `num_keys` keys, sync and reopen the database,
+    /// verify its root, and return the runtime auditor state.
     #[boxed]
     async fn build_random_close_reopen_round<M, C, F, Fut>(
         mut context: Context,
         mut open_db: F,
+        num_keys: u64,
     ) -> String
     where
         M: merkle::Graftable + 'static,
@@ -1031,12 +1033,10 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
-        const ELEMENTS: u64 = 1000;
-
         let partition = "build-random".to_string();
         let rng_seed = context.next_u64();
         let db: C = open_db(context.child("first"), partition.clone()).await;
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed, db)
             .await
             .unwrap();
         let merkleized = db.new_batch().merkleize(&db).await.unwrap();
@@ -1055,12 +1055,17 @@ pub mod tests {
         context.auditor().state()
     }
 
-    /// Run `test_build_random_close_reopen` against a database factory.
+    /// Build the same random history over `num_keys` keys twice, checking each time that the root
+    /// survives a reopen, and require both runs to leave the same runtime audit hash. The second
+    /// run uses a fresh default runner, so `context` must come from one too.
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
-    pub async fn test_build_random_close_reopen<M, C, F, Fut>(context: Context, open_db: F)
-    where
+    pub async fn test_build_random_close_reopen<M, C, F, Fut>(
+        context: Context,
+        open_db: F,
+        num_keys: u64,
+    ) where
         M: merkle::Graftable,
         C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
@@ -1070,12 +1075,14 @@ pub mod tests {
     {
         // Run on the provided runner.
         let state1 =
-            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db.clone()).await;
+            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db.clone(), num_keys)
+                .await;
 
         // Run again on a fresh runner to verify determinism.
         let executor = deterministic::Runner::default();
-        let state2 = executor
-            .start(|context| build_random_close_reopen_round::<M, C, F, Fut>(context, open_db));
+        let state2 = executor.start(|context| {
+            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db, num_keys)
+        });
 
         assert_eq!(state1, state2);
     }
@@ -1121,12 +1128,13 @@ pub mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Run `test_simulate_write_failures` against a database factory.
-    ///
-    /// This test builds a random database and simulates recovery from different types of
-    /// failure scenarios.
-    pub async fn test_simulate_write_failures<M, C, F, Fut>(mut context: Context, mut open_db: F)
-    where
+    /// Reopen a pruned database after applying a batch without committing it, then after committing
+    /// a batch without syncing Current's bitmap metadata.
+    pub async fn test_simulate_write_failures<M, C, F, Fut>(
+        mut context: Context,
+        mut open_db: F,
+        num_keys: u64,
+    ) where
         M: merkle::Graftable,
         C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
@@ -1134,72 +1142,95 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        const ELEMENTS: u64 = 1000;
-
         let partition = "build-random-fail-commit".to_string();
         let rng_seed = context.next_u64();
         let db: C = Box::pin(open_db(context.child("first"), partition.clone())).await;
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed, db)
             .await
             .unwrap();
-        let db = commit_writes(db, []).await.unwrap();
+
+        // Use a key outside the random histories so its value is known at both reopens.
+        let key = <C::Key as TestKey>::from_seed(num_keys);
+        let value = C::Value::from_seed(0);
+        let db = commit_writes(db, [(key, Some(value.clone()))])
+            .await
+            .unwrap();
         let committed_root = db.root();
-        let committed_op_count = db.bounds().end;
+        let committed_bounds = db.bounds();
         let boundary = db.sync_boundary();
         let db = db.prune(boundary).await.unwrap();
+        assert!(
+            db.bounds().start > committed_bounds.start,
+            "fixture must prune operation history"
+        );
 
-        // Perform more random operations without committing any of them.
-        let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
-            .await
-            .unwrap();
-
-        // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
-        // state of the DB should be as of the last commit.
+        // Apply, but don't commit, a batch that deletes `key` and rewrites every history key. The
+        // log then holds however much of the batch storage took before the drop, so the reopen
+        // must recover the whole batch or none of it.
+        let rewrite: WriteVec<C> = core::iter::once((key, None))
+            .chain((0..num_keys).map(|i| (TestKey::from_seed(i), Some(TestValue::from_seed(i)))))
+            .collect();
+        let db = apply_writes(db, rewrite.clone()).await.unwrap();
+        let applied_root = db.root();
+        let applied_end = db.bounds().end;
         drop(db);
         let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 1),
             partition.clone(),
         ))
         .await;
-        assert_eq!(db.root(), committed_root);
-        assert_eq!(db.bounds().end, committed_op_count);
+        let recovered_batch = db.root() == applied_root;
+        if recovered_batch {
+            assert_eq!(db.bounds().end, applied_end);
+            assert_eq!(db.get(&key).await.unwrap(), None);
+        } else {
+            assert_eq!(db.root(), committed_root);
+            assert_eq!(db.bounds().end, committed_bounds.end);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value.clone()));
+        }
 
-        // Re-apply the exact same operations, this time committed.
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
+        // Commit the second history and the deletion. Drop before sync or prune so the journal
+        // is durable but Current must recover using the older bitmap metadata.
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed + 1, db)
             .await
             .unwrap();
-
-        // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
-        // before sync/prune is called. We do this by dropping the db without calling
-        // sync or prune.
+        let db = commit_writes(db, [(key, None)]).await.unwrap();
         let committed_op_count = db.bounds().end;
         drop(db);
-
-        // We should be able to recover, so the root should differ from the previous commit, and
-        // the op count should be greater than before.
         let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 2),
-            partition.clone(),
+            partition,
         ))
         .await;
-        let scenario_2_root = db.root();
+        assert_eq!(db.bounds().end, committed_op_count);
+        assert_eq!(db.get(&key).await.unwrap(), None);
+        let recovered = db;
 
-        // To confirm the second committed hash is correct we'll re-build the DB in a new
-        // partition, but without any failures. They should have the exact same state.
+        // An uninterrupted database with the same commits must have the same root and op count.
+        // It commits the rewrite only if the first reopen recovered it.
         let fresh_partition = "build-random-fail-commit-fresh".to_string();
-        let db: C = Box::pin(open_db(context.child("fresh"), fresh_partition.clone())).await;
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+        let db: C = Box::pin(open_db(context.child("fresh"), fresh_partition)).await;
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed, db)
             .await
             .unwrap();
-        let db = commit_writes(db, []).await.unwrap();
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
+        let mut db = commit_writes(db, [(key, Some(value))]).await.unwrap();
+        if recovered_batch {
+            db = commit_writes(db, rewrite).await.unwrap();
+        }
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed + 1, db)
             .await
             .unwrap();
+        let db = commit_writes(db, [(key, None)]).await.unwrap();
         let boundary = db.sync_boundary();
         let db = db.prune(boundary).await.unwrap();
-        // State from scenario #2 should match that of a successful commit.
         assert_eq!(db.bounds().end, committed_op_count);
-        assert_eq!(db.root(), scenario_2_root);
+        assert_eq!(db.root(), recovered.root());
+
+        // The root does not cover the snapshot index, so every key must also read the same.
+        for i in 0..=num_keys {
+            let k = <C::Key as TestKey>::from_seed(i);
+            assert_eq!(recovered.get(&k).await.unwrap(), db.get(&k).await.unwrap());
+        }
 
         db.destroy().await.unwrap();
     }
@@ -1276,80 +1307,6 @@ pub mod tests {
 
         db_no_pruning.destroy().await.unwrap();
         db_pruning.destroy().await.unwrap();
-    }
-
-    /// Run `test_sync_persists_bitmap_pruning_boundary` against a database factory.
-    ///
-    /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
-    /// set during `commit()`. If `sync()` didn't call `write_pruned`, the
-    /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
-    pub async fn test_sync_persists_bitmap_pruning_boundary<M, C, F, Fut>(
-        mut context: Context,
-        mut open_db: F,
-    ) where
-        M: merkle::Graftable,
-        C: DbAny<Family = M> + BitmapPrunedBits + 'static,
-        C::Key: TestKey,
-        C::Value: TestValue,
-        F: FnMut(Context, String) -> Fut + Clone,
-        Fut: Future<Output = C>,
-    {
-        const ELEMENTS: u64 = 500;
-
-        let mut open_db_clone = open_db.clone();
-        let partition = "sync-bitmap-pruning".to_string();
-        let rng_seed = context.next_u64();
-        let db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
-
-        // Apply random operations with commits to advance the inactivity floor.
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
-            .await
-            .unwrap();
-        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-
-        // Prune to flatten bitmap layers and advance pruned_chunks.
-        let boundary = db.sync_boundary();
-        let db = db.prune(boundary).await.unwrap();
-
-        let pruned_bits_before = db.pruned_bits();
-        warn!(
-            "pruned_bits_before={}, inactivity_floor={}, op_count={}",
-            pruned_bits_before,
-            *db.inactivity_floor(),
-            *db.bounds().end
-        );
-
-        // Verify we actually have some pruning (otherwise the test is meaningless).
-        assert!(
-            pruned_bits_before > 0,
-            "Expected bitmap to have pruned bits after prune()"
-        );
-
-        // Call sync() to persist the bitmap pruning boundary.
-        let db = db.sync().await.unwrap();
-
-        // Record the root before dropping.
-        let root_before = db.root();
-        drop(db);
-
-        // Reopen the database.
-        let db: C = Box::pin(open_db(context.child("second"), partition)).await;
-
-        // The pruned bits count should match. If sync() didn't persist the bitmap pruned
-        // state, this would be 0.
-        let pruned_bits_after = db.pruned_bits();
-        warn!("pruned_bits_after={}", pruned_bits_after);
-
-        assert_eq!(
-            pruned_bits_after, pruned_bits_before,
-            "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
-        );
-
-        // Also verify the root matches.
-        assert_eq!(db.root(), root_before);
-
-        db.destroy().await.unwrap();
     }
 
     /// Run `test_current_db_build_big` against a database factory.
@@ -1720,8 +1677,8 @@ pub mod tests {
             let observed_f = Observed::capture(&db);
             observed_f.assert_bits(&expected_f, &format!("{label} after F"));
 
-            // Sync, drop, and reopen. The root and bits survive, and every value matches the
-            // reference.
+            // Sync, drop, and reopen. The root, activity bits, and pruning boundary survive,
+            // and every value matches the reference.
             db.sync().await.unwrap();
             let db: C = Box::pin(open_db(
                 context.child("reopen").with_attribute("index", schedule),
@@ -1732,6 +1689,10 @@ pub mod tests {
             assert_eq!(
                 reopened.root, observed_f.root,
                 "{label}: root diverged on reopen",
+            );
+            assert_eq!(
+                reopened.pruned, observed_f.pruned,
+                "{label}: bitmap pruning boundary changed on reopen",
             );
             reopened.assert_bits(&observed_f, &format!("{label} on reopen"));
             for (key, value) in keys.iter().zip(&values) {
@@ -2164,90 +2125,76 @@ pub mod tests {
         };
     }
 
+    // Ordered variants. The last field sets the history size in keys for both the write-recovery
+    // and close/reopen determinism tests.
+    // The four long histories across both lists cover every
+    // ordered/unordered and fixed/variable combination, both Merkle families, and all index layouts.
+    macro_rules! with_ordered_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, of, OrderedFixedDb, fixed_config, 1000);
+            $cb!($($args)*, ov, OrderedVariableDb, variable_config, 128);
+            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config_partitioned, 128);
+            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config_partitioned, 128);
+            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config, 128);
+            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config, 128);
+            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config_partitioned, 128);
+            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config_partitioned, 1000);
+        };
+    }
+
+    // Unordered variants, with the same history size field.
+    macro_rules! with_unordered_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config, 128);
+            $cb!($($args)*, uv, UnorderedVariableDb, variable_config, 128);
+            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config_partitioned, 1000);
+            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config_partitioned, 128);
+            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config, 1000);
+            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config, 128);
+            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config_partitioned, 128);
+            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config_partitioned, 128);
+        };
+    }
+
     // Defines all variants across both supported Merkle families.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, of, OrderedFixedDb, fixed_config);
-            $cb!($($args)*, ov, OrderedVariableDb, variable_config);
-            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
-            $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
-            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config_partitioned);
-            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config_partitioned);
-            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config_partitioned);
-            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config_partitioned);
-            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config_partitioned);
-            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config_partitioned);
-            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config_partitioned);
-            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config_partitioned);
+            with_ordered_variants!($cb!($($args)*));
+            with_unordered_variants!($cb!($($args)*));
         };
     }
 
-    // Defines 6 ordered variants.
-    macro_rules! with_ordered_variants {
-        ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, of, OrderedFixedDb, fixed_config);
-            $cb!($($args)*, ov, OrderedVariableDb, variable_config);
-            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config_partitioned);
-            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config_partitioned);
-            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config_partitioned);
-            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config_partitioned);
-        };
-    }
-
-    // Defines 6 unordered variants.
-    macro_rules! with_unordered_variants {
-        ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
-            $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
-            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config_partitioned);
-            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config_partitioned);
-            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config_partitioned);
-            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config_partitioned);
-        };
-    }
-
-    // Emit one `#[test_group("slow")] #[test_traced]` test per variant.
-    // The fn name is `<f>_<variant_label>`, the body runs the async test
-    // function `f` on a fresh runner, passing it the `Context` and a DB opener
-    // for the variant.
-    macro_rules! test_for_variant {
-        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident) => {
+    // Emit one slow test per variant. Each gets a fresh runner and database opener.
+    // Pass the optional key count to the test and include it in its name.
+    macro_rules! run_variant {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident $(, $keys:literal)?) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[test_traced($traced)]
-                fn [<$f _ $label>]() {
+                fn [<$f _ $label $(_ $keys _keys)?>]() {
                     let executor = deterministic::Runner::default();
                     executor.start(|context| async move {
                         // Box the future to prevent stack overflow when
                         // monomorphized across DB variants.
-                        Box::pin($f(context, open_db_fn!($db, $cfg))).await
+                        Box::pin($f(context, open_db_fn!($db, $cfg) $(, $keys)?)).await
                     });
                 }
             }
+        };
+    }
+
+    // Other tests choose their own workload.
+    macro_rules! test_for_variant {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident, $_history_keys:literal) => {
+            run_variant!($f, $traced, $label, $db, $cfg);
         };
     }
 
@@ -2297,10 +2244,9 @@ pub mod tests {
         test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
 
-    test_for_all_variants!(test_build_random_close_reopen, "WARN");
-    test_for_all_variants!(test_simulate_write_failures, "WARN");
+    with_all_variants!(run_variant!(test_build_random_close_reopen, "WARN"));
+    with_all_variants!(run_variant!(test_simulate_write_failures, "WARN"));
     test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
-    test_for_all_variants!(test_sync_persists_bitmap_pruning_boundary, "WARN");
     test_for_all_variants!(test_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(test_stale_batch_side_effect_free, "WARN");
     test_for_all_variants!(test_chained_schedules_match_sequential, "WARN");
