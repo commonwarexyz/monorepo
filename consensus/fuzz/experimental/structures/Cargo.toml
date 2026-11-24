@@ -61,3 +61,10 @@ path = "fuzz_targets/exp_automaton_defaults.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "exp_marshal_coding_types"
+path = "fuzz_targets/exp_marshal_coding_types.rs"
+test = false
+doc = false
+bench = false
