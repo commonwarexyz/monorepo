@@ -1638,7 +1638,8 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_durable_{}", random_suffix()));
         let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
-        shared::check_sync_writes(&storage, &storage.pending).await;
+        // Linux fuses a per-range sync into the write. Other platforms sync the whole file.
+        shared::check_sync_writes(&storage, &storage.pending, cfg!(target_os = "linux")).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }
