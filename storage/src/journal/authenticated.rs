@@ -478,35 +478,17 @@ where
         max_ops: NonZeroU64,
         inactive_peaks: usize,
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
-        let bounds = self.bounds();
-
-        if *start_loc < bounds.start {
-            return Err(JournalError::ItemPruned(*start_loc).into());
-        }
-
-        if *historical_leaves > bounds.end {
-            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
-        }
-        if start_loc >= historical_leaves {
-            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
-        }
-
-        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
-
-        let hasher = self.hasher.clone();
-        let proof = merkle::verification::historical_range_proof(
-            &hasher,
+        historical_proof(
             self,
+            &self.journal,
+            self.bounds(),
+            &self.hasher,
             historical_leaves,
-            start_loc..end_loc,
+            start_loc,
+            max_ops,
             inactive_peaks,
         )
-        .await?;
-
-        let positions: Vec<u64> = (*start_loc..*end_loc).collect();
-        let ops = self.journal.read_many(&positions).await?;
-
-        Ok((proof, ops))
+        .await
     }
 
     /// Return the digests [`Family::nodes_to_pin`] lists for `location`, in that order.
@@ -518,15 +500,7 @@ where
         &self,
         location: Location<F>,
     ) -> Result<Vec<H::Digest>, merkle::Error<F>> {
-        if !location.is_valid() {
-            return Err(merkle::Error::LocationOverflow(location));
-        }
-        if location > self.size() {
-            return Err(merkle::Error::RangeOutOfBounds(location));
-        }
-        self.merkle
-            .pinned_nodes_at(&self.journal, &self.hasher, location)
-            .await
+        pinned_nodes_at(&self.merkle, &self.journal, &self.hasher, location).await
     }
 
     /// Like [`Contiguous::read_many`], but returns the items partitioned into the shards the
@@ -1294,6 +1268,282 @@ where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    type Digest = H::Digest;
+
+    fn size(&self) -> Position<F> {
+        self.merkle.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
+        self.merkle
+            .get_node(&self.journal, &self.hasher, position)
+            .await
+    }
+
+    async fn get_nodes(
+        &self,
+        positions: &[Position<F>],
+    ) -> Result<Vec<H::Digest>, merkle::Error<F>> {
+        self.merkle
+            .get_nodes(&self.journal, &self.hasher, positions)
+            .await
+    }
+}
+
+/// Prove `items` from `start_loc` against `merkle` when it had `historical_leaves` leaves. `bounds`
+/// are the readable item positions. Shared by [Journal::historical_proof] and
+/// [Snapshot::historical_proof].
+#[allow(clippy::too_many_arguments)]
+async fn historical_proof<F, M, C, H>(
+    merkle: &M,
+    items: &C,
+    bounds: Range<u64>,
+    hasher: &StandardHasher<H>,
+    historical_leaves: Location<F>,
+    start_loc: Location<F>,
+    max_ops: NonZeroU64,
+    inactive_peaks: usize,
+) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>>
+where
+    F: Family,
+    M: merkle::storage::Storage<F, Digest = H::Digest>,
+    C: Contiguous,
+    H: Hasher,
+{
+    if *start_loc < bounds.start {
+        return Err(JournalError::ItemPruned(*start_loc).into());
+    }
+
+    if *historical_leaves > bounds.end {
+        return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
+    }
+    if start_loc >= historical_leaves {
+        return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
+    }
+
+    let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
+
+    let hasher = hasher.clone();
+    let proof = merkle::verification::historical_range_proof(
+        &hasher,
+        merkle,
+        historical_leaves,
+        start_loc..end_loc,
+        inactive_peaks,
+    )
+    .await?;
+
+    let positions: Vec<u64> = (*start_loc..*end_loc).collect();
+    let ops = items.read_many(&positions).await?;
+
+    Ok((proof, ops))
+}
+
+/// The digests [`Family::nodes_to_pin`] lists for `location` in `merkle`, whose leaves are
+/// `items`. Shared by [Journal::pinned_nodes_at] and [Snapshot::pinned_nodes_at].
+async fn pinned_nodes_at<F, D, C, H, S>(
+    merkle: &Tree<F, D, S>,
+    items: &C,
+    hasher: &StandardHasher<H>,
+    location: Location<F>,
+) -> Result<Vec<D>, merkle::Error<F>>
+where
+    F: Family,
+    D: Digest,
+    C: Contiguous<Item: EncodeShared>,
+    H: Hasher<Digest = D>,
+    S: Strategy,
+{
+    if !location.is_valid() {
+        return Err(merkle::Error::LocationOverflow(location));
+    }
+    if location > Location::new(items.bounds().end) {
+        return Err(merkle::Error::RangeOutOfBounds(location));
+    }
+    merkle.pinned_nodes_at(items, hasher, location).await
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
+where
+    F: Family,
+    E: Context,
+    C: crate::journal::contiguous::Snapshottable<Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    /// Capture an owned immutable [Snapshot] of the journal and its Merkle structure.
+    ///
+    /// The snapshot shares the in-memory Merkle state rather than copying it, and keeps the
+    /// journal's blobs open while it is alive, as [`Snapshottable`](crate::journal::contiguous::Snapshottable) describes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the journal.
+    pub async fn snapshot(mut self) -> Result<(Self, Snapshot<F, C::Reader, H, S>), Error<F>> {
+        let reader;
+        (self.journal, reader) = self.journal.snapshot().await?;
+        debug_assert_eq!(reader.bounds().end, *self.merkle.leaves());
+        let snapshot = Snapshot {
+            merkle: self.merkle.clone(),
+            journal: reader,
+            hasher: self.hasher.clone(),
+        };
+        Ok((self, snapshot))
+    }
+}
+
+/// Owned immutable snapshot of an authenticated journal, with bounds frozen at capture.
+///
+/// The snapshot reflects the journal's size at capture, including applied operations that are
+/// not yet durable. It proves and reads exactly what the journal did at capture while the journal
+/// keeps appending and pruning.
+#[commonware_macros::stability(ALPHA)]
+pub struct Snapshot<F, R, H, S>
+where
+    F: Family,
+    R: Contiguous<Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    /// The journal's Merkle structure at capture.
+    merkle: Tree<F, H::Digest, S>,
+
+    /// The journal's items at capture.
+    journal: R,
+
+    /// Hasher and peak-bagging mode for the Merkle structure's digests and roots.
+    hasher: StandardHasher<H>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<F, R, H, S> Snapshot<F, R, H, S>
+where
+    F: Family,
+    R: Contiguous<Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    /// Returns the Location one past the last captured item.
+    pub fn size(&self) -> Location<F> {
+        Location::new(self.journal.bounds().end)
+    }
+
+    /// Generate a proof of inclusion for items starting at `start_loc`, as [Journal::proof]
+    /// does at capture.
+    pub async fn proof(
+        &self,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<R::Item>), Error<F>> {
+        self.historical_proof(self.size(), start_loc, max_ops, inactive_peaks)
+            .await
+    }
+
+    /// Generate a historical proof as [Journal::historical_proof] does at capture.
+    pub async fn historical_proof(
+        &self,
+        historical_leaves: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<R::Item>), Error<F>> {
+        historical_proof(
+            self,
+            &self.journal,
+            self.bounds(),
+            &self.hasher,
+            historical_leaves,
+            start_loc,
+            max_ops,
+            inactive_peaks,
+        )
+        .await
+    }
+
+    /// Return the digests [`Family::nodes_to_pin`] lists for `location`, as
+    /// [Journal::pinned_nodes_at] does at capture.
+    pub async fn pinned_nodes_at(
+        &self,
+        location: Location<F>,
+    ) -> Result<Vec<H::Digest>, merkle::Error<F>> {
+        pinned_nodes_at(&self.merkle, &self.journal, &self.hasher, location).await
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<F, R, H, S> Contiguous for Snapshot<F, R, H, S>
+where
+    F: Family,
+    R: Contiguous<Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    type Item = R::Item;
+
+    fn bounds(&self) -> Range<u64> {
+        let mut bounds = self.journal.bounds();
+        bounds.start = bounds.start.max(*self.merkle.bounds().start);
+        bounds
+    }
+
+    async fn read(&self, position: u64) -> Result<R::Item, JournalError> {
+        if position < self.bounds().start {
+            return Err(JournalError::ItemPruned(position));
+        }
+        self.journal.read(position).await
+    }
+
+    async fn read_many(&self, positions: &[u64]) -> Result<Vec<R::Item>, JournalError> {
+        if let Some(&position) = positions.first()
+            && position < self.bounds().start
+        {
+            return Err(JournalError::ItemPruned(position));
+        }
+        self.journal.read_many(positions).await
+    }
+
+    fn try_read_sync(&self, position: u64) -> Option<R::Item> {
+        if position < self.bounds().start {
+            return None;
+        }
+        self.journal.try_read_sync(position)
+    }
+
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<R::Item>> {
+        let mut items = self.journal.try_read_many_sync(positions);
+        let start = self.bounds().start;
+        for (position, item) in positions.iter().zip(&mut items) {
+            if *position >= start {
+                break;
+            }
+            *item = None;
+        }
+        items
+    }
+
+    async fn replay(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<impl Stream<Item = Result<Batch<R::Item>, JournalError>> + Send, JournalError> {
+        if range.start < self.bounds().start {
+            return Err(JournalError::ItemPruned(range.start));
+        }
+        self.journal.replay(range, buffer, read_options).await
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<F, R, H, S> merkle::storage::Storage<F> for Snapshot<F, R, H, S>
+where
+    F: Family,
+    R: Contiguous<Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
@@ -4767,6 +5017,241 @@ mod tests {
     fn test_apply_batch_after_committed_ancestor_dropped_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_apply_batch_after_committed_ancestor_dropped_inner::<mmb::Family>);
+    }
+
+    /// A captured snapshot keeps serving the same bytes and proofs while the live journal
+    /// appends, syncs, and prunes past it.
+    async fn test_snapshot_frozen_across_append_and_prune_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal = create_journal_with_ops::<F>(context, "snapshot-frozen", 50).await;
+
+        // Leave some operations buffered and unsynced, as a capture before `start_sync` does.
+        for i in 0..5u8 {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i.wrapping_add(200)))
+                .await
+                .unwrap();
+        }
+
+        let size = journal.size();
+        let live_proof;
+        let live_ops;
+        (live_proof, live_ops) = journal
+            .proof(Location::new(0), NZU64!(10), 0)
+            .await
+            .unwrap();
+        let (live_historical, live_historical_ops) = journal
+            .historical_proof(size, Location::new(5), NZU64!(5), 0)
+            .await
+            .unwrap();
+
+        let live_pins = journal.pinned_nodes_at(Location::new(5)).await.unwrap();
+        let live_tip_pins = journal.pinned_nodes_at(size).await.unwrap();
+
+        let snapshot;
+        (journal, snapshot) = journal.snapshot().await.unwrap();
+        assert_eq!(snapshot.size(), size);
+
+        // At capture, snapshot output matches the live journal byte-for-byte.
+        let (snapshot_proof, snapshot_ops) = snapshot
+            .proof(Location::new(0), NZU64!(10), 0)
+            .await
+            .unwrap();
+        assert_eq!(live_proof.encode(), snapshot_proof.encode());
+        assert_eq!(
+            live_ops.iter().map(Encode::encode).collect::<Vec<_>>(),
+            snapshot_ops.iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+
+        // Advance the live journal well past the snapshot by appending, syncing, and pruning.
+        for i in 0..30u8 {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i.wrapping_add(50)))
+                .await
+                .unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        (journal, _) = journal.prune(Location::new(20)).await.unwrap();
+        assert!(journal.size() > size);
+
+        // The snapshot still serves the same proof and the same bytes, including for locations
+        // the live journal has since pruned.
+        let (snapshot_proof2, snapshot_ops2) = snapshot
+            .proof(Location::new(0), NZU64!(10), 0)
+            .await
+            .unwrap();
+        assert_eq!(snapshot_proof.encode(), snapshot_proof2.encode());
+        assert_eq!(
+            snapshot_ops.iter().map(Encode::encode).collect::<Vec<_>>(),
+            snapshot_ops2.iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+        // Pinned nodes below the live journal's new boundary are rebuilt from the snapshot's
+        // frozen operations.
+        assert!(matches!(
+            journal.pinned_nodes_at(Location::new(5)).await,
+            Err(merkle::Error::ElementPruned(_))
+        ));
+        assert_eq!(
+            snapshot.pinned_nodes_at(Location::new(5)).await.unwrap(),
+            live_pins
+        );
+        assert_eq!(snapshot.pinned_nodes_at(size).await.unwrap(), live_tip_pins);
+        assert!(matches!(
+            snapshot.pinned_nodes_at(size + 1).await,
+            Err(merkle::Error::RangeOutOfBounds(_))
+        ));
+        let pruned_reads = snapshot.read_many(&[0, 1, 2]).await.unwrap();
+        assert_eq!(
+            pruned_reads.iter().map(Encode::encode).collect::<Vec<_>>(),
+            live_ops[..3].iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+
+        // The operations buffered at capture read back from the snapshot.
+        let buffered_reads = snapshot.read_many(&[50, 51, 52, 53, 54]).await.unwrap();
+        assert_eq!(
+            buffered_reads
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>(),
+            (0..5u8)
+                .map(|i| create_operation::<F>(i.wrapping_add(200)).encode())
+                .collect::<Vec<_>>()
+        );
+
+        // Replay and the synchronous probes serve the same frozen items as `read_many`.
+        let positions = (0..*size).collect::<Vec<_>>();
+        let expected = snapshot
+            .read_many(&positions)
+            .await
+            .unwrap()
+            .iter()
+            .map(Encode::encode)
+            .collect::<Vec<_>>();
+        let replayed = replay_items(&snapshot, 0..*size, NZUsize!(7), ReadOptions::default())
+            .await
+            .unwrap()
+            .map(|entry| entry.unwrap().1.encode())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(replayed, expected);
+        for (position, item) in snapshot.try_read_many_sync(&positions).iter().enumerate() {
+            if let Some(item) = item {
+                assert_eq!(item.encode(), expected[position]);
+            }
+            if let Some(item) = snapshot.try_read_sync(position as u64) {
+                assert_eq!(item.encode(), expected[position]);
+            }
+        }
+        assert!(snapshot.try_read_sync(*size).is_none());
+
+        // Historical proofs at or below the frozen size match the capture-time proof, while
+        // anything above is rejected.
+        let (historical, historical_ops) = snapshot
+            .historical_proof(size, Location::new(5), NZU64!(5), 0)
+            .await
+            .unwrap();
+        assert_eq!(historical.encode(), live_historical.encode());
+        assert_eq!(
+            historical_ops
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>(),
+            live_historical_ops
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            snapshot.proof(size, NZU64!(1), 0).await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+        assert!(matches!(
+            snapshot
+                .historical_proof(size + 1, Location::new(0), NZU64!(1), 0)
+                .await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_snapshot_frozen_across_append_and_prune_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_snapshot_frozen_across_append_and_prune_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_snapshot_frozen_across_append_and_prune_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_snapshot_frozen_across_append_and_prune_inner::<mmb::Family>);
+    }
+
+    /// A snapshot captured after bounded recovery exposes only the selected prefix, even after
+    /// the writer replaces the discarded suffix and prunes the captured operations.
+    async fn test_snapshot_after_bounded_initialization_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let suffix = "snapshot-bounded";
+        let journal = create_journal_with_ops::<F>(context.child("seed"), suffix, 50).await;
+        let size = Location::new(30);
+        let (expected_proof, expected_ops) = journal
+            .historical_proof(size, Location::new(0), NZU64!(100), 0)
+            .await
+            .unwrap();
+        drop(journal);
+
+        let journal = TestJournal::<F>::init_at_most(
+            context.child("recover"),
+            merkle_config(suffix),
+            journal_config(suffix),
+            *size,
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        let (mut journal, snapshot) = journal.snapshot().await.unwrap();
+        assert_eq!(snapshot.bounds(), 0..*size);
+        assert!(matches!(
+            snapshot.read(*size).await,
+            Err(crate::journal::Error::ItemOutOfRange(_))
+        ));
+        assert!(matches!(
+            snapshot
+                .historical_proof(size + 1, Location::new(0), NZU64!(1), 0)
+                .await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+
+        for i in 100..130u8 {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        (journal, _) = journal.prune(Location::new(20)).await.unwrap();
+        let (proof, ops) = snapshot
+            .proof(Location::new(0), NZU64!(100), 0)
+            .await
+            .unwrap();
+        assert_eq!(proof.encode(), expected_proof.encode());
+        assert_eq!(
+            ops.iter().map(Encode::encode).collect::<Vec<_>>(),
+            expected_ops.iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+        journal.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_snapshot_after_bounded_initialization_mmr() {
+        deterministic::Runner::default()
+            .start(test_snapshot_after_bounded_initialization_inner::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_snapshot_after_bounded_initialization_mmb() {
+        deterministic::Runner::default()
+            .start(test_snapshot_after_bounded_initialization_inner::<mmb::Family>);
     }
 
     /// Merkleization retains a speculative suffix after its committed prefix is released.

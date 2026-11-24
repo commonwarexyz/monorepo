@@ -592,6 +592,67 @@ where
     }
 }
 
+/// Serves the journal as it was at capture, exactly as [authenticated::Journal] serves it.
+#[commonware_macros::stability(ALPHA)]
+impl<F, C, H, S> Source for authenticated::Snapshot<F, C, H, S>
+where
+    F: Family,
+    C: Contiguous<Item: EncodeShared + Committable<F>>,
+    H: Hasher,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = C::Item;
+    type Error = qmdb::Error<F>;
+
+    #[tracing::instrument(
+        name = "qmdb.sync.serve",
+        level = "info",
+        skip_all,
+        fields(
+            size = *request.size(),
+            start = *request.start(),
+            max_ops = request.max_ops().get(),
+        ),
+    )]
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
+        // Reject before the floor lookup so the error carries the requested size and the
+        // floor read never touches out-of-range locations.
+        if request.size() > self.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(request.size()).into());
+        }
+        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(self, request.size()).await?;
+        let response = match request {
+            Request::Operations {
+                size,
+                start,
+                max_ops,
+            } => {
+                let (proof, operations) = self
+                    .historical_proof(size, start, max_ops, inactive_peaks)
+                    .await?;
+                Response::Operations { proof, operations }
+            }
+            Request::Boundary { size, start } => {
+                let (proof, mut operations) = self
+                    .historical_proof(size, start, NonZeroU64::MIN, inactive_peaks)
+                    .await?;
+                let op = operations
+                    .pop()
+                    .ok_or(crate::merkle::Error::RangeOutOfBounds(start))?;
+                let pinned_nodes = self.pinned_nodes_at(start).await?;
+                Response::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                }
+            }
+        };
+        Ok((response, None))
+    }
+}
+
 impl<F, E, C, I, H, U, const N: usize, S> Source for crate::qmdb::any::Db<F, E, C, I, H, U, S, N>
 where
     F: Family,

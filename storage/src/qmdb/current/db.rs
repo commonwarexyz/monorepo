@@ -780,6 +780,49 @@ where
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: merkle::Graftable,
+    E: Context,
+    C: crate::journal::contiguous::Snapshottable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture. The snapshot includes applied-but-uncommitted operations.
+    /// It serves the ops-tree proofs state sync needs. Grafted proofs require the live bitmap,
+    /// which keeps no history, so those remain live-only.
+    ///
+    /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
+    /// [`Snapshottable::snapshot`](crate::journal::contiguous::Snapshottable::snapshot) describes.
+    /// The in-memory Merkle state is shared with the database rather than copied.
+    ///
+    /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
+    /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
+    /// first retained operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the database.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<
+        (
+            Self,
+            crate::journal::authenticated::Snapshot<F, C::Reader, H, S>,
+        ),
+        Error<F>,
+    > {
+        let log;
+        (self.any, log) = self.any.snapshot().await?;
+        Ok((self, log))
+    }
+}
+
 /// Compute the safe sync boundary from the chunk-aligned inactivity floor and the current
 /// ops-tree size.
 ///
@@ -1225,6 +1268,7 @@ mod tests {
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
         merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr},
         qmdb::{
+            ProofExt as _,
             any::{
                 test::{Choice, Inspect as _, Script, test_any_db_start_sync_recovery},
                 traits::{DbAny, UnmerkleizedBatch as _},
@@ -1238,7 +1282,7 @@ mod tests {
         },
         translator::{OneCap, TwoCap},
     };
-    use commonware_codec::FixedSize as _;
+    use commonware_codec::{Encode as _, FixedSize as _};
     use commonware_cryptography::{Crc32, Sha256, crc32, sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
@@ -1624,6 +1668,87 @@ mod tests {
         });
     }
 
+    /// A snapshot's ops proofs stay byte-stable and verifiable against the captured ops root
+    /// while the live database updates keys (flipping activity bits and raising the floor),
+    /// commits, and prunes past it.
+    #[test_traced]
+    fn test_snapshot_ops_proofs_stable_across_live_updates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("proof-snapshot-churn"),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            let canonical_root = db.root();
+            let ops_root = db.ops_root();
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+            assert_eq!(snapshot.size(), op_count);
+
+            let (proof, ops) = snapshot
+                .historical_proof(
+                    op_count,
+                    Location::new(0),
+                    NZU64!(100),
+                    crate::qmdb::inactive_peaks_at(&snapshot, op_count)
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &ops_root));
+
+            // Update the same keys so the live bitmap retroactively flips the captured
+            // operations' activity bits, the floor rises past a bitmap chunk, and pruning
+            // discards every captured operation. The snapshot must not observe any of it.
+            let mut rounds = 0;
+            while db.sync_boundary() <= op_count {
+                rounds += 1;
+                assert!(
+                    rounds <= 64,
+                    "floor never rose past the captured operations"
+                );
+                db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            }
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert!(db.bounds().start >= op_count);
+            assert_ne!(db.root(), canonical_root);
+            assert_ne!(db.ops_root(), ops_root);
+
+            let (proof2, ops2) = snapshot
+                .historical_proof(
+                    op_count,
+                    Location::new(0),
+                    NZU64!(100),
+                    crate::qmdb::inactive_peaks_at(&snapshot, op_count)
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(proof.encode(), proof2.encode());
+            assert!(proof2.verify::<Sha256, _>(Location::new(0), &ops2, &ops_root));
+
+            // Anything above the frozen size is rejected.
+            assert!(matches!(
+                snapshot
+                    .historical_proof(op_count + 1, Location::new(0), NZU64!(1), 0)
+                    .await,
+                Err(crate::journal::authenticated::Error::Merkle(
+                    crate::merkle::Error::RangeOutOfBounds(_)
+                ))
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
     /// Reading a retained graft root never consults the fallback tree, even after a prefix release.
     #[test]
     fn test_retained_graft_reads() {

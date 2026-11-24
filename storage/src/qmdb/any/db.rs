@@ -769,3 +769,44 @@ where
         log.destroy().await.map_err(Into::into)
     }
 }
+
+#[commonware_macros::stability(ALPHA)]
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, S, N>
+where
+    F: Family,
+    E: Context,
+    C: crate::journal::contiguous::Snapshottable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture. The snapshot includes applied-but-uncommitted operations.
+    ///
+    /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
+    /// [`Snapshottable::snapshot`](crate::journal::contiguous::Snapshottable::snapshot) describes.
+    /// The in-memory Merkle state is shared with the database rather than copied.
+    ///
+    /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
+    /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
+    /// first retained operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the database.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<
+        (
+            Self,
+            crate::journal::authenticated::Snapshot<F, C::Reader, H, S>,
+        ),
+        crate::qmdb::Error<F>,
+    > {
+        let log;
+        (self.log, log) = self.log.snapshot().await?;
+        Ok((self, log))
+    }
+}
