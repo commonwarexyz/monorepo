@@ -456,6 +456,9 @@ unsafe fn load_affines(points: [*const GAffine; LANES]) -> Affine {
 }
 
 impl FBackend for Backend {
+    // Measured on Zen 5: a batch costs about as much as decompressing 1.1 encodings one at a time.
+    const DECOMPRESS_BATCH_MIN: usize = 2;
+
     #[inline(always)]
     fn add(self, a: FVec, b: FVec) -> FVec {
         // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
