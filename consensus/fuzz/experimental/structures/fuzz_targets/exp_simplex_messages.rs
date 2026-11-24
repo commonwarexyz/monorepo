@@ -65,6 +65,14 @@ type Secp256r1Scheme = secp256r1::Scheme<PublicKey>;
 #[cfg(feature = "mocks")]
 type CertificateMockScheme = simplex_certificate_mock::Scheme<PublicKey, false>;
 
+/// Type tags `Artifact` writes: 0 to 6. Any other leading byte must be refused.
+const ARTIFACT_TAGS: u8 = 7;
+/// Type tags `Activity` writes: 0 to 9. Any other leading byte must be refused.
+const ACTIVITY_TAGS: u8 = 10;
+/// A leading byte below this is reduced to a written tag, so most raw inputs reach a
+/// variant's body. A leading byte from here up is kept as an unknown tag.
+const UNKNOWN_TAGS_FROM: u8 = 0x80;
+
 #[derive(Arbitrary, Debug)]
 enum StructuredScheme {
     Ed25519,
@@ -723,6 +731,30 @@ where
     }
 }
 
+fn assert_tagged_decode<T>(data: &[u8], cfg: &T::Cfg, tags: u8)
+where
+    T: Read + Encode,
+{
+    let mut bytes = data.to_vec();
+    if let Some(tag) = bytes.first_mut()
+        && *tag < UNKNOWN_TAGS_FROM
+    {
+        *tag %= tags;
+    }
+    // Trailing bytes are left unread rather than refused, so a valid prefix is enough.
+    let mut reader = Copying(bytes.as_slice());
+    let decoded = T::read_cfg(&mut reader, cfg);
+    if let Some(&tag) = bytes.first()
+        && tag >= tags
+    {
+        assert!(decoded.is_err(), "unknown type tag {tag} decoded");
+    }
+    if let Ok(value) = decoded {
+        let consumed = bytes.len() - reader.0.len();
+        assert_eq!(value.encode().as_ref(), &bytes[..consumed]);
+    }
+}
+
 fn assert_arbitrary_activity_value(
     activity: Activity<Ed25519Scheme, sha256::Digest>,
     participants: usize,
@@ -786,8 +818,20 @@ fn arbitrary_case(kind: ArbitraryKind, participants: u8, data: Vec<u8>) {
                 &mut u,
                 &participants,
             );
+            assert_tagged_decode::<Artifact<Ed25519Scheme, sha256::Digest>>(
+                &data,
+                &participants,
+                ARTIFACT_TAGS,
+            );
         }
-        ArbitraryKind::Activity => assert_arbitrary_activity(&data, participants, selector),
+        ArbitraryKind::Activity => {
+            assert_arbitrary_activity(&data, participants, selector);
+            assert_tagged_decode::<Activity<Ed25519Scheme, sha256::Digest>>(
+                &data,
+                &participants,
+                ACTIVITY_TAGS,
+            );
+        }
         ArbitraryKind::Commitment => assert_arbitrary_byte_roundtrip::<TestCommitment>(&mut u, &()),
     }
 }
