@@ -246,7 +246,11 @@ impl ArmGuard<'_> {
             self.still_idle,
             "a ring wait must be installed only under an arm that permits blocking"
         );
-        assert_eq!(self.snapshot & WAITERS, RING, "a ring wait needs a ring arm");
+        assert_eq!(
+            self.snapshot & WAITERS,
+            RING,
+            "a ring wait needs a ring arm"
+        );
         let wait = FutexWait::new(
             self.parker.word.as_ptr(),
             self.snapshot.into(),
