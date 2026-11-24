@@ -56,6 +56,43 @@ use std::{
 type Suite = Mock;
 
 #[test_traced]
+fn single_node_views_follow_the_minimum_view_duration() {
+    const DURATION: Duration = Duration::from_millis(50);
+    const RUN: Duration = Duration::from_secs(2);
+
+    let executor = DeterministicRunner::timed(Duration::from_secs(60));
+    executor.start(|context| async move {
+        let mut cluster = Cluster::<Suite>::new(
+            &context,
+            ClusterOptions {
+                min_view_duration: Some(DURATION),
+                ..ClusterOptions::new(902, 1)
+            },
+        )
+        .await;
+        cluster.start_all().await;
+        let start = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+        context.sleep(RUN).await;
+        let end = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+
+        // Each view waits out the minimum duration before its proposal, and nothing else slows a
+        // single node, so the views follow the duration without timing out.
+        let views = end.get() - start.get();
+        let most = RUN.as_millis() as u64 / DURATION.as_millis() as u64;
+        assert!(views <= most, "advanced {views} views in {RUN:?}");
+        assert!(views >= most / 2, "advanced only {views} views in {RUN:?}");
+    });
+}
+
+#[test_traced]
 fn producer_subset_progresses_with_validator_only_nodes() {
     let executor = DeterministicRunner::timed(Duration::from_secs(300));
     executor.start(|context| async move {

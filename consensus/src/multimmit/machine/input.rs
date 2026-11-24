@@ -61,6 +61,8 @@ pub(crate) enum Input<S: Scheme, D: Digest> {
     CertificateResolved(CertificateCompletion<S, D>),
     /// Fire one producer deadline bound to a parent.
     ProductionTimerFired(ProductionTimer<D>),
+    /// Allow the proposal of one view this node leads.
+    PaceFired(ViewTimer),
     /// Complete one recovery or aggregation job, which stages a durable change.
     Crypto(CryptoCompletion<S, D>),
 }

@@ -40,15 +40,16 @@ pub(crate) struct ArmedProduction<D: Digest> {
     pub(crate) trace: TraceContext,
 }
 
-/// The two machine timers the voter can fire, in rotation order.
+/// The machine timers the voter can fire, in rotation order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TimerKind {
     View,
     Production,
+    Pace,
 }
 
 impl TimerKind {
-    pub(crate) const ALL: [Self; 2] = [Self::View, Self::Production];
+    pub(crate) const ALL: [Self; 3] = [Self::View, Self::Production, Self::Pace];
 
     /// Returns the rotation index of the timer after this one.
     pub(crate) const fn next_index(self) -> usize {
@@ -56,10 +57,11 @@ impl TimerKind {
     }
 }
 
-/// The machine's view and production timers plus the voter's heartbeat deadline.
+/// The machine's view, production, and pace timers plus the voter's heartbeat deadline.
 pub(crate) struct Timers<D: Digest> {
     view: Option<Armed<ViewTimer>>,
     production: Option<ArmedProduction<D>>,
+    pace: Option<(ViewTimer, SystemTime)>,
     /// When periodic metrics and producer-stall checks next run.
     ///
     /// This is an absolute deadline rather than a relative sleep because every wait rebuilds its
@@ -72,6 +74,7 @@ impl<D: Digest> Timers<D> {
         Self {
             view: None,
             production: None,
+            pace: None,
             heartbeat_at,
         }
     }
@@ -104,10 +107,16 @@ impl<D: Digest> Timers<D> {
         });
     }
 
-    /// Disarms both machine timers.
+    /// Arms the pace timer, replacing any armed one.
+    pub(crate) const fn arm_pace(&mut self, timer: ViewTimer, deadline: SystemTime) {
+        self.pace = Some((timer, deadline));
+    }
+
+    /// Disarms every machine timer.
     pub(crate) fn clear(&mut self) {
         self.view = None;
         self.production = None;
+        self.pace = None;
     }
 
     /// Returns whether the view timer is armed.
@@ -120,6 +129,7 @@ impl<D: Digest> Timers<D> {
         match kind {
             TimerKind::View => self.view.as_ref().map(|armed| armed.deadline),
             TimerKind::Production => self.production.as_ref().map(|armed| armed.deadline),
+            TimerKind::Pace => self.pace.map(|(_, deadline)| deadline),
         }
     }
 
@@ -131,6 +141,14 @@ impl<D: Digest> Timers<D> {
     /// Takes the armed view timer.
     pub(crate) const fn take_view(&mut self) -> Option<Armed<ViewTimer>> {
         self.view.take()
+    }
+
+    /// Takes the armed pace timer.
+    pub(crate) const fn take_pace(&mut self) -> Option<ViewTimer> {
+        match self.pace.take() {
+            Some((timer, _)) => Some(timer),
+            None => None,
+        }
     }
 
     /// Takes the armed production timer.

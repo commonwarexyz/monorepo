@@ -312,6 +312,9 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
         {
             return Ok(None);
         }
+        if profile.tuning().min_view_duration.is_some() && self.paced != Some(view) {
+            return Ok(None);
+        }
         let parent = self
             .select_anchor(view)
             .cloned()
@@ -406,6 +409,11 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
     }
 
     /// Freezes the timeout cutoff of `view` when its timer fires.
+    /// Records that `view`'s minimum duration elapsed, so this node may propose in it.
+    pub(crate) const fn pace(&mut self, view: View) {
+        self.paced = Some(view);
+    }
+
     pub(crate) fn fire_timer<H: Hasher<Digest = D>>(
         &mut self,
         view: View,

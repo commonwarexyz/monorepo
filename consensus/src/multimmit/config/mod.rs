@@ -108,6 +108,14 @@ pub enum Error {
     /// The just-completed view must remain available for votes delivered within the synchrony bound.
     #[error("view retention must be greater than zero")]
     ZeroViewRetention,
+    /// A leader would wait out the view timeout before proposing.
+    #[error("minimum view duration must be below the view timeout")]
+    MinViewDurationTooLong {
+        /// The view timeout.
+        view_timeout: Duration,
+        /// The configured minimum view duration.
+        actual: Duration,
+    },
     /// The early leader timeout window does not exceed the publication retry ceiling.
     #[error("skip timeout must exceed the publication retry ceiling")]
     SkipTimeoutTooShort {

@@ -144,6 +144,8 @@ pub(crate) struct ViewState<S: Scheme, D: Digest> {
     ///
     /// Stored outside the pass because each restart discards the pass.
     pub(super) pass_restarts: PassRestarts,
+    /// The latest view whose minimum duration elapsed before this node proposed in it.
+    pub(super) paced: Option<View>,
     /// Proposal diagnostics for metrics.
     pub(super) metrics: ViewMetrics,
     /// Identifiers for certificate jobs.
@@ -286,6 +288,7 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
                 view: View::zero(),
                 count: 0,
             },
+            paced: None,
             metrics: ViewMetrics::default(),
             certificate_ids: IdSequence::new(),
             capabilities: Vec::new(),

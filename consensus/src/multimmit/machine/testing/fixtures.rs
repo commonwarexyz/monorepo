@@ -513,6 +513,7 @@ pub(crate) struct Harness {
     producers: Option<Vec<Participant>>,
     resources: ResourceLimits,
     retention: Option<ViewDelta>,
+    min_view_duration: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -528,6 +529,7 @@ impl Harness {
             producers: None,
             resources: TEST_RESOURCES,
             retention: None,
+            min_view_duration: None,
         }
     }
 
@@ -583,6 +585,12 @@ impl Harness {
         self
     }
 
+    /// Makes each view this node leads run at least `duration` before it proposes.
+    pub(crate) const fn min_view_duration(mut self, duration: Duration) -> Self {
+        self.min_view_duration = Some(duration);
+        self
+    }
+
     /// Validates and returns the profile.
     ///
     /// # Panics
@@ -615,6 +623,7 @@ impl Harness {
                 view_retention: self
                     .retention
                     .unwrap_or_else(|| retention_for(self.resources, self.participants)),
+                min_view_duration: self.min_view_duration,
                 ..Tuning::default()
             },
             self.resources,

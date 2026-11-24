@@ -92,6 +92,8 @@ pub(crate) enum TimerCommand<D: Digest> {
     View(ViewTimer),
     /// A production deadline bound to one parent.
     Production(ProductionTimer<D>),
+    /// The earliest proposal time of one view this node leads.
+    Pace(ViewTimer),
 }
 
 /// One authenticated block routed to its producer chain's chain plane.
