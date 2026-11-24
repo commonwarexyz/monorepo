@@ -2195,29 +2195,29 @@ mod tests {
         }
     }
 
-    /// Pauses as the write releases its buffer.
-    struct PausingOwner {
-        entered: Option<oneshot::Sender<()>>,
-        release: mpsc::Receiver<()>,
-    }
-
-    impl AsRef<[u8]> for PausingOwner {
-        fn as_ref(&self) -> &[u8] {
-            b"x"
-        }
-    }
-
-    impl Drop for PausingOwner {
-        fn drop(&mut self) {
-            let _ = self.entered.take().unwrap().send(());
-            let _ = self.release.recv();
-        }
-    }
-
     /// A durable write releases the caller's buffers outside the open's durability guard, so a
     /// buffer destructor may wait for a sync on the same open.
     #[tokio::test]
     async fn test_durable_write_releases_buffers_outside_durability() {
+        // Pauses as the write releases its buffer.
+        struct PausingOwner {
+            entered: Option<oneshot::Sender<()>>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl AsRef<[u8]> for PausingOwner {
+            fn as_ref(&self) -> &[u8] {
+                b"x"
+            }
+        }
+
+        impl Drop for PausingOwner {
+            fn drop(&mut self) {
+                let _ = self.entered.take().unwrap().send(());
+                let _ = self.release.recv();
+            }
+        }
+
         // On Linux, two chunks fuse the barrier into the write and the larger write does not.
         let (storage, directory) = storage_for_reopen_test("owner_sync", Layout::ALL);
         for chunks in [2, IOVEC_BATCH_SIZE + 1] {
