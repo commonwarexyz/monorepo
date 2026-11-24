@@ -509,6 +509,9 @@ fn map2_f(a: FVec, b: FVec, operation: impl Fn(Regs, Regs) -> Regs) -> FVec {
 /// Every input must satisfy [`FVec`]'s limb bound. That bound keeps raw field arithmetic and all
 /// wide accumulators within their documented ranges.
 impl FBackend for Backend {
+    // Measured on an Apple M-series core: a batch costs about as much as decompressing 4.4 encodings one at a time.
+    const DECOMPRESS_BATCH_MIN: usize = 5;
+
     #[inline(always)]
     fn add(self, a: FVec, b: FVec) -> FVec {
         map2_f(a, b, |a, b| reduce_regs(add_raw(a, b)))

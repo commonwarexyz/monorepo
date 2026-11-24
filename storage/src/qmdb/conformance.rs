@@ -354,7 +354,7 @@ mod tests {
         }
     }
 
-    type Store = store::Db<Ctx, Digest, Digest, OneCap, Sequential>;
+    type Store = store::unpartitioned::Db<Ctx, Digest, Digest, OneCap, Sequential>;
 
     fn store_config(suffix: &str) -> store::Config<OneCap, ((), ()), Sequential> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -364,6 +364,7 @@ mod tests {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
+            init_concurrency: NZUsize!(1),
         }
     }
 
