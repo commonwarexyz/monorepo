@@ -750,6 +750,43 @@ pub fn check_recorded_vote_invariants_with_byzantine<E, S, L>(
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {
+    check_recorded_vote_invariants_with_observers(
+        byzantine,
+        elector,
+        epoch,
+        term_length,
+        optimistic_views,
+        handoff,
+        recorders,
+        &[],
+    );
+}
+
+/// [`check_recorded_vote_invariants_with_byzantine`] with additional summary
+/// `observers` whose engines have no recording reporter.
+///
+/// The observers join the per-signer vote invariants only. Their engines'
+/// application events stay out of the exact-proposal audit, so an engine whose
+/// application deliberately disagrees with the correct ones (the audit
+/// rejection campaign's faulty slot) still contributes the votes and
+/// certificates it observed, including its own.
+#[allow(clippy::too_many_arguments)]
+pub fn check_recorded_vote_invariants_with_observers<E, S, L>(
+    byzantine: &HashSet<usize>,
+    elector: L,
+    epoch: Epoch,
+    term_length: TermLength,
+    optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
+    recorders: &[RecordingReporter<E, S, L, Sha256Digest>],
+    observers: &[Reporter<E, S, L, Sha256Digest>],
+) where
+    E: CryptoRng,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    let mut reporters = summaries(recorders);
+    reporters.extend(observers.iter().cloned());
     check_vote_invariants_with_byzantine(
         byzantine,
         elector,
@@ -757,7 +794,7 @@ pub fn check_recorded_vote_invariants_with_byzantine<E, S, L>(
         term_length,
         optimistic_views,
         handoff,
-        &summaries(recorders),
+        &reporters,
     );
     check_correct_exact_proposals(recorders, byzantine);
 }
