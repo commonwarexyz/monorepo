@@ -431,7 +431,7 @@ where
         keys: &[Q],
     ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S, Q> {
         let mut positions = Vec::with_capacity(keys.len());
-        self.snapshot
+        self.index
             .get_many(keys.iter().map(Borrow::borrow), |_, &loc| {
                 positions.push(*loc)
             });

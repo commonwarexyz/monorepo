@@ -209,10 +209,10 @@ where
         let creates = writes
             .iter()
             .map(Borrow::borrow)
-            .filter(|key| self.snapshot.get(key.as_ref()).next().is_none());
+            .filter(|key| self.index.get(key.as_ref()).next().is_none());
         let mut positions = Vec::new();
         for key in creates.chain(deletes.iter().map(Borrow::borrow)) {
-            if let Some((locs, _)) = self.snapshot.prev_translated_key(key.as_ref()) {
+            if let Some((locs, _)) = self.index.prev_translated_key(key.as_ref()) {
                 positions.extend(locs.map(|loc| **loc));
             }
         }
