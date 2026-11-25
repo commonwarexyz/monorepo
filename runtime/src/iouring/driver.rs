@@ -453,14 +453,8 @@ impl Driver {
             // deferred task work and returns, as liburing's
             // `io_uring_submit_and_get_events` does. Newer kernels bound the
             // batch and leave the rest for a later enter.
-            Enter::TaskWork => Self::submit_and_enter(ring, 0, EnterFlags::GETEVENTS, None),
-            Enter::Wait { iowait, .. } => {
-                let mut flags = EnterFlags::GETEVENTS;
-                if !iowait {
-                    flags |= EnterFlags::NO_IOWAIT;
-                }
-                Self::submit_and_enter(ring, 1, flags, timeout)
-            }
+            Enter::TaskWork => Self::submit_and_enter(ring, 0, true, None),
+            Enter::Wait { iowait, .. } => Self::submit_and_enter(ring, 1, iowait, timeout),
         };
 
         // A transient error falls through and returns `Ok`, so the caller
@@ -493,17 +487,22 @@ impl Driver {
         Ok(())
     }
 
-    /// Submit the published SQEs and enter the ring with `flags`, waiting for
+    /// Submit the published SQEs, run deferred task work and wait for
     /// `min_complete` completions for at most `timeout` when one is given.
     ///
-    /// A timeout returns `Ok`.
+    /// A blocking wait counts as iowait only when `iowait` is set. A timeout
+    /// returns `Ok`.
     fn submit_and_enter(
         ring: &mut IoUring,
         min_complete: u32,
-        mut flags: EnterFlags,
+        iowait: bool,
         timeout: Option<Duration>,
     ) -> io::Result<usize> {
         let to_submit = u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+        let mut flags = EnterFlags::GETEVENTS;
+        if !iowait {
+            flags |= EnterFlags::NO_IOWAIT;
+        }
         if timeout.is_some() {
             flags |= EnterFlags::EXT_ARG;
         }
