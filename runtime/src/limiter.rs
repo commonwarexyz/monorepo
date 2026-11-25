@@ -4,8 +4,9 @@
 //! In a [KeyedRateLimiter], each new key gets its own allowance of that size.
 //! The allowance refills by one cell every [Quota::replenish_interval], up to the burst size.
 //!
-//! The limiter counts only forward steps between [Clock::current] reads. A backward step adds
-//! no elapsed time. Even a large forward jump cannot increase the allowance above the burst size.
+//! The limiter counts only forward steps between [Clock::current] reads. After a backward
+//! step, refill resumes from the new reading. If the clock moves back and forth, the same
+//! time span can refill quota more than once. The available allowance never exceeds the burst size.
 
 use crate::Clock;
 use commonware_utils::{DurationExt as _, SystemTimeExt as _, time::NANOS_PER_SEC};
@@ -18,6 +19,10 @@ use std::{
 };
 
 /// The refill rate and maximum burst size for a rate limiter.
+///
+/// [Quota::per_second], [Quota::per_minute], and [Quota::per_hour] divide the period by
+/// the burst size to get the refill interval. They round the interval down to whole
+/// nanoseconds, with a minimum of one nanosecond.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Quota {
     interval: Duration,
@@ -39,9 +44,6 @@ impl Quota {
     }
 
     /// Targets a refill rate of `max_burst` cells per second with a burst size of `max_burst`.
-    ///
-    /// The replenish interval is rounded down to whole nanoseconds, with a minimum of one
-    /// nanosecond.
     pub const fn per_second(max_burst: NonZeroU32) -> Self {
         Self::per_period(1, max_burst)
     }
@@ -219,7 +221,8 @@ impl<K: Hash + Eq + Clone, C: Clock> KeyedRateLimiter<K, C> {
         match self.tats.get_mut(key) {
             Some(tat) => *tat = gcra.admit(*tat, now).map_err(|wait| gcra.not_until(wait))?,
             None => {
-                let next = gcra.admit(0, now).map_err(|wait| gcra.not_until(wait))?;
+                // A new key has a full burst, so it can always admit its first cell.
+                let next = now.saturating_add(gcra.interval);
                 self.tats.insert(key.clone(), next);
             }
         }
@@ -227,6 +230,7 @@ impl<K: Hash + Eq + Clone, C: Clock> KeyedRateLimiter<K, C> {
     }
 
     /// Returns what [KeyedRateLimiter::check_key] would return for `key` now, without charging.
+    /// Records the clock reading so the next check measures elapsed time from this one.
     pub fn check_key_available(&mut self, key: &K) -> Result<(), SystemTime> {
         let now = self.gcra.now();
         let tat = self.tats.get(key).copied().unwrap_or(0);
