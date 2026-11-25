@@ -507,6 +507,7 @@ impl Driver {
         if timeout.is_some() {
             flags |= EnterFlags::EXT_ARG;
         }
+
         #[cfg(test)]
         tests::record_enter(min_complete, flags);
 
