@@ -10,8 +10,9 @@
 //! # Submission and Cancellation
 //!
 //! Staging keeps every SQE-referenced resource alive until the operation CQE,
-//! including when submission returns a transient error. Cancellation CQEs only
-//! acknowledge the cancellation attempt. They cannot release those resources.
+//! including when submission returns a transient error. A successful
+//! cancellation posts no CQE of its own (CQE_SKIP_SUCCESS), and a failed one
+//! only reports the attempt. Neither can release those resources.
 //!
 //! Dropping a local or forwarded observer cancels reads and network operations.
 //! Queued requests can finish immediately, while in-flight requests need a cancellation
@@ -72,7 +73,7 @@ use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
 use io_uring::{
     EnterFlags, IoUring,
     opcode::AsyncCancel,
-    squeue::SubmissionQueue,
+    squeue::{Flags as SqeFlags, SubmissionQueue},
     types::{CancelBuilder, SubmitArgs, Timespec},
 };
 use std::{
@@ -85,7 +86,7 @@ use std::{
 };
 use tracing::warn;
 
-/// Shared acknowledgement token for cancellation SQEs.
+/// Shared user data of cancellation SQEs, which post CQEs only on failure.
 ///
 /// Like the ring wait token, this uses the slot index reserved by
 /// [`Waiters::insert`].
@@ -785,8 +786,11 @@ impl State {
                 continue;
             }
 
+            // Only the target's CQE can retire it, so a successful
+            // cancellation posts no CQE. The kernel still posts a failure.
             let cancel = AsyncCancel::new(id.user_data())
                 .build()
+                .flags(SqeFlags::SKIP_SUCCESS)
                 .user_data(CANCEL_USER_DATA);
 
             // SAFETY: AsyncCancel carries only the stable user_data identity.
@@ -854,10 +858,10 @@ impl State {
         }
 
         // Only the target operation's CQE can retire its resource owners.
+        // SKIP_SUCCESS suppresses a successful cancellation's CQE, so this
+        // token arrives only with a failure.
         if user_data == CANCEL_USER_DATA {
-            if result == 0 {
-                // Cancellation successful.
-            } else if result == -libc::EALREADY {
+            if result == -libc::EALREADY {
                 // Cancellation is no longer possible at this stage. The target
                 // operation CQE should follow shortly.
             } else if result == -libc::ENOENT {
@@ -1801,14 +1805,14 @@ pub mod tests {
     }
 
     #[test]
-    fn test_cancel_acknowledgements_leave_requests_and_results_untouched() {
+    fn test_failed_cancellations_leave_requests_and_results_untouched() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
         let id = harness.stage(recv(left, 5, None), None, 0);
         harness.driver.state.cancel(id, &mut harness.deferred);
 
-        // Acknowledgements cannot release the operation's kernel resources.
-        for result in [0, -libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
+        // Failed cancellations cannot release the operation's kernel resources.
+        for result in [-libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
             harness
                 .driver
                 .state
@@ -1833,14 +1837,11 @@ pub mod tests {
             .state
             .complete(id, result, &mut harness.deferred);
 
-        for result in [0, -libc::ENOENT] {
-            harness
-                .driver
-                .state
-                .handle_cqe(CANCEL_USER_DATA, result, &mut harness.deferred);
-
-            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
-        }
+        harness
+            .driver
+            .state
+            .handle_cqe(CANCEL_USER_DATA, -libc::ENOENT, &mut harness.deferred);
+        assert_eq!(harness.driver.state.waiters.in_flight(), 0);
 
         harness.collect();
         assert_eq!(harness.completed.len(), 1);
@@ -1848,8 +1849,51 @@ pub mod tests {
         harness.drain();
     }
 
+    /// A successful cancellation posts only its target's CQE.
     #[test]
-    fn test_cancel_acknowledgement_invariants() {
+    fn test_successful_cancellation_posts_only_its_target_cqe() {
+        let mut harness = Harness::new(1);
+
+        // A receive without data stays in the kernel until cancelled.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let id = harness.admit(recv(left, 1, None), 0);
+        harness.service();
+        assert!(harness.driver.state.waiters.is_in_flight(id));
+        harness.driver.orphan(id, &mut harness.deferred);
+        assert!(
+            !harness
+                .driver
+                .state
+                .stage_cancellations(&mut harness.driver.ring.submission())
+        );
+
+        // Enter until the target's CQE arrives, then once more so a
+        // cancellation CQE would show.
+        let mut cqes = Vec::new();
+        let mut last = false;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !last {
+            assert!(Instant::now() < deadline, "target CQE missing");
+            last = !cqes.is_empty();
+            Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
+            let completion = harness.driver.ring.completion();
+            cqes.extend(completion.map(|cqe| (cqe.user_data(), cqe.result())));
+        }
+        assert_eq!(cqes, [(id.user_data(), -libc::ECANCELED)]);
+
+        for (user_data, result) in cqes {
+            harness
+                .driver
+                .state
+                .handle_cqe(user_data, result, &mut harness.deferred);
+        }
+        assert!(!harness.driver.state.waiters.is_in_flight(id));
+
+        harness.drain();
+    }
+
+    #[test]
+    fn test_cancellation_cqe_invariants() {
         // Both control tokens use the index that Waiters refuses to allocate.
         assert_ne!(CANCEL_USER_DATA, RING_WAIT_USER_DATA);
         for token in [CANCEL_USER_DATA, RING_WAIT_USER_DATA] {
@@ -1872,7 +1916,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_request_retirement_releases_hold_before_cancel_acknowledgement() {
+    fn test_request_retirement_releases_hold_before_cancellation_cqe() {
         for consume_cancel in [false, true] {
             for reuse in [false, true] {
                 let mut harness = Harness::new(1);
@@ -1941,10 +1985,17 @@ pub mod tests {
                 probe.unlock().unwrap();
 
                 if consume_cancel {
-                    // Leave the real cancellation acknowledgement unobserved.
+                    // The cancellation finds no target, and its failure CQE is
+                    // consumed without the driver seeing it.
                     harness.driver.ring.submit_and_wait(1).unwrap();
                     assert!(harness.driver.ring.submission().is_empty());
-                    assert!(!harness.driver.ring.completion().is_empty());
+                    let cqes: Vec<_> = harness
+                        .driver
+                        .ring
+                        .completion()
+                        .map(|cqe| (cqe.user_data(), cqe.result()))
+                        .collect();
+                    assert_eq!(cqes, [(CANCEL_USER_DATA, -libc::ENOENT)]);
                 } else {
                     assert_eq!(harness.driver.ring.submission().len(), 1);
                 }
@@ -2077,7 +2128,7 @@ pub mod tests {
 
     /// Cancelling a direct read never stages a successor. When its observer is dropped or its
     /// worker closes, a read the kernel holds keeps its open and buffer until its operation CQE
-    /// decides its outcome, even when the cancellation acknowledgement arrives first. A read the
+    /// decides its outcome, even when a failed cancellation's CQE arrives first. A read the
     /// kernel does not hold releases them at once when its observer is dropped, whether it is
     /// queued for its first submission or requeued after aligned progress or a switch to a
     /// buffered read.
@@ -2109,7 +2160,7 @@ pub mod tests {
         };
 
         for close in [false, true] {
-            for acknowledged in [false, true] {
+            for cancel_failed in [false, true] {
                 for (result, outcome) in [
                     (-libc::EAGAIN, Err(Error::Timeout)),
                     (DIRECT_ALIGN as i32, Err(Error::Timeout)),
@@ -2121,8 +2172,9 @@ pub mod tests {
                     (3 * DIRECT_ALIGN as i32, Ok(())),
                 ] {
                     // Orphan a staged read or close its worker, with or without a simulated
-                    // cancellation acknowledgement. The kernel may write the buffer until the
-                    // operation CQE, so the request keeps its open and buffer.
+                    // failed cancellation, the only cancellation CQE the kernel posts. The
+                    // kernel may write the buffer until the operation CQE, so the request
+                    // keeps its open and buffer.
                     let mut harness = Harness::new(1);
                     let (request, target) = request();
                     let id = harness.stage(request, None, 0);
@@ -2131,11 +2183,12 @@ pub mod tests {
                     } else {
                         harness.orphan(id);
                     }
-                    if acknowledged {
-                        harness
-                            .driver
-                            .state
-                            .handle_cqe(CANCEL_USER_DATA, 0, &mut harness.deferred);
+                    if cancel_failed {
+                        harness.driver.state.handle_cqe(
+                            CANCEL_USER_DATA,
+                            -libc::EALREADY,
+                            &mut harness.deferred,
+                        );
                         harness.collect();
                     }
                     assert_eq!(Arc::strong_count(&file), 2);

@@ -7,7 +7,7 @@
 //! external destructor runs while runtime state is borrowed. Consumed write
 //! chunks therefore stay owned until retirement.
 //!
-//! A cancel acknowledgement never retires resources. Once an operation SQE is
+//! A cancellation CQE never retires resources. Once an operation SQE is
 //! in flight, only its CQE establishes that the kernel has stopped accessing them.
 
 use super::{

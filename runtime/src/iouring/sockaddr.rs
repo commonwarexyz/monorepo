@@ -1,7 +1,7 @@
 //! Native socket addresses for io_uring connect requests.
 //!
 //! Connect requests box [`SockAddr`] to keep its address stable until the
-//! operation completes. A cancellation acknowledgement does not release it.
+//! operation completes. A cancellation CQE does not release it.
 
 use std::{net::SocketAddr, ptr};
 
