@@ -2446,20 +2446,39 @@ mod tests {
             let peer_a = ed25519::PrivateKey::from_seed(41).public_key();
             let peer_b = ed25519::PrivateKey::from_seed(42).public_key();
             let peer_c = ed25519::PrivateKey::from_seed(43).public_key();
-            let (twin_sender, _twin_receiver) =
-                oracle.control(twin).register(0, TEST_QUOTA).await.unwrap();
+            let (mut twin_sender, _twin_receiver) = oracle
+                .control(twin.clone())
+                .register(0, Quota::per_second(NonZeroU32::MIN))
+                .await
+                .unwrap();
+            let sent = crate::Sender::send(
+                &mut twin_sender,
+                Recipients::One(peer_a.clone()),
+                b"first",
+                false,
+            );
+            assert_eq!(sent, vec![peer_a.clone()]);
 
-            // Primary rewrites the recipients to peer_c and secondary drops every message
-            let forwarded = peer_c.clone();
+            // The sender started with an empty roster. Wait for the network to publish A and C.
+            let mut manager = oracle.manager();
+            manager.track(
+                0,
+                Set::try_from([twin, peer_a.clone(), peer_c.clone()]).unwrap(),
+            );
+            assert!(manager.peer_set(0).await.is_some());
+
             let (mut primary, mut secondary) =
-                twin_sender.split_with(move |origin, _, _| match origin {
-                    SplitOrigin::Primary => Some(Recipients::One(forwarded.clone())),
+                twin_sender.split_with(|origin, _, _| match origin {
+                    SplitOrigin::Primary => Some(Recipients::All),
                     SplitOrigin::Secondary => None,
                 });
 
-            let both = Recipients::Some(vec![peer_a, peer_b]);
+            // The check retains B, but the broadcast should charge only C: A already spent its quota.
+            let both = Recipients::Some(vec![peer_a, peer_b.clone()]);
             let sent = crate::Sender::send(&mut primary, both.clone(), b"forwarded", false);
-            assert_eq!(sent, vec![peer_c]);
+            assert_eq!(sent, vec![peer_c.clone()]);
+            assert!(primary.check(Recipients::One(peer_c)).is_err());
+            assert!(primary.check(Recipients::One(peer_b)).is_ok());
             let sent = crate::Sender::send(&mut secondary, both, b"dropped", false);
             assert!(sent.is_empty());
         });
