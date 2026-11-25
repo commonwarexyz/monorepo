@@ -1,4 +1,4 @@
-use super::{Config, Error, Mailbox, Message};
+use super::{Config, Error, Mailbox};
 use crate::authenticated::{
     channels::Channels,
     connection::{self, Inbox, Outbox},
@@ -11,33 +11,14 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
+    Clock, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
     telemetry::metrics::CounterFamily,
 };
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::{Widen, channel::ring, time::SYSTEM_TIME_PRECISION};
-use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 use tracing::debug;
-
-impl connection::Control for ring::Receiver<Message> {
-    type Message = Message;
-
-    fn recv(&mut self) -> impl Future<Output = Option<Message>> + Send {
-        self.next()
-    }
-
-    fn try_recv(&mut self) -> Option<Message> {
-        self.next().now_or_never().flatten()
-    }
-
-    fn encode(&self, msg: Message) -> Option<IoBufs> {
-        match msg {
-            Message::Kill => None,
-        }
-    }
-}
 
 pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     context: E,
@@ -46,7 +27,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     send_batch_size: usize,
     max_message_size: usize,
 
-    control: ring::Receiver<Message>,
+    kill: ring::Receiver<()>,
     receivers: Receivers<EncodedData>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
@@ -56,7 +37,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
+        let (mailbox, kill) = Mailbox::new();
         let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);
         (
             Self {
@@ -64,13 +45,13 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                 ping_frequency: cfg.ping_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
                 max_message_size: Widen::<usize>::widen(cfg.max_message_size),
-                control: control_receiver,
+                kill,
                 receivers,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
             },
-            control_sender,
+            mailbox,
             relay,
         )
     }
@@ -102,8 +83,8 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
         let label = metrics::Message::new_ping(&peer);
         let ping_throttle = Throttle::new(limiter, received, rate_limited, &label);
         let mut outbox = Outbox::new(
-            peer.clone(),
-            self.control,
+            &peer,
+            (),
             self.receivers,
             inbox.channels(),
             sent_messages,
@@ -134,8 +115,8 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                             .map_err(Error::SendFailed)?;
                         deadline = context.current() + self.ping_frequency;
                     },
-                    // Await any outbound message (control, high, or low), then
-                    // drain already-queued messages into one `send_many` call.
+                    // Await any outbound message (high or low), then drain already-queued messages
+                    // into one `send_many` call.
                     msg = outbox.recv() => {
                         outbox.push(msg)?;
                         outbox.fill()?;
@@ -175,8 +156,8 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             }
         });
 
-        // Wait for one of the handlers to finish or shutdown
-        connection::wait(&self.context, send_handler, receive_handler)
+        // Wait for shutdown, a kill or dropped mailbox, or either handler to finish
+        connection::wait(&self.context, self.kill, send_handler, receive_handler)
             .await
             .map_err(Error::UnexpectedFailure)?
     }
@@ -185,12 +166,16 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{data::Data, router};
+    use crate::{
+        Receiver as _,
+        authenticated::{data::Data, router},
+    };
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ChaCha20Poly1305, Signer,
         ed25519::{PrivateKey, PublicKey},
     };
+    use commonware_macros::select;
     use commonware_runtime::{
         Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _, deterministic,
         mocks, telemetry::metrics::MetricsExt as _,
@@ -201,7 +186,7 @@ mod tests {
         sake::{self, Sake},
         utils::Timeout,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZU32, NZUsize, channel::oneshot};
     use std::{
         num::NonZeroU32,
         sync::{
@@ -547,7 +532,7 @@ mod tests {
             peer_mailbox.kill();
             let result = peer_handle.await.expect("peer task failed");
             assert!(
-                matches!(result, Err(Error::Connection(connection::Error::Killed(_)))),
+                matches!(result, Err(Error::Connection(connection::Error::Killed))),
                 "unexpected result: {result:?}"
             );
         });
@@ -625,5 +610,102 @@ mod tests {
                 "Expected DecodeFailed error, got: {result:?}"
             );
         });
+    }
+
+    /// Ends a connection by killing the peer if `kill` is set, or by dropping its mailbox
+    /// otherwise, while its sender is blocked writing to a peer that stopped reading and its
+    /// receiver waits on the rate limiter. Requires that `run` returns promptly and that nothing
+    /// more reaches the application.
+    fn interrupt_blocked_handlers(kill: bool) {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            // Authenticate a connection whose writes to the peer block after the handshake, and
+            // register a channel that admits one message per second.
+            let signer = PrivateKey::from_seed(1);
+            let peer = signer.public_key();
+            let (mut dialer, _dialer_receiver, sender, receiver, blocked) =
+                connection::tests::stalled_connection(&context, signer, PrivateKey::from_seed(2))
+                    .await;
+            let cfg = default_peer_config(context.child("config"));
+            let rate_limited = cfg.rate_limited.clone();
+            let mut channels = create_channels(context.child("channels"));
+            let (_sender, mut inbound) =
+                channels.register(0, Quota::per_second(NZU32!(1)), context.child("channel"));
+
+            // Run the actor in its own task, as the spawner does, so that task supervises the
+            // handlers.
+            let (handles_sender, handles) = oneshot::channel();
+            let task = context.child("peer").spawn({
+                let peer = peer.clone();
+                move |context| async move {
+                    let (actor, mailbox, relay) = Actor::new(context, cfg);
+                    let _ = handles_sender.send((mailbox, relay));
+                    actor.run(peer, (sender, receiver), channels).await
+                }
+            });
+            let (mailbox, relay) = handles.await.expect("peer task must send its handles");
+
+            // The sender blocks on its first write and the receiver on the second message.
+            let data = EncodedData::new(0, IoBuf::from(b"stuck").into());
+            assert!(relay.send(data, false).accepted());
+            for message in [b"first", b"limit"] {
+                let message = IoBuf::from(message);
+                let data = types::Message::Data(Data {
+                    channel: 0,
+                    message,
+                });
+                dialer.send(data.encode()).await.expect("send must succeed");
+            }
+            let (_, message) = inbound.recv().await.expect("receive must succeed");
+            assert_eq!(message, IoBuf::from(b"first"));
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(blocked.load(Ordering::Relaxed), 1);
+            let label = metrics::Message::new_data(&peer, 0);
+            assert_eq!(rate_limited.get(&label).map(|c| c.get()), Some(1));
+
+            // Ending the connection does not wait for either handler.
+            if kill {
+                mailbox.kill();
+            } else {
+                drop(mailbox);
+            }
+            let result = select! {
+                result = task => result.expect("peer task must not fail"),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("teardown must not wait for blocked handlers")
+                },
+            };
+            match (kill, result) {
+                (true, Err(Error::Connection(connection::Error::Killed))) => {}
+                (false, Err(Error::Connection(connection::Error::Disconnected))) => {}
+                (_, result) => panic!("connection must end with the requested cause: {result:?}"),
+            }
+
+            // The receiver stopped with the task, so neither the throttled message nor a later
+            // one is delivered and its application sender is dropped.
+            let message = IoBuf::from(b"after");
+            let data = types::Message::Data(Data {
+                channel: 0,
+                message,
+            });
+            let _ = dialer.send(data.encode()).await;
+            context.sleep(Duration::from_secs(5)).await;
+            let result = inbound.recv().await;
+            assert!(
+                result.is_err(),
+                "application must receive nothing after teardown: {result:?}"
+            );
+        });
+    }
+
+    /// Killing the peer ends its connection while both handlers are blocked.
+    #[test]
+    fn test_kill_interrupts_blocked_handlers() {
+        interrupt_blocked_handlers(true);
+    }
+
+    /// Dropping every mailbox clone ends the connection while both handlers are blocked.
+    #[test]
+    fn test_dropped_mailbox_interrupts_blocked_handlers() {
+        interrupt_blocked_handlers(false);
     }
 }
