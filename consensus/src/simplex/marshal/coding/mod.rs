@@ -79,10 +79,10 @@ mod tests {
     use crate::{
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
         Reporter,
+        ancestry::BlockProvider,
         simplex::{
             Plan,
             marshal::{
-                ancestry::BlockProvider,
                 coding::{
                     Coding, Marshaled, MarshaledConfig, shards,
                     types::{
@@ -776,7 +776,7 @@ mod tests {
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let child = Digested::precomputed(child.clone(), child.digest());
-            let subscription = marshal.subscribe_parent(&child, None);
+            let subscription = marshal.subscribe_parent(&child);
 
             // The provider subscribes to the parent by the commitment in the child's context.
             context.sleep(Duration::from_millis(100)).await;
@@ -879,7 +879,7 @@ mod tests {
                 let shards =
                     start_shard_mailbox(context.child("shards"), participants, provider.clone())
                         .await;
-                let application = WalkingVerifyingApp::default();
+                let application = WalkingVerifyingApp::<CodingB, S>::default();
                 let mut marshaled = Marshaled::new(
                     context.child("marshaled"),
                     MarshaledConfig {
@@ -1566,6 +1566,16 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_get_finalization_by_height() {
         harness::get_finalization_by_height::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalization_floors() {
+        harness::finalization_floors::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalization_floors_survive_pruning() {
+        harness::finalization_floors_survive_pruning::<CodingHarness>();
     }
 
     #[test_traced("WARN")]
@@ -4595,7 +4605,7 @@ mod tests {
             assert_eq!(cached.commitment(), parent.commitment());
             let shards =
                 start_shard_mailbox(context.child("shards"), participants, provider.clone()).await;
-            let application = WalkingVerifyingApp::default();
+            let application = WalkingVerifyingApp::<CodingB, S>::default();
             let mut marshaled = Marshaled::new(
                 context.child("marshaled"),
                 MarshaledConfig {
@@ -4757,7 +4767,7 @@ mod tests {
                 provider.clone(),
             )
             .await;
-            let application = WalkingVerifyingApp::default();
+            let application = WalkingVerifyingApp::<CodingB, S>::default();
             let mut marshaled = Marshaled::new(
                 context.child("marshaled"),
                 MarshaledConfig {
@@ -5412,7 +5422,7 @@ mod tests {
             )
             .await;
             let cfg = MarshaledConfig {
-                application: WalkingVerifyingApp::default(),
+                application: WalkingVerifyingApp::<CodingB, S>::default(),
                 marshal,
                 shards,
                 scheme_provider: provider,

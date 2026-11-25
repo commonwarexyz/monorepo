@@ -12,10 +12,7 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Heightable,
-    simplex::marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    simplex::marshal::core::{Mailbox as MarshalMailbox, RoundBounded, Variant},
     types::Height,
 };
 use commonware_macros::{boxed, select, select_loop};
@@ -176,7 +173,7 @@ where
     E: Spawner + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: RoundBounded<Block = A::Block>,
 {
     assert!(
         durability.needs_barrier(),
@@ -218,7 +215,7 @@ where
     E: Spawner + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: RoundBounded<Block = A::Block>,
     T: Strategy,
 {
     /// Serves requests until the mailbox closes or the actor stops.
@@ -518,10 +515,10 @@ mod tests {
     use commonware_consensus::{
         Application as _, Automaton as _, Block as _, CertifiableAutomaton as _,
         CertifiableBlock as _, Handoff, Heightable as _, Reporter as _, Reporters,
+        ancestry::{self, Ancestry, BoxedAncestry},
         simplex::{
             marshal::{
                 Update,
-                ancestry::{self, Ancestry, BoxedAncestry},
                 core::{Mailbox as MarshalMailbox, Processed},
                 standard::Deferred,
             },

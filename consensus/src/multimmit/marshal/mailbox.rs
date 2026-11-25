@@ -4,7 +4,7 @@ use super::{
     input::{Lane, Message, Reply},
     relay::Staged,
     store::blocks::Block,
-    types::{Custody, Error, Floor, MarshalProgress, OutputIndex},
+    types::{Custody, Error, Floor, MarshalProgress},
 };
 use crate::{
     Reporter,
@@ -12,6 +12,7 @@ use crate::{
         scheme::Scheme,
         types::{Activity, BlockRef, Body, CertificateId, Lqc},
     },
+    types::OutputIndex,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::Hasher;

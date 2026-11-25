@@ -5,9 +5,9 @@
 
 use crate::{
     CertifiableBlock, Epochable,
+    ancestry::has_contiguous_height,
     simplex::marshal::{
-        ancestry::has_contiguous_height, application::validation::is_block_in_expected_epoch,
-        coding::types::hash_context,
+        application::validation::is_block_in_expected_epoch, coding::types::hash_context,
     },
     types::{Epocher, coding::Commitment},
 };
