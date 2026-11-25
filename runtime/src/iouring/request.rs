@@ -1751,6 +1751,19 @@ mod tests {
         let mut sibling_write = make_write_request(file, Cache::Disabled);
         assert_eq!(read_fields(&sibling_write.build_sqe()).5, 0);
 
+        // A vectored write carries the hint as a single-buffer write does.
+        let mut bufs = IoBufs::from(IoBuf::from(b"abc"));
+        bufs.append(IoBuf::from(b"de"));
+        let mut vectored = WriteAtRequest::new(
+            make_file(),
+            0,
+            bufs.into(),
+            WriteAtState::Writing,
+            Cache::Disabled,
+        );
+        let (opcode, _, _, _, _, flags) = read_fields(&vectored.build_sqe());
+        assert_eq!((opcode, flags), (SqueueEntry::WRITEV, libc::RWF_DONTCACHE));
+
         let file = make_file();
         let mut write = make_write_request(file.clone(), Cache::Disabled);
         assert_eq!(read_fields(&write.build_sqe()).5, libc::RWF_DONTCACHE);

@@ -54,7 +54,7 @@ use std::{
     io,
     marker::PhantomData,
     mem,
-    ops::{BitOr, BitOrAssign},
+    ops::BitOrAssign,
     os::fd::{AsRawFd, FromRawFd as _, OwnedFd, RawFd},
     ptr::{self, NonNull},
     sync::atomic::{AtomicU32, Ordering},
@@ -122,25 +122,10 @@ impl EnterFlags {
         Self(0)
     }
 
-    /// Raw flag bits.
-    #[inline]
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-
     /// Whether every flag in `other` is set.
     #[cfg(test)]
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
-    }
-}
-
-impl BitOr for EnterFlags {
-    type Output = Self;
-
-    #[inline]
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
     }
 }
 
@@ -619,7 +604,7 @@ impl SqueueEntry {
     }
 }
 
-/// The kernel's `io_uring_cqe` without the 32-byte extension.
+/// The kernel's standard 16-byte `io_uring_cqe`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CqueueEntry {
@@ -756,7 +741,7 @@ impl Mmap {
 impl Drop for Mmap {
     fn drop(&mut self) {
         // A failure only leaks the mapping, and a drop that panics while
-        // unwinding aborts, so the result is ignored, as the crate does.
+        // unwinding aborts, so the result is ignored.
         //
         // SAFETY: The mapping was created with this address and length, and
         // nothing accesses it after the queues that point into it are gone.
@@ -894,15 +879,23 @@ impl SubmissionQueue<'_> {
     /// Whether the kernel holds completions that did not fit in the CQ.
     #[inline]
     pub fn cq_overflow(&self) -> bool {
-        self.sq.kflags.load(Ordering::Acquire) & IORING_SQ_CQ_OVERFLOW != 0
+        // The flag only decides whether a flush also asks for events, and no
+        // data is read through it, so a relaxed load suffices, as in liburing.
+        self.sq.kflags.load(Ordering::Relaxed) & IORING_SQ_CQ_OVERFLOW != 0
     }
 
     /// Write `sqe` into the next free slot. The next enter submits it.
     ///
     /// # Safety
     ///
-    /// Every buffer, descriptor, and other resource that `sqe` refers to
-    /// must stay valid until its completion is reaped.
+    /// Every descriptor `sqe` refers to must stay valid until the kernel is
+    /// done with it. Every memory region it refers to, including an iovec
+    /// array and each buffer the array refers to, must stay at a stable
+    /// address and valid for the full extent and access the entry encodes
+    /// until then, and nothing may access it in conflict with the kernel's
+    /// reads or writes. The operation's final completion, or another
+    /// guarantee specific to the operation, shows when the kernel is done,
+    /// including when a successful completion is skipped.
     ///
     /// # Panics
     ///
@@ -948,6 +941,15 @@ impl CompletionQueueInner {
             cq: self,
         }
     }
+
+    /// Number of completions the kernel dropped because it could not hold
+    /// them. It never decreases.
+    #[inline]
+    fn overflow(&self) -> u32 {
+        // A count checked after an enter, which no data is read through, so a
+        // relaxed load suffices.
+        self.koverflow.load(Ordering::Relaxed)
+    }
 }
 
 /// A view of the CQEs posted when it was created.
@@ -974,13 +976,6 @@ impl CompletionQueue<'_> {
     #[cfg(test)]
     pub const fn is_empty(&self) -> bool {
         self.tail == self.head
-    }
-
-    /// Number of completions the kernel dropped because it could not hold
-    /// them. It never decreases.
-    #[inline]
-    pub fn overflow(&self) -> u32 {
-        self.cq.koverflow.load(Ordering::Acquire)
     }
 }
 
@@ -1184,6 +1179,13 @@ impl IoUring {
         self.cq.completion()
     }
 
+    /// Number of completions the kernel dropped because it could not hold
+    /// them. It never decreases.
+    #[inline]
+    pub fn overflow(&self) -> u32 {
+        self.cq.overflow()
+    }
+
     /// Submit every pushed, unconsumed SQE and then do what `flags` ask.
     ///
     /// `timeout`, when present, bounds a wait for `min_complete` completions
@@ -1241,7 +1243,7 @@ impl IoUring {
                 fd,
                 c_long::from(to_submit.cast_signed()),
                 c_long::from(min_complete.cast_signed()),
-                c_long::from(flags.bits().cast_signed()),
+                c_long::from(flags.0.cast_signed()),
                 arg_ptr,
                 arg_size,
             )
@@ -1293,11 +1295,12 @@ impl IoUring {
     }
 
     /// Release the ring's registered slot, if any, through the raw
-    /// descriptor. Later enters use the raw descriptor.
+    /// descriptor. After a success, later enters use the raw descriptor.
     ///
-    /// A failure leaves the slot registered until the owner thread exits.
+    /// A failure keeps the slot, which later enters keep using, and the ring's
+    /// drop tries again to release it.
     pub fn unregister_ring_fd(&mut self) -> io::Result<()> {
-        let Some(slot) = self.slot.take() else {
+        let Some(slot) = self.slot else {
             return Ok(());
         };
         let update = RsrcUpdate {
@@ -1318,7 +1321,10 @@ impl IoUring {
             )
         };
         match result {
-            1 => Ok(()),
+            1 => {
+                self.slot = None;
+                Ok(())
+            }
             result if result < 0 => Err(io::Error::last_os_error()),
             _ => Err(io::Error::other(
                 "ring descriptor unregistration was not applied",
@@ -1400,10 +1406,7 @@ const _: () = {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::{
-        cell::Cell,
-        panic::{AssertUnwindSafe, catch_unwind},
-    };
+    use std::cell::Cell;
 
     thread_local! {
         /// Minimum completion count and flags of this thread's latest enter.
@@ -1412,9 +1415,8 @@ pub mod tests {
         /// Error the next enter on this thread returns instead of entering.
         static FAIL_ENTER: Cell<Option<i32>> = const { Cell::new(None) };
 
-        /// Mapping offset whose next mapping on this thread fails, and whether
-        /// the failure panics instead of returning an error.
-        static FAIL_MAP: Cell<Option<(libc::off_t, bool)>> = const { Cell::new(None) };
+        /// Mapping offset whose next mapping on this thread fails.
+        static FAIL_MAP: Cell<Option<libc::off_t>> = const { Cell::new(None) };
 
         /// Mappings this thread created minus those it unmapped. A ring
         /// dropped on another thread unmaps there.
@@ -1453,6 +1455,12 @@ pub mod tests {
         ring.cq.mask + 1
     }
 
+    /// Store `count` in `ring`'s mapped dropped-completion counter, as a
+    /// kernel that dropped that many completions does.
+    pub fn set_overflow(ring: &mut IoUring, count: u32) {
+        ring.cq.koverflow.store(count, Ordering::Relaxed);
+    }
+
     /// Release `ring`'s registered slot behind its back, so its enters name a
     /// slot the calling thread no longer holds.
     pub fn release_slot(ring: &IoUring) {
@@ -1476,22 +1484,18 @@ pub mod tests {
         assert_eq!(result, 1, "{}", io::Error::last_os_error());
     }
 
-    /// Fail the next mapping at `offset` on this thread, by panicking when
-    /// `panic` is set.
-    fn fail_map(offset: libc::off_t, panic: bool) {
-        FAIL_MAP.set(Some((offset, panic)));
+    /// Fail the next mapping at `offset` on this thread.
+    fn fail_map(offset: libc::off_t) {
+        FAIL_MAP.set(Some(offset));
     }
 
     /// Apply an injected mapping failure.
     pub(super) fn before_map(offset: libc::off_t) -> io::Result<()> {
-        match FAIL_MAP.get() {
-            Some((target, panic)) if target == offset => {
-                FAIL_MAP.set(None);
-                assert!(!panic, "injected panic before mapping");
-                Err(io::Error::from_raw_os_error(libc::ENOMEM))
-            }
-            _ => Ok(()),
+        if FAIL_MAP.get() != Some(offset) {
+            return Ok(());
         }
+        FAIL_MAP.set(None);
+        Err(io::Error::from_raw_os_error(libc::ENOMEM))
     }
 
     /// Count a created mapping.
@@ -1540,58 +1544,32 @@ pub mod tests {
         }
     }
 
-    /// Heap memory standing in for a ring's mappings, with the kernel's side
-    /// of its queues.
+    /// The kernel's side of a fake ring's memory.
     ///
     /// Every access goes through the pointers taken once at creation, so
     /// none invalidates the queues' pointers.
-    struct FakeRing {
+    struct FakeKernel {
         /// Shared rings.
         rings: NonNull<u8>,
         /// SQE slots.
         sqes: NonNull<SqueueEntry>,
-        /// Owner of the shared rings.
-        rings_alloc: *mut [u64],
-        /// Owner of the SQE slots.
-        sqes_alloc: *mut [[u64; 8]],
     }
 
-    impl FakeRing {
-        /// Allocate a fake ring and fill in the words a kernel writes at
-        /// setup.
-        fn new() -> Self {
-            let rings_alloc = Box::into_raw(vec![0u64; RINGS_LEN / 8].into_boxed_slice());
-            let sqes_alloc = Box::into_raw(vec![[0u64; 8]; SQ_ENTRIES as usize].into_boxed_slice());
-            let ring = Self {
-                rings: NonNull::new(rings_alloc.cast()).unwrap(),
-                sqes: NonNull::new(sqes_alloc.cast()).unwrap(),
-                rings_alloc,
-                sqes_alloc,
-            };
-            let params = fake_params();
-            ring.word(params.sq_off.ring_mask)
-                .store(SQ_ENTRIES - 1, Ordering::Relaxed);
-            ring.word(params.sq_off.ring_entries)
-                .store(SQ_ENTRIES, Ordering::Relaxed);
-            ring.word(params.cq_off.ring_mask)
-                .store(CQ_ENTRIES - 1, Ordering::Relaxed);
-            ring.word(params.cq_off.ring_entries)
-                .store(CQ_ENTRIES, Ordering::Relaxed);
-            ring
-        }
-
-        /// Build the queues over the fake ring.
-        fn queues(&self) -> (SubmissionQueueInner, CompletionQueueInner) {
-            // SAFETY: The fake ring's memory outlives the queues in every
-            // test, which declare it first.
-            unsafe { queues(&fake_params(), self.rings, RINGS_LEN, self.sqes) }.unwrap()
-        }
-
-        /// The word at `offset` of the shared rings.
+    impl FakeKernel {
+        /// The header word at `offset` of the shared rings.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the word is misaligned or outside the header, which ends
+        /// where the CQEs start.
         fn word(&self, offset: u32) -> &AtomicU32 {
-            // SAFETY: Every offset the tests pass is an aligned word within
-            // the shared rings.
-            unsafe { self.rings.add(offset as usize).cast::<AtomicU32>().as_ref() }
+            // SAFETY: The shared rings span `RINGS_LEN` bytes, more than the
+            // header, for as long as the fake kernel is borrowed.
+            let word = unsafe { Word::new(self.rings, CQES as usize, offset) }
+                .expect("fake ring header word");
+            // SAFETY: `Word::new` checked the word, and the memory outlives
+            // the returned reference.
+            unsafe { word.0.as_ref() }
         }
 
         /// Move the CQ's counters to `start`, as if that many CQEs had
@@ -1608,6 +1586,7 @@ pub mod tests {
         /// Fetch `count` SQEs from the first slot, as the kernel does on a
         /// rewinding ring, and return their `user_data`.
         fn fetch(&self, count: u32) -> Vec<u64> {
+            assert!(count <= SQ_ENTRIES, "fetched past the SQE slots");
             (0..count as usize)
                 .map(|slot| {
                     // SAFETY: The slot is within the SQE slots, and the queue
@@ -1655,10 +1634,67 @@ pub mod tests {
         }
     }
 
+    /// The queues over heap memory standing in for a ring's mappings, and the
+    /// kernel's side of that memory.
+    ///
+    /// The queues live in the value that frees the memory, whose drop forbids
+    /// moving them out, so they cannot outlive the memory.
+    struct FakeRing {
+        /// SQ writer state.
+        sq: SubmissionQueueInner,
+        /// CQ reader state.
+        cq: CompletionQueueInner,
+        /// The kernel's side of the memory.
+        kernel: FakeKernel,
+        /// Owner of the shared rings.
+        rings_alloc: *mut [u64],
+        /// Owner of the SQE slots.
+        sqes_alloc: *mut [[u64; 8]],
+    }
+
+    impl FakeRing {
+        /// Allocate a fake ring, fill in the words a kernel writes at setup,
+        /// and build the queues over it.
+        fn new() -> Self {
+            let rings_alloc = Box::into_raw(vec![0u64; RINGS_LEN / 8].into_boxed_slice());
+            let sqes_alloc = Box::into_raw(vec![[0u64; 8]; SQ_ENTRIES as usize].into_boxed_slice());
+            let kernel = FakeKernel {
+                rings: NonNull::new(rings_alloc.cast()).unwrap(),
+                sqes: NonNull::new(sqes_alloc.cast()).unwrap(),
+            };
+            let params = fake_params();
+            kernel
+                .word(params.sq_off.ring_mask)
+                .store(SQ_ENTRIES - 1, Ordering::Relaxed);
+            kernel
+                .word(params.sq_off.ring_entries)
+                .store(SQ_ENTRIES, Ordering::Relaxed);
+            kernel
+                .word(params.cq_off.ring_mask)
+                .store(CQ_ENTRIES - 1, Ordering::Relaxed);
+            kernel
+                .word(params.cq_off.ring_entries)
+                .store(CQ_ENTRIES, Ordering::Relaxed);
+
+            // SAFETY: The allocations span `RINGS_LEN` bytes and
+            // `SQ_ENTRIES` SQEs, and the returned value frees them only
+            // when it drops along with the queues.
+            let (sq, cq) =
+                unsafe { queues(&params, kernel.rings, RINGS_LEN, kernel.sqes) }.unwrap();
+            Self {
+                sq,
+                cq,
+                kernel,
+                rings_alloc,
+                sqes_alloc,
+            }
+        }
+    }
+
     impl Drop for FakeRing {
         fn drop(&mut self) {
             // SAFETY: Both allocations came from `Box::into_raw` and are freed
-            // once, after the queues over them are gone.
+            // once, and the queues over them go with this value.
             unsafe {
                 drop(Box::from_raw(self.rings_alloc));
                 drop(Box::from_raw(self.sqes_alloc));
@@ -1688,7 +1724,7 @@ pub mod tests {
     /// Submit like `IoUring::enter`, offering the kernel the staged SQEs, and
     /// with the fake kernel fetching `count` of them. Returns the number
     /// offered and the `user_data` fetched.
-    fn submit(sq: &mut SubmissionQueueInner, ring: &FakeRing, count: u32) -> (u32, Vec<u64>) {
+    fn submit(sq: &mut SubmissionQueueInner, ring: &FakeKernel, count: u32) -> (u32, Vec<u64>) {
         let to_submit = sq.staged;
         assert!(count <= to_submit, "fetched unstaged SQEs");
         let fetched = ring.fetch(count);
@@ -1704,37 +1740,37 @@ pub mod tests {
     #[commonware_macros::test_group("miri")]
     #[test]
     fn test_sq_offers_staged_entries_from_the_first_slot() {
-        let ring = FakeRing::new();
-        let (mut sq, _cq) = ring.queues();
+        let mut fake = FakeRing::new();
+        let (sq, ring) = (&mut fake.sq, &fake.kernel);
 
         // An empty queue offers nothing.
-        assert_eq!(submit(&mut sq, &ring, 0), (0, vec![]));
+        assert_eq!(submit(sq, ring, 0), (0, vec![]));
 
         // A full consumption empties the queue.
-        push(&mut sq, [1, 2]);
-        assert_eq!(writer(&mut sq).len(), 2);
-        assert_eq!(submit(&mut sq, &ring, 2), (2, vec![1, 2]));
-        assert!(writer(&mut sq).is_empty());
+        push(sq, [1, 2]);
+        assert_eq!(writer(sq).len(), 2);
+        assert_eq!(submit(sq, ring, 2), (2, vec![1, 2]));
+        assert!(writer(sq).is_empty());
 
         // A zero count keeps every SQE in place.
-        push(&mut sq, [3, 4, 5, 6]);
-        assert!(writer(&mut sq).is_full());
-        assert_eq!(submit(&mut sq, &ring, 0), (4, vec![]));
+        push(sq, [3, 4, 5, 6]);
+        assert!(writer(sq).is_full());
+        assert_eq!(submit(sq, ring, 0), (4, vec![]));
         assert_eq!(ring.fetch(4), [3, 4, 5, 6]);
 
         // A partial consumption moves the overlapping rest to the front.
-        assert_eq!(submit(&mut sq, &ring, 1), (4, vec![3]));
-        assert_eq!(writer(&mut sq).len(), 3);
+        assert_eq!(submit(sq, ring, 1), (4, vec![3]));
+        assert_eq!(writer(sq).len(), 3);
         assert_eq!(ring.fetch(3), [4, 5, 6]);
 
         // A push follows the moved SQEs, and the next enter offers them first.
-        push(&mut sq, [7]);
-        assert!(writer(&mut sq).is_full());
-        assert_eq!(submit(&mut sq, &ring, 3), (4, vec![4, 5, 6]));
+        push(sq, [7]);
+        assert!(writer(sq).is_full());
+        assert_eq!(submit(sq, ring, 3), (4, vec![4, 5, 6]));
         assert_eq!(ring.fetch(1), [7]);
-        push(&mut sq, [8]);
-        assert_eq!(submit(&mut sq, &ring, 2), (2, vec![7, 8]));
-        assert!(writer(&mut sq).is_empty());
+        push(sq, [8]);
+        assert_eq!(submit(sq, ring, 2), (2, vec![7, 8]));
+        assert!(writer(sq).is_empty());
         assert_eq!(ring.sq_cursors(), (0, 0));
     }
 
@@ -1744,9 +1780,8 @@ pub mod tests {
     #[test]
     #[should_panic(expected = "submission queue is full")]
     fn test_sq_push_rejects_a_full_queue() {
-        let ring = FakeRing::new();
-        let (mut sq, _cq) = ring.queues();
-        push(&mut sq, 0..=u64::from(SQ_ENTRIES));
+        let mut fake = FakeRing::new();
+        push(&mut fake.sq, 0..=u64::from(SQ_ENTRIES));
     }
 
     /// A kernel that reports consuming more SQEs than were submitted panics
@@ -1755,10 +1790,9 @@ pub mod tests {
     #[test]
     #[should_panic(expected = "kernel consumed 2 of 1 SQEs")]
     fn test_sq_rejects_overconsumption() {
-        let ring = FakeRing::new();
-        let (mut sq, _cq) = ring.queues();
-        push(&mut sq, [1]);
-        sq.consume(2);
+        let mut fake = FakeRing::new();
+        push(&mut fake.sq, [1]);
+        fake.sq.consume(2);
     }
 
     /// A view yields the CQEs posted before it was created and returns
@@ -1766,9 +1800,9 @@ pub mod tests {
     #[commonware_macros::test_group("miri")]
     #[test]
     fn test_cq_returns_the_consumed_prefix() {
-        let ring = FakeRing::new();
-        let (_sq, mut cq) = ring.queues();
-        ring.wind_cq(&mut cq, u32::MAX - 2);
+        let mut fake = FakeRing::new();
+        let (cq, ring) = (&mut fake.cq, &fake.kernel);
+        ring.wind_cq(cq, u32::MAX - 2);
 
         // A view that yields nothing returns nothing.
         for user_data in 1..=4 {
@@ -1803,60 +1837,122 @@ pub mod tests {
     #[commonware_macros::test_group("miri")]
     #[test]
     fn test_cq_reports_dropped_completions() {
-        let ring = FakeRing::new();
-        let (_sq, mut cq) = ring.queues();
+        let mut fake = FakeRing::new();
+        let (cq, ring) = (&mut fake.cq, &fake.kernel);
         ring.post(1, 0);
-        assert_eq!(cq.completion().overflow(), 0);
+        assert_eq!(cq.overflow(), 0);
         ring.word(fake_params().cq_off.overflow)
             .store(1, Ordering::Release);
-        let view = cq.completion();
-        assert_eq!(view.overflow(), 1);
-        assert_eq!(view.len(), 1);
+        assert_eq!(cq.overflow(), 1);
+        assert_eq!(cq.completion().len(), 1);
     }
 
     /// Ring memory whose layout does not fit its mapping is rejected.
     #[commonware_macros::test_group("miri")]
     #[test]
     fn test_queues_reject_invalid_layouts() {
-        let ring = FakeRing::new();
+        let fake = FakeRing::new();
+        let ring = &fake.kernel;
         let check = |params: Parameters| {
             // SAFETY: The fake ring's memory outlives the call, and no queue
             // is returned.
             let result = unsafe { queues(&params, ring.rings, RINGS_LEN, ring.sqes) };
             assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidData);
         };
+        // A word past the end of the mapping, and a misaligned word.
         let mut params = fake_params();
-        params.sq_off.flags = RINGS_LEN as u32 - 2;
+        params.sq_off.flags = RINGS_LEN as u32;
         check(params);
         let mut params = fake_params();
         params.cq_off.head = 66;
         check(params);
+
+        // CQEs past the end of the mapping, and misaligned CQEs.
         let mut params = fake_params();
         params.cq_off.cqes = CQES + 8;
         check(params);
         let mut params = fake_params();
         params.cq_off.cqes = CQES - 1;
         check(params);
+
+        // Misaligned SQEs.
+        let params = fake_params();
+        // SAFETY: The fake ring's memory outlives the call, and no queue is
+        // returned. The shifted pointer stays within the SQE slots.
+        let result = unsafe { queues(&params, ring.rings, RINGS_LEN, ring.sqes.byte_add(4)) };
+        assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidData);
+
+        // Ring sizes that disagree with the kernel's words: the entry count
+        // and the mask of each ring, and an entry count that is not a power
+        // of two even though both words agree with it.
+        let params = fake_params();
+        for (offset, value) in [
+            (params.sq_off.ring_entries, SQ_ENTRIES / 2),
+            (params.sq_off.ring_mask, SQ_ENTRIES / 2 - 1),
+            (params.cq_off.ring_entries, CQ_ENTRIES / 2),
+            (params.cq_off.ring_mask, CQ_ENTRIES / 2 - 1),
+        ] {
+            let word = ring.word(offset);
+            let correct = word.swap(value, Ordering::Relaxed);
+            check(fake_params());
+            word.store(correct, Ordering::Relaxed);
+        }
         let mut params = fake_params();
-        params.sq_entries = SQ_ENTRIES * 2;
+        params.sq_entries = 3;
+        ring.word(params.sq_off.ring_entries)
+            .store(3, Ordering::Relaxed);
+        ring.word(params.sq_off.ring_mask)
+            .store(2, Ordering::Relaxed);
         check(params);
     }
 
-    /// A failed or panicking mapping unmaps the mappings made before it.
+    /// A setup the kernel rejects returns its error.
+    #[test]
+    fn test_ring_setup_reports_the_kernels_error() {
+        let error = IoUring::new(0).err().expect("a zero-entry ring was set up");
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+    }
+
+    /// A mapping the kernel refuses fails instead of yielding the failure
+    /// address, and a dropped mapping is gone.
+    #[test]
+    fn test_mmap_reports_failure_and_unmaps_on_drop() {
+        let null = std::fs::File::open("/dev/null").unwrap().into();
+        assert!(Mmap::new(&null, 4096, 0).is_err());
+
+        // SAFETY: The name is a valid C string, and the call creates a new
+        // descriptor that nothing else owns.
+        let fd = unsafe { libc::memfd_create(c"mmap".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(fd >= 0, "{}", io::Error::last_os_error());
+        // SAFETY: `fd` is a new descriptor that nothing else owns.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: `fd` is an open memfd.
+        assert_eq!(unsafe { libc::ftruncate(fd.as_raw_fd(), 4096) }, 0);
+        let mapping = Mmap::new(&fd, 4096, 0).unwrap();
+        let address = mapping.ptr.as_ptr().cast::<libc::c_void>();
+        drop(mapping);
+
+        // SAFETY: `msync` only inspects the address range, which fails with
+        // ENOMEM once nothing is mapped there.
+        let result = unsafe { libc::msync(address, 4096, libc::MS_ASYNC) };
+        assert_eq!(result, -1);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOMEM)
+        );
+    }
+
+    /// A failed mapping unmaps the mappings made before it.
     #[test]
     fn test_failed_setup_unmaps_its_mappings() {
-        fail_map(IORING_OFF_SQ_RING, false);
+        fail_map(IORING_OFF_SQ_RING);
         let error = IoUring::new(8).err().unwrap();
         assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
         assert_eq!(LIVE_MAPPINGS.get(), 0);
 
-        fail_map(IORING_OFF_SQES, false);
+        fail_map(IORING_OFF_SQES);
         let error = IoUring::new(8).err().unwrap();
         assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
-        assert_eq!(LIVE_MAPPINGS.get(), 0);
-
-        fail_map(IORING_OFF_SQES, true);
-        assert!(catch_unwind(AssertUnwindSafe(|| IoUring::new(8))).is_err());
         assert_eq!(LIVE_MAPPINGS.get(), 0);
 
         let ring = IoUring::new(8).unwrap();
@@ -1884,7 +1980,8 @@ pub mod tests {
             assert_eq!(min_complete, 4);
             assert_eq!(flags.contains(REGISTERED_RING), registered);
             assert!(ring.submission().is_empty());
-            let completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
+            let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
+            completed.sort_unstable();
             assert_eq!(completed, [0, 1, 2, 3]);
             assert!(ring.completion().is_empty());
         }
@@ -1917,10 +2014,11 @@ pub mod tests {
             let consumed = rejected + 1;
             assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), consumed);
             assert_eq!(ring.submission().len(), 4 - consumed as usize);
-            let completed: Vec<_> = ring
+            let mut completed: Vec<_> = ring
                 .completion()
                 .map(|cqe| (cqe.user_data(), cqe.result()))
                 .collect();
+            completed.sort_unstable();
             let mut expected: Vec<_> = (1..u64::from(consumed)).map(|nop| (nop, 0)).collect();
             expected.push((u64::from(consumed), -libc::EINVAL));
             assert_eq!(completed, expected);
@@ -1931,7 +2029,8 @@ pub mod tests {
             let submitted = ring.enter(0, EnterFlags::empty(), None);
             assert_eq!(submitted.unwrap(), 5 - consumed);
             assert!(ring.submission().is_empty());
-            let completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
+            let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
+            completed.sort_unstable();
             assert_eq!(completed, (u64::from(consumed) + 1..=5).collect::<Vec<_>>());
         }
     }
@@ -2006,8 +2105,30 @@ pub mod tests {
         // The raw descriptor submits both.
         ring.unregister_ring_fd().unwrap();
         assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), 2);
-        let completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
+        let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
+        completed.sort_unstable();
         assert_eq!(completed, [1, 2]);
+    }
+
+    /// A failed unregistration keeps the slot, and dropping the ring then
+    /// releases it, so the next ring on the thread takes the same slot.
+    #[test]
+    fn test_ring_drop_releases_a_slot_whose_unregistration_failed() {
+        let mut ring = IoUring::new(1).unwrap();
+        let slot = ring.register_ring_fd().unwrap();
+
+        // The kernel rejects an unregistration through a descriptor that is
+        // not a ring.
+        let null = std::fs::File::open("/dev/null").unwrap().into();
+        let fd = mem::replace(&mut ring.fd, null);
+        let failed = ring.unregister_ring_fd();
+        ring.fd = fd;
+        assert!(failed.is_err());
+        assert_eq!(ring.slot(), Some(slot));
+
+        drop(ring);
+        let mut next = IoUring::new(1).unwrap();
+        assert_eq!(next.register_ring_fd().unwrap(), slot);
     }
 
     /// A timed wait on an empty ring times out after its timeout.

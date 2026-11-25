@@ -353,14 +353,11 @@ impl Driver {
             && (!defer_kernel_service || !deferred.is_empty() || self.has_pending_submissions());
 
         // New CQEs can complete requests or end the ring futex wait, which the
-        // next blocking park then queues again. A task-work enter returns its
-        // already checked CQ view for this reap.
-        let completion = if service_kernel {
-            Self::enter(&mut self.ring, Enter::TaskWork)?
-        } else {
-            self.ring.completion()
-        };
-        self.state.reap(completion, deferred);
+        // next blocking park then queues again.
+        if service_kernel {
+            Self::enter(&mut self.ring, Enter::TaskWork)?;
+        }
+        self.state.reap(self.ring.completion(), deferred);
 
         #[cfg(test)]
         tests::after_service(&self.ring, &self.state, deferred)?;
@@ -431,17 +428,16 @@ impl Driver {
 
     /// Submit queued SQEs, then do what `mode` asks of the kernel.
     ///
-    /// Returns the CQ view it checked for dropped completions, which the
-    /// caller reaps or discards. A timeout or a transient error (`EINTR`,
-    /// `EAGAIN`, `EBUSY`) returns `Ok` because the next service turn retries,
-    /// so `Ok` does not mean the kernel consumed the SQ or posted a
-    /// completion. Other errors are permanent, and once the kernel has
-    /// dropped a completion every enter fails with `EBADR`.
+    /// A timeout or a transient error (`EINTR`, `EAGAIN`, `EBUSY`) returns
+    /// `Ok` because the next service turn retries, so `Ok` does not mean the
+    /// kernel consumed the SQ or posted a completion. Other errors are
+    /// permanent, and once the kernel has dropped a completion every enter
+    /// fails with `EBADR`.
     ///
     /// A registered ring enters through its slot in the calling thread's
     /// table. A permanent error on that path is returned as is, without a
     /// retry through the raw descriptor.
-    fn enter(ring: &mut IoUring, mut mode: Enter) -> io::Result<CompletionQueue<'_>> {
+    fn enter(ring: &mut IoUring, mut mode: Enter) -> io::Result<()> {
         // A stalled flush fails as a kernel that rejects it before consuming
         // any SQE does.
         #[cfg(test)]
@@ -529,14 +525,13 @@ impl Driver {
         // for it forever.
         #[cfg(test)]
         let injected = tests::drop_completion(ring);
-        let completion = ring.completion();
-        let dropped = completion.overflow() != 0;
+        let dropped = ring.overflow() != 0;
         #[cfg(test)]
         let dropped = dropped || injected;
         if dropped {
             return Err(io::Error::from_raw_os_error(libc::EBADR));
         }
-        Ok(completion)
+        Ok(())
     }
 
     /// Synchronously cancel a live ring futex wait.
@@ -917,7 +912,7 @@ pub mod tests {
                 ResizeRequest, SyncRequest, WriteAtRequest, WriteAtState,
             },
             sys::tests::{
-                EXT_ARG, REGISTERED_RING, cq_entries, fail_next_enter, last_enter, release_slot,
+                EXT_ARG, REGISTERED_RING, cq_entries, fail_next_enter, last_enter, set_overflow,
             },
             wheel::BUDGET,
         },
@@ -960,6 +955,8 @@ pub mod tests {
         DropCompletion,
         /// The kernel refuses to cancel the ring futex wait.
         FailCancel,
+        /// A signal interrupts the cancel of the ring futex wait.
+        InterruptCancel,
         /// The kernel refuses to release the ring's registered slot.
         FailUnregister,
     }
@@ -1033,6 +1030,9 @@ pub mod tests {
     /// cancel still runs first.
     pub fn cancel_failure(ring: &IoUring) -> Option<io::Error> {
         teardown_step("cancel");
+        if take_fault(ring, Fault::InterruptCancel) {
+            return Some(io::Error::from_raw_os_error(libc::EINTR));
+        }
         take_fault(ring, Fault::FailCancel).then(|| io::Error::from_raw_os_error(libc::EIO))
     }
 
@@ -3493,10 +3493,14 @@ pub mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// Enters on a registered and then a raw ring descriptor run task work,
+    /// time out a timed wait without an error, and return from a wait with
+    /// its completion. Errors are covered by `test_enter_classifies_errors`
+    /// and `test_ring_keeps_staged_entries_when_enter_fails`.
     #[test]
-    fn test_enter_distinguishes_timeout_from_failure() {
+    fn test_enter_waits_on_raw_and_registered_rings() {
         let mut harness = Harness::new(1);
-        let slot = harness.driver.ring.slot().expect("registered ring");
+        assert!(harness.driver.ring.slot().is_some());
 
         for registered in [true, false] {
             if !registered {
@@ -3548,8 +3552,8 @@ pub mod tests {
                     deadline,
                     iowait: false,
                 };
-                let completion = Driver::enter(&mut harness.driver.ring, wait).unwrap();
-                assert_eq!(completion.count(), 1);
+                Driver::enter(&mut harness.driver.ring, wait).unwrap();
+                assert_eq!(harness.driver.ring.completion().count(), 1);
                 let (min_complete, flags) = last_enter().unwrap();
                 assert_eq!(min_complete, 1);
                 assert_eq!(flags.contains(REGISTERED_RING), registered);
@@ -3557,47 +3561,11 @@ pub mod tests {
                 assert!(harness.driver.ring.submission().is_empty());
             }
         }
-
-        // A slot released behind the ring fails every enter path with EBADF,
-        // a permanent error, without a retry through the raw descriptor. The
-        // ring's descriptor stays open, so no other test can reuse its number.
-        harness.driver.ring.register_ring_fd().unwrap();
-        assert_eq!(harness.driver.ring.slot(), Some(slot));
-        release_slot(&harness.driver.ring);
-        for enter in [
-            Enter::Flush,
-            Enter::TaskWork,
-            Enter::Wait {
-                deadline: None,
-                iowait: false,
-            },
-            Enter::Wait {
-                deadline: Some(Instant::now() + Duration::from_secs(1)),
-                iowait: false,
-            },
-            Enter::Wait {
-                deadline: Some(Instant::now()),
-                iowait: false,
-            },
-        ] {
-            let error = Driver::enter(&mut harness.driver.ring, enter)
-                .err()
-                .expect("enter through a released slot succeeded");
-            assert_eq!(error.raw_os_error(), Some(libc::EBADF));
-            let (_, flags) = last_enter().unwrap();
-            assert!(flags.contains(REGISTERED_RING));
-        }
-
-        // The raw descriptor of the same ring keeps working.
-        harness.driver.ring.unregister_ring_fd().unwrap();
-        Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
-        let (_, flags) = last_enter().unwrap();
-        assert!(!flags.contains(REGISTERED_RING));
     }
 
-    /// Transient errors, and the timeout of a timed wait, return the CQ view
-    /// for the caller to reap. Every other error fails the enter, including a
-    /// timeout of an enter that set none.
+    /// Transient errors, and the timeout of a timed wait, return `Ok` so the
+    /// caller reaps. Every other error fails the enter, including a timeout of
+    /// an enter that set none.
     #[test]
     fn test_enter_classifies_errors() {
         let mut harness = Harness::new(1);
@@ -3628,7 +3596,7 @@ pub mod tests {
                 ),
             ] {
                 fail_next_enter(errno);
-                let result = Driver::enter(&mut harness.driver.ring, enter).map(drop);
+                let result = Driver::enter(&mut harness.driver.ring, enter);
                 let (_, flags) = last_enter().unwrap();
                 assert_eq!(flags.contains(EXT_ARG), timed);
                 let retried = matches!(errno, libc::EINTR | libc::EAGAIN | libc::EBUSY)
@@ -3658,7 +3626,7 @@ pub mod tests {
             let nop = SqueueEntry::nop().with_user_data(CANCEL_USER_DATA);
             // SAFETY: A NOP references no memory.
             unsafe { harness.driver.ring.submission().push(&nop) };
-            drop(Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap());
+            Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap();
             let (_, flags) = last_enter().unwrap();
             assert!(!flags.contains(EnterFlags::GETEVENTS));
         }
@@ -3666,12 +3634,37 @@ pub mod tests {
         assert_eq!(harness.driver.ring.completion().count(), cq_entries);
 
         // With nothing to submit, the flush still enters for the overflow.
-        let completion = Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap();
-        assert_eq!(completion.count(), 1);
+        Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap();
+        assert_eq!(harness.driver.ring.completion().count(), 1);
         let (_, flags) = last_enter().unwrap();
         assert!(flags.contains(EnterFlags::GETEVENTS));
         assert!(!harness.driver.ring.submission().cq_overflow());
 
+        harness.drain();
+    }
+
+    /// Once the kernel counts a dropped completion in the ring's mapped
+    /// overflow counter, every enter fails with `EBADR`.
+    #[test]
+    fn test_mapped_dropped_completion_count_fails_every_enter() {
+        let mut harness = Harness::new(1);
+        Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
+
+        set_overflow(&mut harness.driver.ring, 1);
+        for enter in [
+            Enter::Flush,
+            Enter::TaskWork,
+            Enter::Wait {
+                deadline: Some(Instant::now() + Duration::from_secs(10)),
+                iowait: false,
+            },
+            Enter::TaskWork,
+        ] {
+            let error = Driver::enter(&mut harness.driver.ring, enter)
+                .expect_err("an enter ignored the dropped completion");
+            assert_eq!(error.raw_os_error(), Some(libc::EBADR));
+        }
+        set_overflow(&mut harness.driver.ring, 0);
         harness.drain();
     }
 
@@ -4159,6 +4152,31 @@ pub mod tests {
             assert_eq!(handles(&parker), handles_without_driver);
             drop(ring);
         }
+    }
+
+    /// An interrupted cancel at drop retries instead of keeping the word and
+    /// warning.
+    #[test]
+    fn test_interrupted_cancel_is_retried() {
+        // A park with a short deadline leaves its ring wait queued.
+        let parker = Parker::new();
+        let handles_without_driver = handles(&parker);
+        let mut driver =
+            Driver::new(&RingConfig::default(), parker.unparker(), Instant::now()).unwrap();
+        assert!(
+            driver
+                .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
+                .unwrap()
+        );
+
+        let fault = inject(&driver, Fault::InterruptCancel);
+        teardown_steps();
+        let subscriber = tracing_subscriber::registry().with(PanicOnEvent);
+        tracing::subscriber::with_default(subscriber, || drop(driver));
+        assert!(FAULT.get().is_none(), "cancel did not run");
+        assert_eq!(teardown_steps(), ["cancel", "cancel", "unregister"]);
+        assert_eq!(handles(&parker), handles_without_driver);
+        drop(fault);
     }
 
     /// A drop whose cancel fails still releases the ring's registered slot
