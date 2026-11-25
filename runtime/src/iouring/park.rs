@@ -968,7 +968,6 @@ pub mod tests {
             IoUring::builder()
                 .setup_single_issuer()
                 .setup_defer_taskrun()
-                .setup_no_sqarray()
                 .build(8)
                 .unwrap()
         }

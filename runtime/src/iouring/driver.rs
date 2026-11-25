@@ -10,9 +10,8 @@
 //! # Submission and Cancellation
 //!
 //! Staging keeps every SQE-referenced resource alive until the operation CQE,
-//! including when submission returns a transient error. A successful
-//! cancellation posts no CQE of its own (CQE_SKIP_SUCCESS), and a failed one
-//! only reports the attempt. Neither can release those resources.
+//! including when submission returns a transient error. Cancellation CQEs only
+//! acknowledge the cancellation attempt. They cannot release those resources.
 //!
 //! Dropping a local or forwarded observer cancels reads and network operations.
 //! Queued requests can finish immediately, while in-flight requests need a cancellation
@@ -32,19 +31,10 @@
 //! deadlines live in a driver-local [`Deadlines`], unlinked as soon as their
 //! request completes or is cancelled.
 //!
-//! The ring uses SINGLE_ISSUER and DEFER_TASKRUN.
-//! SQEs are staged in ring order without the SQ index array (NO_SQARRAY).
-//! Unfinished requests need a GETEVENTS enter even when tasks keep the worker
-//! busy. An idle turn may defer that enter to [`Driver::park`]. Control SQEs carry
-//! no request resources and may remain until later I/O service or ring teardown.
-//! SQPOLL and IOPOLL rings are not supported.
-//!
-//! The ring descriptor is registered with its owner thread when possible, so
-//! enters name the ring by a slot in that thread's table and skip the
-//! per-enter descriptor table lookup and file reference. Registration fails
-//! when the thread already holds sixteen registered rings or a seccomp filter
-//! refuses it, and the driver then enters through the raw descriptor it still
-//! owns.
+//! The ring uses SINGLE_ISSUER and DEFER_TASKRUN. Unfinished requests need a
+//! GETEVENTS enter even when tasks keep the worker busy. An idle turn may defer
+//! that enter to [`Driver::park`]. Control SQEs carry no request resources and
+//! may remain until later I/O service or ring teardown.
 //!
 //! Parking arms the worker's [`Parker`] and blocks only while its word
 //! still carries the sequence the worker observed before checking its sources.
@@ -53,10 +43,13 @@
 //! the kernel queues the wait fails its compare. A wait stays live across parks
 //! until its CQE is reaped. See [`super::idle`] for how pool worker
 //! selection fits with this wait.
-//! Blocking waits count as iowait only while storage operations are in flight.
-//! Network-only waits pass NO_IOWAIT, leaving storage waits with the kernel's
-//! iowait reporting and frequency boost on wake. The ring futex wait is a
-//! control SQE and never counts as storage.
+//!
+//! The kernel counts a blocking enter as iowait while the thread has requests
+//! in flight, and a live ring futex wait always is one. Blocking waits pass
+//! NO_IOWAIT unless a staged storage SQE still awaits its operation CQE, so
+//! only storage waits keep the kernel's iowait reporting and stay eligible for
+//! a governor's iowait boost on wake. The ring futex wait is a control SQE and
+//! never counts as storage.
 //!
 //! # Cleanup
 //!
@@ -66,9 +59,6 @@
 //! retire, keeping the driver in place throughout the drain. Dropping the
 //! driver on its owner thread synchronously cancels a live ring futex wait, so
 //! no stale wait stays queued at the word's address once the word can be freed.
-//! The drop then tries to release the ring's registered slot, whose reference
-//! otherwise keeps the ring open until the owner thread exits. Both steps run
-//! before either failure is reported.
 
 use super::{
     deadlines::Deadlines,
@@ -83,20 +73,14 @@ use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
 use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
 use io_uring::{
     EnterFlags, IoUring,
-    cqueue::CompletionQueue,
     opcode::AsyncCancel,
-    squeue::{Flags as SqeFlags, SubmissionQueue},
+    squeue::SubmissionQueue,
     types::{CancelBuilder, SubmitArgs, Timespec},
 };
 use std::{
     collections::VecDeque,
-    ffi::{c_int, c_long},
-    io,
-    marker::PhantomData,
-    mem,
-    os::fd::AsRawFd as _,
+    io, mem,
     pin::Pin,
-    ptr,
     sync::Arc,
     task::{Context, Poll, Waker},
     time::{Duration, Instant},
@@ -109,90 +93,11 @@ use tracing::warn;
 /// [`Waiters::insert`].
 const CANCEL_USER_DATA: UserData = u32::MAX as UserData;
 
-/// io_uring_register opcode that adds ring descriptors to the calling thread's
-/// table.
-const IORING_REGISTER_RING_FDS: c_long = 20;
-
-/// io_uring_register opcode that removes ring descriptors from the calling
-/// thread's table.
-const IORING_UNREGISTER_RING_FDS: c_long = 21;
-
-/// Kernel layout of one ring descriptor registration update.
-#[repr(C)]
-struct RingFdUpdate {
-    /// Slot in the thread's table, or all ones to let the kernel choose.
-    offset: u32,
-    /// Must be zero.
-    resv: u32,
-    /// Descriptor to register, zero when unregistering.
-    data: u64,
-}
-
-const _: () = assert!(mem::size_of::<RingFdUpdate>() == 16);
-
-/// Register `raw` with the calling thread, returning its slot.
-///
-/// Returns an error when the thread's table is full or the kernel refuses.
-fn register_ring_fd(raw: c_int) -> io::Result<u32> {
-    let mut update = RingFdUpdate {
-        offset: u32::MAX,
-        resv: 0,
-        data: raw as u64,
-    };
-    // SAFETY: The kernel reads and writes back one update through this
-    // pointer during the call.
-    let registered = unsafe {
-        libc::syscall(
-            libc::SYS_io_uring_register,
-            raw as c_long,
-            IORING_REGISTER_RING_FDS,
-            &raw mut update,
-            1 as c_long,
-        )
-    };
-    match registered {
-        1 => Ok(update.offset),
-        result if result < 0 => Err(io::Error::last_os_error()),
-        _ => Err(io::Error::other(
-            "ring descriptor registration was not applied",
-        )),
-    }
-}
-
-/// Release `slot` of the calling thread's table through the raw descriptor
-/// `raw`.
-fn unregister_ring_fd(raw: c_int, slot: u32) -> io::Result<()> {
-    let update = RingFdUpdate {
-        offset: slot,
-        resv: 0,
-        data: 0,
-    };
-    // SAFETY: The kernel reads one update through this pointer during the call.
-    let unregistered = unsafe {
-        libc::syscall(
-            libc::SYS_io_uring_register,
-            raw as c_long,
-            IORING_UNREGISTER_RING_FDS,
-            &raw const update,
-            1 as c_long,
-        )
-    };
-    match unregistered {
-        1 => Ok(()),
-        result if result < 0 => Err(io::Error::last_os_error()),
-        _ => Err(io::Error::other("ring descriptor slot was not registered")),
-    }
-}
-
 /// Ring and request state accessed exclusively by the owning worker.
 ///
-/// The ring's registered slot belongs to the thread that creates the driver,
-/// so the driver is neither `Send` nor `Sync`. Drop it on that thread, the
-/// only one that can cancel its ring futex wait and release the slot.
+/// Drop it on the owner thread, the only thread that can cancel its ring futex
+/// wait.
 pub struct Driver {
-    /// The slot in the owner thread's table that [`Driver::enter`] names the
-    /// ring by, or `None` to use the raw descriptor.
-    ring_slot: Option<u32>,
     /// The worker's ring. Closing it only queues its teardown in the kernel, so
     /// cleanup retires every operation that can access request memory before
     /// the driver drops, and the drop cancels a live ring wait before any
@@ -200,8 +105,6 @@ pub struct Driver {
     ring: IoUring,
     /// Kept separately to allow batching SQ access while updating request state.
     state: State,
-    /// Keeps the driver, and so its registered slot, on the owner thread.
-    _owner: PhantomData<*const ()>,
 }
 
 /// Request state borrowed independently of the ring's SQ and CQ mappings.
@@ -264,12 +167,10 @@ impl Driver {
         let ring = IoUring::builder()
             .setup_single_issuer()
             .setup_defer_taskrun()
-            .setup_no_sqarray()
             .build(cfg.size)?;
         let size = cfg.size as usize;
 
-        let mut driver = Self {
-            ring_slot: None,
+        Ok(Self {
             ring,
             state: State {
                 waiters: Waiters::new(size),
@@ -284,14 +185,7 @@ impl Driver {
                 unparker,
                 ring_wait_needed: true,
             },
-            _owner: PhantomData,
-        };
-
-        // Register last, once the complete driver owns the registration, so
-        // nothing can unwind between them. A full table or a refusing seccomp
-        // filter leaves enters on the raw descriptor.
-        driver.ring_slot = register_ring_fd(driver.ring.as_raw_fd()).ok();
-        Ok(driver)
+        })
     }
 
     /// Accept an owned request without staging kernel work.
@@ -420,7 +314,7 @@ impl Driver {
     ) -> io::Result<bool> {
         // Finish posted work before expiring requests, then install new
         // deadlines.
-        self.state.reap(self.ring.completion(), deferred);
+        self.state.reap(&mut self.ring, deferred);
         self.state.advance_timeouts(now, deferred);
         self.state.register_deadlines(now, deferred);
         self.state.poll_acquisitions(deferred);
@@ -436,7 +330,7 @@ impl Driver {
             .fill_submission_queue(&mut self.ring, latest_due, deferred)
         {
             let before = self.ring.submission().len();
-            Self::enter(&mut self.ring, self.ring_slot, Enter::Flush)?;
+            Self::enter(&mut self.ring, Enter::Flush)?;
             if self.ring.submission().len() >= before {
                 // A transient enter may leave the SQ full. Preserve queued
                 // identities and give the kernel a completion-service point
@@ -450,15 +344,13 @@ impl Driver {
         let service_kernel = !self.is_empty()
             && (!defer_kernel_service || !deferred.is_empty() || self.has_pending_submissions());
 
+        if service_kernel {
+            Self::enter(&mut self.ring, Enter::TaskWork)?;
+        }
+
         // New CQEs can complete requests or end the ring futex wait, which the
-        // next blocking park then queues again. A task-work enter returns its
-        // already checked CQ view for this reap.
-        let completion = if service_kernel {
-            Self::enter(&mut self.ring, self.ring_slot, Enter::TaskWork)?
-        } else {
-            self.ring.completion()
-        };
-        self.state.reap(completion, deferred);
+        // next blocking park then queues again.
+        self.state.reap(&mut self.ring, deferred);
 
         #[cfg(test)]
         tests::after_service(&self.ring, &self.state, deferred)?;
@@ -494,7 +386,7 @@ impl Driver {
         // wait. A transient flush can leave the SQ full, in which case service
         // must run before trying again.
         if self.state.ring_wait_needed && self.ring.submission().is_full() {
-            Self::enter(&mut self.ring, self.ring_slot, Enter::Flush)?;
+            Self::enter(&mut self.ring, Enter::Flush)?;
             if self.ring.submission().is_full() {
                 return Ok(false);
             }
@@ -521,12 +413,9 @@ impl Driver {
             self.state.ring_wait_needed = false;
         }
 
+        // The ring futex wait is a control SQE and never counts as storage.
         let iowait = self.state.waiters.storage_in_flight() != 0;
-        Self::enter(
-            &mut self.ring,
-            self.ring_slot,
-            Enter::Wait { deadline, iowait },
-        )?;
+        Self::enter(&mut self.ring, Enter::Wait { deadline, iowait })?;
         Ok(true)
     }
 
@@ -537,18 +426,10 @@ impl Driver {
     /// turn retries, so `Ok` does not mean the kernel consumed the SQ or posted
     /// a completion. Other errors are permanent, and once the kernel has
     /// dropped a completion every enter fails with `EBADR`.
-    ///
-    /// A `slot` names the ring by its registered slot in the calling thread's
-    /// table. A permanent error on either path is returned as is, without a
-    /// retry through the other.
-    fn enter(
-        ring: &mut IoUring,
-        slot: Option<u32>,
-        mut mode: Enter,
-    ) -> io::Result<CompletionQueue<'_>> {
+    fn enter(ring: &mut IoUring, mut mode: Enter) -> io::Result<()> {
         #[cfg(test)]
         if matches!(mode, Enter::Flush) && tests::stall_flush(ring) {
-            return Ok(ring.completion());
+            return Ok(());
         }
 
         // Read the clock once, right before the syscall. A wait for one
@@ -567,93 +448,77 @@ impl Driver {
             }
         }
 
-        // Request exactly the published SQEs. The kernel skips GETEVENTS if
-        // it submits fewer SQEs than requested. Only a flush reads the
-        // overflow flag, since every other mode passes GETEVENTS anyway.
-        let (to_submit, overflowed) = {
-            let submission = ring.submission();
-            (
-                u32::try_from(submission.len()).expect("SQ length fits u32"),
-                matches!(mode, Enter::Flush) && submission.cq_overflow(),
-            )
-        };
-        let mut flags = EnterFlags::empty();
-        let mut min_complete = 0u32;
-        let timespec;
-        let args;
-        let mut arg: *const SubmitArgs<'_, '_> = ptr::null();
-        match mode {
-            Enter::Flush => {
-                if overflowed {
-                    flags |= EnterFlags::GETEVENTS;
+        let result = match mode {
+            // The crate adds GETEVENTS when the CQ has overflowed, so the kernel
+            // also moves its overflow backlog into the CQ.
+            Enter::Flush => ring.submit(),
+            // GETEVENTS with no minimum completion count runs a batch of
+            // deferred task work and returns, as liburing's
+            // `io_uring_submit_and_get_events` does. Newer kernels bound the
+            // batch and leave the rest for a later enter.
+            Enter::TaskWork => {
+                let to_submit =
+                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+                #[cfg(test)]
+                tests::record_enter(0, EnterFlags::GETEVENTS);
+                // SAFETY: `to_submit` counts only entries already published to
+                // the SQ, whose resources stay alive until their CQEs, and no
+                // argument pointer is passed.
+                unsafe {
+                    ring.submitter().enter::<libc::sigset_t>(
+                        to_submit,
+                        0,
+                        EnterFlags::GETEVENTS.bits(),
+                        None,
+                    )
                 }
             }
-            Enter::TaskWork => flags |= EnterFlags::GETEVENTS,
-            Enter::Wait {
-                deadline: None,
-                iowait,
-            } => {
-                flags |= EnterFlags::GETEVENTS;
-                min_complete = 1;
+            // The crate's wait helpers cannot pass NO_IOWAIT, so a wait builds
+            // its enter like a task-work enter that waits for one completion.
+            Enter::Wait { deadline, iowait } => {
+                let to_submit =
+                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+                let mut flags = EnterFlags::GETEVENTS;
                 if !iowait {
                     flags |= EnterFlags::NO_IOWAIT;
                 }
-            }
-            Enter::Wait {
-                deadline: Some(_),
-                iowait,
-            } => {
-                flags |= EnterFlags::GETEVENTS | EnterFlags::EXT_ARG;
-                min_complete = 1;
-                timespec = Timespec::new()
+
+                // EXT_ARG bounds the wait without reserving an SQE for a timeout.
+                let ts = Timespec::new()
                     .sec(timeout.as_secs())
                     .nsec(timeout.subsec_nanos());
-                // No signal mask. EXT_ARG bounds the wait without a timeout SQE.
-                args = SubmitArgs::new().timespec(&timespec);
-                arg = &raw const args;
-                if !iowait {
-                    flags |= EnterFlags::NO_IOWAIT;
+                let args = SubmitArgs::new().timespec(&ts);
+                let args = deadline.is_some().then_some(&args);
+                if args.is_some() {
+                    flags |= EnterFlags::EXT_ARG;
+                }
+                #[cfg(test)]
+                tests::record_enter(1, flags);
+
+                // SAFETY: `to_submit` counts only entries already published to
+                // the SQ, whose resources stay alive until their CQEs. `args`,
+                // passed exactly when EXT_ARG is set, outlives the call and wraps
+                // the kernel's `io_uring_getevents_arg`.
+                let result = unsafe { ring.submitter().enter(to_submit, 1, flags.bits(), args) };
+                match result {
+                    // This timeout bounds the enter. Request expiry belongs to
+                    // the wheel.
+                    Err(err) if args.is_some() && err.raw_os_error() == Some(libc::ETIME) => Ok(0),
+                    result => result,
                 }
             }
-        }
-
-        if slot.is_some() {
-            flags |= EnterFlags::REGISTERED_RING;
-        }
-        let fd = slot.map_or_else(|| ring.as_raw_fd() as c_long, |slot| slot as c_long);
-
-        #[cfg(test)]
-        tests::record_enter(min_complete, flags);
-
-        // SAFETY: `fd` names this ring, by its slot in this thread's table when
-        // REGISTERED_RING is set. `to_submit` counts published SQEs whose
-        // resources live until their CQEs. `arg` is null or points to `args` of
-        // the passed size, whose timespec points to `timespec`. Both outlive
-        // the syscall.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_io_uring_enter,
-                fd,
-                to_submit as c_long,
-                min_complete as c_long,
-                flags.bits() as c_long,
-                arg,
-                if arg.is_null() {
-                    0
-                } else {
-                    mem::size_of::<SubmitArgs<'static, 'static>>()
-                },
-            )
         };
-        if result < 0 {
-            let err = io::Error::last_os_error();
-            match err.raw_os_error() {
-                // Reap before retrying so the kernel can make progress.
-                Some(libc::EINTR | libc::EAGAIN | libc::EBUSY) => {}
-                // Only a positive timed wait treats timeout as success.
-                Some(libc::ETIME) if !arg.is_null() => {}
-                _ => return Err(err),
-            }
+
+        // A transient error falls through and returns `Ok`, so the caller
+        // reaps before retrying. An immediate retry here could spin while the
+        // kernel needs CQ space to make further progress.
+        if let Err(err) = result
+            && !matches!(
+                err.raw_os_error(),
+                Some(libc::EINTR | libc::EAGAIN | libc::EBUSY)
+            )
+        {
+            return Err(err);
         }
 
         // The kernel reports a dropped completion only once, and only from an
@@ -665,23 +530,18 @@ impl Driver {
         // enter. Every later enter fails too, since the driver cannot tell
         // which request lost its completion and a drain would otherwise wait
         // for it forever.
+        let dropped = ring.completion().overflow() != 0;
         #[cfg(test)]
-        let injected = tests::drop_completion(ring);
-        let completion = ring.completion();
-        let dropped = completion.overflow() != 0;
-        #[cfg(test)]
-        let dropped = dropped || injected;
+        let dropped = dropped || tests::drop_completion(ring);
         if dropped {
             return Err(io::Error::from_raw_os_error(libc::EBADR));
         }
-        Ok(completion)
+        Ok(())
     }
+}
 
-    /// Synchronously cancel a live ring futex wait.
-    ///
-    /// A failure keeps the word allocated before it returns, so reporting the
-    /// failure cannot free the word under the wait left queued.
-    fn cancel_ring_wait(&mut self) -> io::Result<()> {
+impl Drop for Driver {
+    fn drop(&mut self) {
         // A queued ring wait never reads or writes the word again, since wakes
         // and cancellations find it through its futex key (the address space
         // and the word's address) and kernel-owned nodes. Freeing the word
@@ -695,63 +555,29 @@ impl Driver {
         //
         // No wait is live once its completion was reaped.
         if self.state.ring_wait_needed {
-            return Ok(());
+            return;
         }
 
         loop {
             let cancel = CancelBuilder::user_data(RING_WAIT_USER_DATA);
-            let result = self.ring.submitter().register_sync_cancel(None, cancel);
-            #[cfg(test)]
-            let result = tests::cancel_failure(&self.ring).map_or(result, Err);
-            match result {
-                Ok(()) => return Ok(()),
+            match self.ring.submitter().register_sync_cancel(None, cancel) {
+                Ok(()) => return,
                 Err(error) => match error.raw_os_error() {
                     // The wait already completed, or its SQE was never
                     // submitted. Without SQPOLL, an unsubmitted SQE stays
                     // inert through ring destruction.
-                    Some(libc::ENOENT) => return Ok(()),
+                    Some(libc::ENOENT) => return,
                     Some(libc::EINTR) => continue,
                     _ => {
                         // The wait may still be queued at the word's address,
-                        // so keep the word allocated.
+                        // so keep the word allocated. Keep it before the
+                        // warning, whose subscriber can panic.
                         mem::forget(self.state.unparker.clone());
-                        return Err(error);
+                        warn!(%error, "failed to cancel the ring futex wait");
+                        return;
                     }
                 },
             }
-        }
-    }
-
-    /// Release the ring's registered slot, returning the slot and the error
-    /// if that fails.
-    ///
-    /// The slot holds a reference that keeps the ring open, and only the owner
-    /// thread can release it. A failure leaves the slot until that thread
-    /// exits, when the kernel releases it.
-    fn release_ring_slot(&mut self) -> Result<(), (u32, io::Error)> {
-        let Some(slot) = self.ring_slot.take() else {
-            return Ok(());
-        };
-        let result = unregister_ring_fd(self.ring.as_raw_fd(), slot);
-        #[cfg(test)]
-        let result = tests::unregister_failure(&self.ring).map_or(result, Err);
-        result.map_err(|error| (slot, error))
-    }
-}
-
-impl Drop for Driver {
-    /// Cancel a live ring wait, then release the ring's registered slot.
-    ///
-    /// Both run before either failure is reported, since a tracing subscriber
-    /// can panic on the warning and skip whatever follows it.
-    fn drop(&mut self) {
-        let cancelled = self.cancel_ring_wait();
-        let released = self.release_ring_slot();
-        if let Err(error) = cancelled {
-            warn!(%error, "failed to cancel the ring futex wait");
-        }
-        if let Err((slot, error)) = released {
-            warn!(%error, slot, "failed to unregister the io_uring ring descriptor");
         }
     }
 }
@@ -954,11 +780,8 @@ impl State {
                 continue;
             }
 
-            // Only the target's CQE can retire it, so a successful
-            // cancellation posts no CQE. The kernel still posts a failure.
             let cancel = AsyncCancel::new(id.user_data())
                 .build()
-                .flags(SqeFlags::SKIP_SUCCESS)
                 .user_data(CANCEL_USER_DATA);
 
             // SAFETY: AsyncCancel carries only the stable user_data identity.
@@ -995,10 +818,10 @@ impl State {
     }
 
     /// Reap every posted CQE without invoking observer callbacks.
-    fn reap(&mut self, completion: CompletionQueue<'_>, deferred: &mut Deferred) {
+    fn reap(&mut self, ring: &mut IoUring, deferred: &mut Deferred) {
         // Dropping this CQ view returns the consumed slots to the kernel.
         // Observer callbacks remain deferred until the worker borrow ends.
-        for cqe in completion {
+        for cqe in ring.completion() {
             self.handle_cqe(cqe.user_data(), cqe.result(), deferred);
         }
     }
@@ -1028,8 +851,7 @@ impl State {
         // Only the target operation's CQE can retire its resource owners.
         if user_data == CANCEL_USER_DATA {
             if result == 0 {
-                // Cancellation successful. SKIP_SUCCESS keeps the kernel from
-                // posting this result.
+                // Cancellation successful.
             } else if result == -libc::EALREADY {
                 // Cancellation is no longer possible at this stage. The target
                 // operation CQE should follow shortly.
@@ -1069,11 +891,9 @@ pub mod tests {
             wheel::BUDGET,
         },
         storage::{hold::Hold, iouring::Shared},
-        telemetry::traces::collector::{CollectingLayer, TraceStorage},
     };
     use commonware_utils::{TestRng, channel::oneshot};
     use io_uring::opcode::Nop;
-    use off_owner::OffOwner;
     use rand::RngExt as _;
     use std::{
         cell::Cell,
@@ -1089,7 +909,6 @@ pub mod tests {
         task::Wake,
         thread,
     };
-    use tracing::Level;
     use tracing_subscriber::layer::SubscriberExt as _;
 
     /// Bound of a timed wait that times out. It leaves the deadline in the
@@ -1106,10 +925,6 @@ pub mod tests {
         AfterCompletion,
         /// The kernel drops a CQE because it cannot allocate an overflow entry.
         DropCompletion,
-        /// The kernel refuses to cancel the ring futex wait.
-        FailCancel,
-        /// The kernel refuses to release the ring's registered slot.
-        FailUnregister,
     }
 
     thread_local! {
@@ -1119,6 +934,10 @@ pub mod tests {
         /// Callback run once at the end of this thread's next service turn
         /// that leaves a durability request waiting for its permit.
         static WHILE_ACQUIRING: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+
+        /// Minimum completion count and flags of this thread's latest
+        /// task-work or wait enter.
+        static LAST_ENTER: Cell<Option<(u32, EnterFlags)>> = const { Cell::new(None) };
     }
 
     /// Clear an unused injection when its test scope exits or unwinds.
@@ -1161,23 +980,6 @@ pub mod tests {
     /// counter.
     pub fn drop_completion(ring: &IoUring) -> bool {
         take_fault(ring, Fault::DropCompletion)
-    }
-
-    /// Model a refused cancel of the ring futex wait. The real cancel still
-    /// runs first.
-    pub fn cancel_failure(ring: &IoUring) -> Option<io::Error> {
-        take_fault(ring, Fault::FailCancel).then(|| io::Error::from_raw_os_error(libc::EIO))
-    }
-
-    /// Model a refused unregistration. The real call still releases the
-    /// slot, so the test thread's table stays clean.
-    pub fn unregister_failure(ring: &IoUring) -> Option<io::Error> {
-        take_fault(ring, Fault::FailUnregister).then(|| io::Error::from_raw_os_error(libc::EBUSY))
-    }
-
-    thread_local! {
-        /// Minimum completion count and flags of this thread's latest enter.
-        static LAST_ENTER: Cell<Option<(u32, EnterFlags)>> = const { Cell::new(None) };
     }
 
     /// Remember an enter's arguments for assertions on the calling thread.
@@ -1229,32 +1031,6 @@ pub mod tests {
 
         // SAFETY: `fd` is a new open descriptor that nothing else owns.
         unsafe { OwnedFd::from_raw_fd(fd) }
-    }
-
-    /// Keeps the off-owner wrapper's field out of reach of the tests.
-    mod off_owner {
-        use super::Driver;
-
-        /// A driver moved to another thread only to be dropped there, off the
-        /// thread that owns its ring.
-        pub struct OffOwner {
-            /// Dropped on the receiving thread, and never otherwise reached.
-            _driver: Driver,
-        }
-
-        // SAFETY: The driver is not `Send` only because its registered slot
-        // belongs to the creating thread's table. The wrapper exposes nothing,
-        // so the receiving thread can only drop it, and the ring's
-        // SINGLE_ISSUER rejects that thread's cancel and unregistration, so
-        // the slot stays with the creating thread until it exits.
-        unsafe impl Send for OffOwner {}
-
-        impl OffOwner {
-            /// Wrap `driver` to drop it on another thread.
-            pub const fn new(driver: Driver) -> Self {
-                Self { _driver: driver }
-            }
-        }
     }
 
     /// A tracing layer that panics on every event, standing in for a
@@ -2068,93 +1844,6 @@ pub mod tests {
         harness.drain();
     }
 
-    /// Drain the CQ through enters until `done` holds for the CQEs seen so
-    /// far, then once more, and return every CQE as (user_data, result).
-    /// Panics if `done` does not hold within a second.
-    fn reap_raw(
-        harness: &mut Harness,
-        done: impl Fn(&[(UserData, i32)]) -> bool,
-    ) -> Vec<(UserData, i32)> {
-        let mut cqes = Vec::new();
-        let mut last = false;
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            assert!(Instant::now() < deadline, "expected CQEs missing: {cqes:?}");
-            let slot = harness.driver.ring_slot;
-            let completion =
-                Driver::enter(&mut harness.driver.ring, slot, Enter::TaskWork).unwrap();
-            cqes.extend(completion.map(|cqe| (cqe.user_data(), cqe.result())));
-            if last {
-                return cqes;
-            }
-            last = done(&cqes);
-        }
-    }
-
-    /// A successful cancellation posts only its target's CQE, while one that
-    /// finds no target still posts its failure.
-    #[test]
-    fn test_only_failed_cancellations_post_cqes() {
-        let mut harness = Harness::new(1);
-
-        // A receive without data stays in the kernel until cancelled.
-        let (left, _right) = UnixStream::pair().unwrap();
-        let id = harness.admit(recv(left, 1, None), 0);
-        harness.service();
-        assert!(harness.driver.state.waiters.is_in_flight(id));
-        harness.driver.orphan(id, &mut harness.deferred);
-        assert!(
-            !harness
-                .driver
-                .state
-                .stage_cancellations(&mut harness.driver.ring.submission())
-        );
-        let cqes = reap_raw(&mut harness, |cqes| {
-            cqes.iter()
-                .any(|&(user_data, _)| user_data == id.user_data())
-        });
-        assert_eq!(cqes, [(id.user_data(), -libc::ECANCELED)]);
-        for (user_data, result) in cqes {
-            harness
-                .driver
-                .state
-                .handle_cqe(user_data, result, &mut harness.deferred);
-        }
-        assert!(!harness.driver.state.waiters.is_in_flight(id));
-
-        // A receive whose CQE is posted but not yet reaped is still in flight,
-        // so its cancellation stages and finds no target.
-        let (left, mut right) = UnixStream::pair().unwrap();
-        right.write_all(b"x").unwrap();
-        let id = harness.admit(recv(left, 1, None), 1);
-        assert!(!harness.driver.state.stage_ready_requests(
-            &mut harness.driver.ring.submission(),
-            None,
-            &mut harness.deferred,
-        ));
-        harness.driver.ring.submit_and_wait(1).unwrap();
-        harness.driver.orphan(id, &mut harness.deferred);
-        assert!(
-            !harness
-                .driver
-                .state
-                .stage_cancellations(&mut harness.driver.ring.submission())
-        );
-        let cqes = reap_raw(&mut harness, |cqes| cqes.len() == 2);
-        assert_eq!(
-            cqes,
-            [(id.user_data(), 1), (CANCEL_USER_DATA, -libc::ENOENT)]
-        );
-        for (user_data, result) in cqes {
-            harness
-                .driver
-                .state
-                .handle_cqe(user_data, result, &mut harness.deferred);
-        }
-        harness.collect();
-        harness.drain();
-    }
-
     #[test]
     fn test_cancel_acknowledgement_invariants() {
         // Both control tokens use the index that Waiters refuses to allocate.
@@ -2234,7 +1923,7 @@ pub mod tests {
                 harness
                     .driver
                     .state
-                    .reap(harness.driver.ring.completion(), &mut harness.deferred);
+                    .reap(&mut harness.driver.ring, &mut harness.deferred);
                 assert!(matches!(
                     probe.try_lock(),
                     Err(fs::TryLockError::WouldBlock)
@@ -2922,7 +2611,6 @@ pub mod tests {
         // Drop the driver on another thread, while a duplicate descriptor
         // keeps the ring, and so any wait its cancel missed, alive.
         let ring = hold_ring(&driver);
-        let driver = OffOwner::new(driver);
         thread::spawn(move || drop(driver)).join().unwrap();
 
         // The cancel failed, so the drop kept one handle and the wait is
@@ -2953,7 +2641,6 @@ pub mod tests {
         // subscriber that panics on the warning. A duplicate descriptor keeps
         // the ring, and so the wait, alive.
         let ring = hold_ring(&driver);
-        let driver = OffOwner::new(driver);
         let panicked = thread::spawn(move || {
             let subscriber = tracing_subscriber::registry().with(PanicOnEvent);
             tracing::subscriber::with_default(subscriber, || {
@@ -3619,10 +3306,13 @@ pub mod tests {
         let mut harness = Harness::new(4);
         let (directory, file) = make_file("iowait");
 
-        // Return whether a short blocking park passed NO_IOWAIT.
+        // Return whether an unbounded park passed NO_IOWAIT. A NOP the park
+        // submits ends its wait, so the check depends on no deadline.
         let no_iowait = |harness: &mut Harness| {
-            let deadline = Instant::now() + TIMED_WAIT;
-            assert!(harness.park(0, Some(deadline)).unwrap());
+            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+            // SAFETY: A NOP references no memory.
+            unsafe { harness.driver.ring.submission().push(&nop).unwrap() };
+            assert!(harness.park(0, None).unwrap());
             let (min_complete, flags) = LAST_ENTER.get().unwrap();
             assert_eq!(min_complete, 1);
             flags.contains(EnterFlags::NO_IOWAIT)
@@ -3655,7 +3345,7 @@ pub mod tests {
         harness
             .driver
             .state
-            .handle_cqe(CANCEL_USER_DATA, 0, &mut harness.deferred);
+            .handle_cqe(CANCEL_USER_DATA, -libc::EALREADY, &mut harness.deferred);
         assert_eq!(harness.driver.state.waiters.storage_in_flight(), 1);
         assert!(!no_iowait(&mut harness));
         harness.simulated_completion(read, -libc::ECANCELED);
@@ -3678,130 +3368,32 @@ pub mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// A flush adds GETEVENTS while the CQ has overflowed, so the kernel moves
-    /// overflowed completions into the CQ once reaping makes room.
-    #[test]
-    fn test_flush_moves_overflowed_completions_into_the_cq() {
-        let mut harness = Harness::new(1);
-        let cq_entries = harness.driver.ring.params().cq_entries() as usize;
-
-        // Each NOP completes inline during its flush. One more than the CQ
-        // holds leaves a completion in the kernel's overflow list.
-        for _ in 0..=cq_entries {
-            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
-            // SAFETY: A NOP references no memory.
-            unsafe { harness.driver.ring.submission().push(&nop).unwrap() };
-            Driver::enter(
-                &mut harness.driver.ring,
-                harness.driver.ring_slot,
-                Enter::Flush,
-            )
-            .unwrap();
-        }
-        assert!(harness.driver.ring.submission().cq_overflow());
-        assert_eq!(harness.driver.ring.completion().count(), cq_entries);
-
-        // With nothing to submit, the flush still enters for the overflow.
-        Driver::enter(
-            &mut harness.driver.ring,
-            harness.driver.ring_slot,
-            Enter::Flush,
-        )
-        .unwrap();
-        assert!(!harness.driver.ring.submission().cq_overflow());
-        assert_eq!(harness.driver.ring.completion().count(), 1);
-
-        harness.drain();
-    }
-
-    /// Every enter mode succeeds through the registered slot and through the
-    /// raw descriptor of the same ring, and a permanent error on either path
-    /// is returned unchanged.
     #[test]
     fn test_enter_distinguishes_timeout_from_failure() {
         let mut harness = Harness::new(1);
-        let slot = harness.driver.ring_slot.expect("registered ring");
 
         // The empty ring cannot produce a CQE. A wait that times out, a wait
         // whose deadline already passed and the enters that never wait still
-        // succeed, on the slot and on the raw descriptor.
-        for fd in [Some(slot), None] {
-            for enter in [
-                Enter::Flush,
-                Enter::TaskWork,
-                Enter::Wait {
-                    deadline: Some(Instant::now() + TIMED_WAIT),
-                    iowait: false,
-                },
-                Enter::Wait {
-                    deadline: Some(Instant::now()),
-                    iowait: false,
-                },
-            ] {
-                Driver::enter(&mut harness.driver.ring, fd, enter).unwrap();
-            }
-        }
-
-        // A wait that submits a NOP returns with its CQE, unbounded and timed,
-        // through both descriptors.
-        for fd in [Some(slot), None] {
-            for deadline in [None, Some(Instant::now() + Duration::from_secs(10))] {
-                let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
-                // SAFETY: A NOP references no memory.
-                unsafe { harness.driver.ring.submission().push(&nop).unwrap() };
-                let wait = Enter::Wait {
-                    deadline,
-                    iowait: false,
-                };
-                Driver::enter(&mut harness.driver.ring, fd, wait).unwrap();
-                let (min_complete, flags) = LAST_ENTER.get().unwrap();
-                assert_eq!(min_complete, 1);
-                assert_eq!(flags.contains(EnterFlags::REGISTERED_RING), fd.is_some());
-                assert_eq!(flags.contains(EnterFlags::EXT_ARG), deadline.is_some());
-                assert!(harness.driver.ring.submission().is_empty());
-                assert_eq!(harness.driver.ring.completion().count(), 1);
-            }
-        }
-
-        // A released slot fails every enter path with EBADF, while the raw
-        // descriptor of the same ring keeps working.
-        harness.driver.ring_slot = None;
-        unregister_ring_fd(harness.driver.ring.as_raw_fd(), slot).unwrap();
-        let errors = [
+        // succeed.
+        for enter in [
             Enter::Flush,
             Enter::TaskWork,
             Enter::Wait {
-                deadline: None,
-                iowait: false,
-            },
-            Enter::Wait {
-                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                deadline: Some(Instant::now() + TIMED_WAIT),
                 iowait: false,
             },
             Enter::Wait {
                 deadline: Some(Instant::now()),
                 iowait: false,
             },
-        ]
-        .map(|enter| Driver::enter(&mut harness.driver.ring, Some(slot), enter).err());
-        for error in errors {
-            let error = error.expect("enter through a released slot succeeded");
-            assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+        ] {
+            Driver::enter(&mut harness.driver.ring, enter).unwrap();
         }
-        Driver::enter(&mut harness.driver.ring, None, Enter::TaskWork).unwrap();
-        drop(harness);
 
-        // A closed raw descriptor fails every enter path with EBADF.
-        let mut ring = IoUring::builder()
-            .setup_single_issuer()
-            .setup_defer_taskrun()
-            .setup_no_sqarray()
-            .build(1)
-            .unwrap();
         // SAFETY: This isolated test closes the unused ring descriptor once,
         // then forgets the ring mapping owner before another FD can reuse it.
-        assert_eq!(unsafe { libc::close(ring.as_raw_fd()) }, 0);
-        let errors = [
+        assert_eq!(unsafe { libc::close(harness.driver.ring.as_raw_fd()) }, 0);
+        let results = [
             Enter::Flush,
             Enter::TaskWork,
             Enter::Wait {
@@ -3817,14 +3409,13 @@ pub mod tests {
                 iowait: false,
             },
         ]
-        .map(|enter| Driver::enter(&mut ring, None, enter).err());
-        std::mem::forget(ring);
+        .map(|enter| Driver::enter(&mut harness.driver.ring, enter));
+        std::mem::forget(harness.driver);
 
         // Every enter path must preserve a permanent error. Forget the closed
         // ring before asserting so a failure cannot try to close its FD again.
-        for error in errors {
-            let error = error.expect("enter on a closed ring succeeded");
-            assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+        for result in results {
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EBADF));
         }
     }
 
@@ -4144,244 +3735,5 @@ pub mod tests {
         }
 
         harness.drain();
-    }
-
-    /// The registration belongs to the creating thread, so the driver can
-    /// move to no other one. Naming it in both ambiguous impls fails to
-    /// compile if it is Send or Sync.
-    const _: () = {
-        trait AmbiguousIfSend<A> {
-            fn check() {}
-        }
-        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
-        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
-        let _ = <Driver as AmbiguousIfSend<_>>::check;
-
-        trait AmbiguousIfSync<A> {
-            fn check() {}
-        }
-        impl<T: ?Sized> AmbiguousIfSync<()> for T {}
-        impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
-        let _ = <Driver as AmbiguousIfSync<_>>::check;
-    };
-
-    /// Complete one receive on `harness` and retire it, proving its ring works.
-    fn complete_receive(harness: &mut Harness) {
-        let (left, mut right) = UnixStream::pair().unwrap();
-        right.write_all(b"x").unwrap();
-        let before = harness.completed.len();
-        harness.admit(recv(left, 1, None), 0);
-        harness.until(before + 1);
-        assert_eq!(received(&harness.completed[before]), b"x");
-        harness.drain();
-    }
-
-    /// A driver registers its ring with the creating thread, enters through
-    /// the slot, and releases the slot when dropped, also while unwinding, so
-    /// one thread can create any number of drivers in turn.
-    #[test]
-    fn test_ring_registration_is_released_on_drop() {
-        let mut first = Harness::new(1);
-        let slot = first.driver.ring_slot.expect("registered ring");
-        assert!(first.park(0, Some(Instant::now() + TIMED_WAIT)).unwrap());
-        let (_, flags) = LAST_ENTER.get().unwrap();
-        assert!(flags.contains(EnterFlags::REGISTERED_RING));
-        complete_receive(&mut first);
-        drop(first);
-        assert_eq!(Harness::new(1).driver.ring_slot, Some(slot));
-
-        for _ in 0..32 {
-            let harness = Harness::new(1);
-            assert!(harness.driver.ring_slot.is_some());
-        }
-        for _ in 0..32 {
-            let harness = Harness::new(1);
-            assert!(harness.driver.ring_slot.is_some());
-            let unwound = catch_unwind(AssertUnwindSafe(move || {
-                let _harness = harness;
-                panic!("unwind with a registered ring");
-            }));
-            assert!(unwound.is_err());
-        }
-        assert!(Harness::new(1).driver.ring_slot.is_some());
-    }
-
-    /// A thread registers at most sixteen rings. A further driver enters
-    /// through its raw descriptor and still completes requests, and dropping a
-    /// registered driver frees its slot for the next one.
-    #[test]
-    fn test_full_registration_table_falls_back_to_the_raw_descriptor() {
-        let mut registered = Vec::new();
-        let mut fallback = loop {
-            let harness = Harness::new(1);
-            if harness.driver.ring_slot.is_none() {
-                break harness;
-            }
-            registered.push(harness);
-            assert!(registered.len() <= 16, "more than sixteen registered rings");
-        };
-        assert_eq!(registered.len(), 16);
-        complete_receive(&mut fallback);
-        let (_, flags) = LAST_ENTER.get().unwrap();
-        assert!(!flags.contains(EnterFlags::REGISTERED_RING));
-        drop(fallback);
-
-        // The freed slot is the lowest free one, so a new driver takes it.
-        let freed = registered.remove(5);
-        let slot = freed.driver.ring_slot.unwrap();
-        drop(freed);
-        let mut reused = Harness::new(1);
-        assert_eq!(reused.driver.ring_slot, Some(slot));
-        complete_receive(&mut reused);
-    }
-
-    /// Dropping one of several drivers on a thread releases only its own slot.
-    #[test]
-    fn test_dropping_one_driver_leaves_the_others_working() {
-        let mut first = Harness::new(1);
-        let middle = Harness::new(1);
-        let mut last = Harness::new(1);
-        let slots = [
-            first.driver.ring_slot.unwrap(),
-            middle.driver.ring_slot.unwrap(),
-            last.driver.ring_slot.unwrap(),
-        ];
-        assert!(slots[0] != slots[1] && slots[1] != slots[2] && slots[0] != slots[2]);
-        drop(middle);
-
-        complete_receive(&mut first);
-        complete_receive(&mut last);
-        assert_eq!(first.driver.ring_slot, Some(slots[0]));
-        assert_eq!(last.driver.ring_slot, Some(slots[2]));
-
-        // The freed slot goes to the next driver, and its siblings' slots stay.
-        let mut next = Harness::new(1);
-        assert_eq!(next.driver.ring_slot, Some(slots[1]));
-        complete_receive(&mut next);
-        complete_receive(&mut first);
-        complete_receive(&mut last);
-    }
-
-    /// A driver dropped off its owner thread cannot release the slot of a
-    /// ring the receiving thread registered, even at the same index, so that
-    /// ring keeps entering through its slot.
-    #[test]
-    fn test_off_owner_drop_keeps_the_receiving_threads_slot() {
-        let moved = Harness::new(1);
-        let slot = moved.driver.ring_slot.expect("registered ring");
-        let moved = OffOwner::new(moved.driver);
-
-        thread::spawn(move || {
-            let mut local = Harness::new(1);
-            assert_eq!(local.driver.ring_slot, Some(slot));
-            drop(moved);
-            complete_receive(&mut local);
-            let (_, flags) = LAST_ENTER.get().unwrap();
-            assert!(flags.contains(EnterFlags::REGISTERED_RING));
-        })
-        .join()
-        .unwrap();
-
-        // The slot stays with this thread, so a new driver here takes another.
-        let next = Harness::new(1);
-        assert_ne!(next.driver.ring_slot, Some(slot));
-    }
-
-    /// A drop whose unregistration fails first cancels the live ring wait,
-    /// then warns with the error and the slot. A subscriber that panics on the
-    /// warning cannot skip the cancel.
-    #[test]
-    fn test_failed_unregistration_is_reported_after_the_cancel() {
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let handles_without_driver = handles(&parker);
-
-        // A clean drop warns about nothing.
-        let storage = TraceStorage::default();
-        let collect = || tracing_subscriber::registry().with(CollectingLayer::new(storage.clone()));
-        tracing::subscriber::with_default(collect(), || {
-            drop(Driver::new(&RingConfig::default(), unparker.clone(), Instant::now()).unwrap());
-        });
-        assert!(storage.get_by_level(Level::WARN).is_empty());
-
-        for panics in [false, true] {
-            // A park with a short deadline leaves its ring wait queued.
-            let mut driver =
-                Driver::new(&RingConfig::default(), unparker.clone(), Instant::now()).unwrap();
-            let slot = driver.ring_slot.expect("registered ring");
-            assert!(
-                driver
-                    .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
-                    .unwrap()
-            );
-
-            // The kernel consumed the wait's SQE and has not completed it.
-            assert!(driver.ring.submission().is_empty());
-            assert!(driver.ring.completion().is_empty());
-
-            // A duplicate descriptor keeps the ring alive across the drop, so
-            // only the drop's synchronous cancel can remove the wait.
-            let ring = hold_ring(&driver);
-            let fault = inject(&driver, Fault::FailUnregister);
-            if panics {
-                let subscriber = tracing_subscriber::registry().with(PanicOnEvent);
-                let panicked = tracing::subscriber::with_default(subscriber, || {
-                    catch_unwind(AssertUnwindSafe(|| drop(driver))).is_err()
-                });
-                assert!(panicked, "the warning did not reach the subscriber");
-            } else {
-                tracing::subscriber::with_default(collect(), || drop(driver));
-                let warnings = storage.get_by_level(Level::WARN);
-                assert_eq!(warnings.len(), 1);
-                warnings
-                    .expect_message_contains("failed to unregister the io_uring ring descriptor")
-                    .unwrap();
-                warnings[0]
-                    .metadata
-                    .expect_field_contains("error", "os error 16")
-                    .unwrap();
-                warnings[0]
-                    .metadata
-                    .expect_field_exact("slot", &slot.to_string())
-                    .unwrap();
-            }
-            assert!(FAULT.get().is_none(), "unregistration did not run");
-            drop(fault);
-
-            // The cancel removed the wait, and the drop kept no handle.
-            assert_eq!(wake(&unparker, 2), 0, "driver left its ring wait queued");
-            assert_eq!(handles(&parker), handles_without_driver);
-            drop(ring);
-        }
-    }
-
-    /// A drop whose cancel fails still releases the ring's registered slot
-    /// before it warns, so a subscriber that panics on the warning cannot leave
-    /// the slot, and the ring it holds open, with the owner thread.
-    #[test]
-    fn test_failed_cancel_releases_the_slot_if_the_warning_panics() {
-        // A park with a short deadline leaves its ring wait queued.
-        let parker = Parker::new();
-        let mut driver =
-            Driver::new(&RingConfig::default(), parker.unparker(), Instant::now()).unwrap();
-        let slot = driver.ring_slot.expect("registered ring");
-        assert!(
-            driver
-                .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
-                .unwrap()
-        );
-
-        let fault = inject(&driver, Fault::FailCancel);
-        let subscriber = tracing_subscriber::registry().with(PanicOnEvent);
-        let panicked = tracing::subscriber::with_default(subscriber, || {
-            catch_unwind(AssertUnwindSafe(|| drop(driver))).is_err()
-        });
-        assert!(panicked, "the warning did not reach the subscriber");
-        assert!(FAULT.get().is_none(), "cancel did not run");
-        drop(fault);
-
-        // The next driver on this thread takes the released slot.
-        let next = Driver::new(&RingConfig::default(), parker.unparker(), Instant::now()).unwrap();
-        assert_eq!(next.ring_slot, Some(slot));
     }
 }

@@ -297,12 +297,11 @@ pub struct RingConfig {
     /// Must be nonzero and round to at most 32,768. Defaults to 128. The runtime
     /// chooses 1024 for its production default and 128 when built for tests.
     ///
-    /// The CQ uses the kernel default of twice the rounded SQ size. Failed
-    /// cancellation and ring wait CQEs also use that space, and a failed
-    /// cancellation's CQE can outlive its request. The operation limit therefore
-    /// does not bound all pending CQEs. The runtime relies on the kernel's CQ
-    /// overflow backlog (`IORING_FEAT_NODROP`), drained by subsequent
-    /// completion-service enters.
+    /// The CQ uses the kernel default of twice the rounded SQ size. Cancellation
+    /// and ring wait CQEs also use that space, and cancellation acknowledgements
+    /// can outlive their requests. The operation limit therefore does not bound
+    /// all pending CQEs. The runtime relies on the kernel's CQ overflow backlog
+    /// (`IORING_FEAT_NODROP`), drained by subsequent completion-service enters.
     pub size: u32,
 }
 

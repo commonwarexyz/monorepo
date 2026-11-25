@@ -647,6 +647,8 @@ pub mod tests {
         ))
     }
 
+    /// Build a plain file write that needs five bytes of progress before
+    /// completing.
     fn make_write_request() -> Request {
         Request::WriteAt(WriteAtRequest::new(
             make_file(File::from(make_socket_fd())),
@@ -902,7 +904,7 @@ pub mod tests {
         let read = waiters.insert(make_read_request(), observer());
         let recv = waiters.insert(make_recv_request(), observer());
         let sync = waiters.insert(make_sync_request(), observer());
-        // Queued requests and durability permit waiters do not count.
+        // Queued requests do not count until they stage.
         assert_eq!(waiters.storage_in_flight(), 0);
         stage(&mut waiters, read);
         stage(&mut waiters, recv);
