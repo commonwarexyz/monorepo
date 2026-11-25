@@ -1836,8 +1836,17 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             // The first position bounds the product. The final blob can extend past u64::MAX.
             let last = (blob * items_per_blob).saturating_add(items_per_blob - 1);
             let mut end = start + 1;
-            while positions.get(end).is_some_and(|&pos| pos <= last) {
-                end += 1;
+            let rest = &positions[end..];
+            // Probe at distances 1, 2, 4, ... before searching the bracket. A singleton
+            // run stops after the first probe, even if many other blobs follow it.
+            if rest.first().is_some_and(|&pos| pos <= last) {
+                let mut lo = 1;
+                let mut hi = 1;
+                while rest.get(hi).is_some_and(|&pos| pos <= last) {
+                    lo = hi + 1;
+                    hi = hi.saturating_mul(2).saturating_add(1);
+                }
+                end += lo + rest[lo..hi.min(rest.len())].partition_point(|&pos| pos <= last);
             }
             let run = start..end;
             start = end;
@@ -2456,6 +2465,41 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test_traced]
+    fn test_fixed_blob_runs_near_max_size() {
+        deterministic::Runner::default().start(|context| async move {
+            let start = u64::MAX - 18;
+            let mut journal = Journal::<_, Digest>::init_at_size(
+                context.child("journal"),
+                test_cfg(NZU64!(10)),
+                start,
+            )
+            .await
+            .unwrap();
+            let item = test_digest(0);
+            for _ in start..u64::MAX {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+
+            let positions = [18, 15, 14, 11, 10, 6, 5, 1].map(|from_end| u64::MAX - from_end);
+            let runs = journal
+                .0
+                .reader()
+                .blob_runs(&positions)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                runs,
+                [
+                    (0..1, start / 10, start),
+                    (1..6, (u64::MAX - 15) / 10, u64::MAX - 15),
+                    (6..8, (u64::MAX - 5) / 10, u64::MAX - 5),
+                ]
+            );
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]
