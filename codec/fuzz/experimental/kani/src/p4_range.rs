@@ -5,40 +5,42 @@
 //! `kani_p4_range_contains`: for EVERY pair of bounds (each `Included`, `Excluded` or
 //! `Unbounded`, with any `usize` value) and EVERY `usize` value, `RangeCfg::contains` equals
 //! interval membership computed in 128-bit signed arithmetic, where no bound can overflow.
-//! codec/src/config.rs:8-10: `RangeCfg` is "Configuration for limiting the range of a value";
-//! codec/src/config.rs:131: `contains` "Returns true if the value is within this range". The
-//! bounds are `core::ops::Bound`, with its standard meaning.
+//! codec/src/config.rs, `RangeCfg`: "Configuration for limiting the range of a value";
+//! codec/src/config.rs, `RangeCfg::contains`: "Returns true if the value is within this
+//! range". The bounds are `core::ops::Bound`, with its standard meaning.
 //!
 //! `kani_p4_usize_read`: for EVERY byte string of length `0..=6` and EVERY range,
 //! `usize::read_cfg`:
 //!
-//! 1. does not panic. codec/src/codec.rs:226-228: "Parsing a message (often untrusted) should
-//!    never result in a panic."
-//! 2. on `Ok(v)`: `v` is inside the range. codec/src/types/primitives.rs:11-13: "callers must
-//!    supply a [RangeCfg] to bound the allowable value. This protects against
-//!    denial-of-service attacks that would allocate oversized buffers";
-//!    codec/src/codec.rs:223-224: "must return [Error] if decoding fails due to ... violation
-//!    of constraints imposed by the `cfg`".
-//! 3. on `Ok(v)`: `v` fits in a `u32`. codec/src/types/primitives.rs:16-17: "`usize` is
-//!    restricted to values that fit in a `u32`".
-//! 4. on `InvalidLength(v)`: `v` is outside the range. codec/src/error.rs:47-54: the "value
-//!    fell outside the permitted range"; "The contained `usize` is the invalid length that
-//!    was decoded."
+//! 1. does not panic. codec/src/codec.rs, `Read::read_cfg`: "Parsing a message (often
+//!    untrusted) should never result in a panic."
+//! 2. on `Ok(v)`: `v` is inside the range. codec/src/types/primitives.rs, module docs:
+//!    "callers must supply a [RangeCfg] to bound the allowable value. This protects against
+//!    denial-of-service attacks that would allocate oversized buffers"; codec/src/codec.rs,
+//!    `Read::read_cfg`: "must return [Error] if decoding fails due to ... violation of
+//!    constraints imposed by the `cfg`".
+//! 3. on `Ok(v)`: `v` fits in a `u32`. codec/src/types/primitives.rs, module docs: "`usize`
+//!    is restricted to values that fit in a `u32`".
+//! 4. on `InvalidLength(v)`: `v` is outside the range. codec/src/error.rs,
+//!    `Error::InvalidLength`: the "value fell outside the permitted range"; "The contained
+//!    `usize` is the invalid length that was decoded."
 //! 5. a malformed varint is refused: it gives no value and no `InvalidLength`.
-//!    codec/src/types/primitives.rs:8-17: `usize` "uses variable-length (varint) encoding";
-//!    codec/src/varint.rs:479-481, on the varint read: "Returns an error if:" "The varint is
-//!    invalid (too long or malformed)". Which bytes are malformed: those that `UInt<u32>`
-//!    refuses with `InvalidVarint` (codec/src/varint.rs:117: "`Err(InvalidVarint)` if the
-//!    varint is malformed (overflow or invalid encoding)"). The documentation does not say
-//!    with which error `usize` itself refuses them, so the gate does not fix the kind of
-//!    that failure: no assertion and no cover check of the default build looks at it.
+//!    codec/src/types/primitives.rs, module docs: `usize` "uses variable-length (varint)
+//!    encoding"; codec/src/varint.rs, the private `read`: "Returns an error if:" "The varint
+//!    is invalid (too long or malformed)". Which bytes are malformed: those that `UInt<u32>`
+//!    refuses with `InvalidVarint` (codec/src/varint.rs, `Decoder::feed`:
+//!    "`Err(InvalidVarint)` if the varint is malformed (overflow or invalid encoding)"). The
+//!    documentation does not say with which error `usize` itself refuses them, so the gate
+//!    does not fix the kind of that failure: no assertion and no cover check of the default
+//!    build looks at it.
 //!
 //! # Implementation consistency (asserted only with `--features consistency`; not a gate)
 //!
 //! - the value, the cursor and the error (kind and payload) equal those of
 //!   `UInt::<u32>::read` on the same input. The docs say a `usize` is a varint that fits a
 //!   `u32`; they do not name `UInt<u32>`. This is also a shared-code check, not an independent
-//!   oracle: `usize::read_cfg` calls `UInt::read` (codec/src/types/primitives.rs:181).
+//!   oracle: `usize::read_cfg` calls `UInt::read` (codec/src/types/primitives.rs, `Read for
+//!   usize`).
 //! - `InvalidUsize` never happens (on a 64-bit target every `u32` fits a `usize`), and no
 //!   failure has a kind other than `InvalidLength`, `EndOfBuffer` or `InvalidVarint`.
 //! - the cover check that expects a malformed varint under `InvalidVarint` is compiled only

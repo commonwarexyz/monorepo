@@ -5,32 +5,34 @@
 //! For EVERY byte string of length `0..=MAX+1` (`MAX` = the type's maximum varint size),
 //! `UInt::<T>::read`:
 //!
-//! 1. does not panic. codec/src/codec.rs:226-228, on `Read::read_cfg`: "Parsing a message
-//!    (often untrusted) should never result in a panic."
+//! 1. does not panic. codec/src/codec.rs, `Read::read_cfg`: "Parsing a message (often
+//!    untrusted) should never result in a panic."
 //! 2. fails only with `EndOfBuffer` or `InvalidVarint` (any payload).
-//!    codec/src/codec.rs:223-224: "Implementations must return [Error] if decoding fails due
-//!    to invalid data, insufficient bytes in the buffer". codec/src/varint.rs:479-481, on
-//!    `read`: "Returns an error if: - The varint is invalid (too long or malformed) - The
-//!    buffer ends while reading". The two kinds: codec/src/error.rs:10-14 and :25-32.
+//!    codec/src/codec.rs, `Read::read_cfg`: "Implementations must return [Error] if decoding
+//!    fails due to invalid data, insufficient bytes in the buffer". codec/src/varint.rs, the
+//!    private `read`: "Returns an error if: - The varint is invalid (too long or malformed) -
+//!    The buffer ends while reading". The two kinds: codec/src/error.rs, `Error::EndOfBuffer`
+//!    and `Error::InvalidVarint`.
 //! 3. on `Ok(v)` has read exactly the bytes `UInt(v).write` produces.
-//!    codec/src/varint.rs:122-125 (a comment in `Decoder::feed`): "we ensure that every value
-//!    has exactly one unique, valid encoding".
+//!    codec/src/varint.rs, a comment in `Decoder::feed`: "we ensure that every value has
+//!    exactly one unique, valid encoding".
 //! 4. on `Ok(v)` has read exactly `UInt(v).encode_size()` bytes.
-//!    codec/src/codec.rs:220-221: "Implementations should consume the exact number of bytes
-//!    required from `buf` to reconstruct the value"; codec/src/codec.rs:39: `encode_size`
-//!    "Returns the encoded size of this value (in bytes)".
+//!    codec/src/codec.rs, `Read::read_cfg`: "Implementations should consume the exact number
+//!    of bytes required from `buf` to reconstruct the value"; codec/src/codec.rs,
+//!    `EncodeSize::encode_size`: "Returns the encoded size of this value (in bytes)".
 //! 5. returns `EndOfBuffer` only when no byte of the input ends a varint (every byte has the
-//!    continuation bit). codec/src/error.rs:10-12: `EndOfBuffer` "Indicates that the input
+//!    continuation bit). codec/src/error.rs, `Error::EndOfBuffer`: "Indicates that the input
 //!    buffer (`Buf`) did not contain enough bytes to read the next piece of data".
-//!    codec/src/varint.rs:52-54: "If this bit is set, the varint continues, if clear this is
-//!    the final byte."
+//!    codec/src/varint.rs, `CONTINUATION_BIT_MASK`: "If this bit is set, the varint
+//!    continues, if clear this is the final byte."
 //!
 //! # Implementation consistency (asserted only with `--features consistency`; not a gate)
 //!
 //! Stronger than the docs above. A valid change of the implementation could break these.
 //!
 //! - at most `MAX` bytes are read on every path, also on an error (the docs bound the size
-//!   of an encoding, codec/src/varint.rs:57-71, not the cursor after a failure);
+//!   of an encoding, codec/src/varint.rs, `MAX_U16_VARINT_SIZE` to `MAX_U128_VARINT_SIZE`,
+//!   not the cursor after a failure);
 //! - on `EndOfBuffer` the whole input was read and it is shorter than `MAX`;
 //! - `InvalidVarint` carries `size_of::<T>()`, and at least one byte was read.
 //!

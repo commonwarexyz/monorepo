@@ -2,7 +2,7 @@
 //!
 //! [`StandardCertifyMissingCandidateFetchesByRound`] reproduces
 //! `test_standard_certify_missing_candidate_fetches_by_round`
-//! (consensus/src/marshal/standard/mod.rs:2489) through its handoff point and
+//! (in consensus/src/marshal/standard/mod.rs) through its handoff point and
 //! composes it with a live Simplex cluster through certification recovery:
 //!
 //! - The prefix replays the source trace on the victim: the resolver response
@@ -16,7 +16,7 @@
 //!   produce a competing view-1 proposal), re-drives `automaton.certify` for
 //!   it, and advances only after success: the recovery path Simplex itself
 //!   tests in `cancelled_certification_recertifies_after_restart`
-//!   (consensus/src/simplex/actors/voter/mod.rs:7259).
+//!   (in consensus/src/simplex/actors/voter/mod.rs).
 //! - Composition soundness (I1) admits the above-floor notarization because
 //!   every above-floor prefix certificate must match a recovered journal entry
 //!   exactly; nothing else above the floor is fabricated.
@@ -25,7 +25,7 @@
 //!
 //! [`StandardCertifyFirstBlockFetchesGenesisParent`] reproduces
 //! `test_standard_certify_first_block_fetches_genesis_parent`
-//! (consensus/src/marshal/standard/mod.rs:2341) through its handoff point: the
+//! (in consensus/src/marshal/standard/mod.rs) through its handoff point: the
 //! victim persists the height-1 candidate as verified, then the real wrapper
 //! `verify` and `certify` both succeed against the genesis parent with no
 //! fetch. The prefix fabricates no certificate and the source leaves nothing
@@ -34,7 +34,7 @@
 //!
 //! [`StandardVerifyHeightLieParentFetchIsRoundBound`] reproduces
 //! `test_standard_verify_height_lie_parent_fetch_is_round_bound`
-//! (consensus/src/marshal/standard/mod.rs:2747) through its handoff point:
+//! (in consensus/src/marshal/standard/mod.rs) through its handoff point:
 //! the victim persists a height-lying child (height 3 at view 2 naming a
 //! height-1 parent), the real wrapper `verify` of the child issues exactly
 //! one round-bound notarized fetch for the parent round and no
@@ -48,7 +48,7 @@
 //!
 //! [`StandardCertifyBumpsNotarizedFetchForPendingVerify`] reproduces
 //! `test_standard_certify_bumps_notarized_fetch_for_pending_verify`
-//! (consensus/src/marshal/standard/mod.rs:2571) through its handoff point:
+//! (in consensus/src/marshal/standard/mod.rs) through its handoff point:
 //! the victim's `verify` of a locally missing candidate parks an in-progress
 //! certification gate on a local-only block wait, and `certify` then takes
 //! that gate and bumps a round-bound notarized fetch that resolves through
@@ -61,7 +61,7 @@
 //!
 //! [`StandardVerifyMissingCandidateWaitsWithoutFetching`] reproduces
 //! `test_standard_verify_missing_candidate_waits_without_fetching`
-//! (consensus/src/marshal/standard/mod.rs:2413) through its handoff point:
+//! (in consensus/src/marshal/standard/mod.rs) through its handoff point:
 //! the real wrapper `verify` of an unknown digest registers a local wait,
 //! issues no fetch of any kind, and remains pending; the source then drops
 //! the verify receiver, canceling the wait's consumer. Cancellation must not
@@ -74,7 +74,7 @@
 //!
 //! [`StandardGetBlockByHeightAndLatest`] reproduces
 //! `test_standard_get_block_by_height_and_latest`
-//! (consensus/src/marshal/standard/mod.rs:382) through its handoff point:
+//! (in consensus/src/marshal/standard/mod.rs) through its handoff point:
 //! the victim finalizes three blocks through the source's per-height
 //! proposed-then-finalized flow (a durable `verified`, then a reported
 //! quorum finalization), each finalized height and the latest query map to

@@ -3,17 +3,20 @@
 //! # Why this exists
 //!
 //! P1-P3 instantiate the generic decoder at 16, 32, 64 and 128 bits. None of these is a
-//! multiple of 7, so the branch `remaining_bits <= DATA_BITS_PER_BYTE` (varint.rs:138) is
-//! never taken with exactly 7 bits left. The codec also offers varints over
-//! `Uint<BITS, LIMBS>` of any width (varint.rs:14, :216). At 14 bits the last byte has
-//! exactly 7 bits left, so these proofs reach the boundary the primitive widths cannot.
+//! multiple of 7, so the branch `remaining_bits <= DATA_BITS_PER_BYTE` (codec/src/varint.rs,
+//! `Decoder::feed`) is never taken with exactly 7 bits left. The codec also offers varints
+//! over `Uint<BITS, LIMBS>` of any width (codec/src/varint.rs, module docs: `Uint` "encodes
+//! the same way at any width"; and the impl of the sealed trait `UPrim` for
+//! `crate::Uint<BITS, LIMBS>`). At 14 bits the last byte has exactly 7 bits left, so these
+//! proofs reach the boundary the primitive widths cannot.
 //!
 //! # Documented contract (asserted in every build: this is the gate)
 //!
 //! `kani_p6_decode_uint14`: items 1 to 5 of P1 (see `p1_varint_decode.rs` for the quotes), for
 //! `UInt<Uint<14, 1>>`, whose maximum length is `MAX_ENCODE_SIZE = 14.div_ceil(7) = 2`
-//! (varint.rs:366-372). It adds: on `Ok(v)` the value is below 2^14 (uint.rs:10: "An unsigned
-//! integer of `BITS` bits").
+//! (codec/src/varint.rs, `MaxEncodeSize for UInt<crate::Uint<BITS, LIMBS>>`). It adds: on
+//! `Ok(v)` the value is below 2^14 (codec/src/uint.rs, `Uint`: "An unsigned integer of `BITS`
+//! bits").
 //!
 //! `kani_p6_stream_uint14`: items 1 to 4 of P3 (see `p3_stream_decoder.rs` for the quotes), for
 //! `Decoder::<Uint<14, 1>>`: no panic, more bytes only after a continuation byte, a failure

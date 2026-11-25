@@ -7,51 +7,53 @@
 //!
 //! # Documented contract (asserted in every build: this is the gate)
 //!
-//! 1. `decode` fails when bytes remain after the value. codec/src/codec.rs:328-330, on
-//!    `Decode`: "Trait combining [Read] with a check for remaining bytes." "Ensures that
-//!    *all* bytes from the input buffer were consumed during decoding."
-//!    codec/src/codec.rs:337-338, on `decode_cfg`: "Returns [Error] if decoding fails via
-//!    [Read::read_cfg] or if there are leftover bytes in `buf` after reading."
+//! 1. `decode` fails when bytes remain after the value. codec/src/codec.rs, `Decode`: "Trait
+//!    combining [Read] with a check for remaining bytes." "Ensures that *all* bytes from the
+//!    input buffer were consumed during decoding." codec/src/codec.rs, `Decode::decode_cfg`:
+//!    "Returns [Error] if decoding fails via [Read::read_cfg] or if there are leftover bytes
+//!    in `buf` after reading."
 //! 2. That failure is `ExtraData` with the number of bytes that remain, and it is given only
-//!    after a value was read. codec/src/error.rs:16-21: "Indicates that after successfully
-//!    decoding a value using a method like [crate::Decode::decode_cfg], there were still
-//!    unconsumed bytes remaining in the input buffer." "The contained `usize` is the number
-//!    of bytes that remained unconsumed."
-//! 3. `decode` is `decode_cfg` with the default configuration. codec/src/extensions.rs:55-56:
-//!    "Import this trait to use the `.decode(buf)` method as a shorthand for
+//!    after a value was read. codec/src/error.rs, `Error::ExtraData`: "Indicates that after
+//!    successfully decoding a value using a method like [crate::Decode::decode_cfg], there
+//!    were still unconsumed bytes remaining in the input buffer." "The contained `usize` is
+//!    the number of bytes that remained unconsumed."
+//! 3. `decode` is `decode_cfg` with the default configuration. codec/src/extensions.rs,
+//!    `DecodeExt`: "Import this trait to use the `.decode(buf)` method as a shorthand for
 //!    `.decode_cfg(buf, &X::default())`."
-//! 4. A fixed-size type has one encoded length. codec/src/codec.rs:12-13, on `FixedSize`:
-//!    "the encoded representation of this type *always* has the same byte length, regardless
-//!    of the specific value."
+//! 4. A fixed-size type has one encoded length. codec/src/codec.rs, `FixedSize`: "the encoded
+//!    representation of this type *always* has the same byte length, regardless of the
+//!    specific value."
 //! 5. Too few bytes fail with `EndOfBuffer`: for a fixed-size type fewer bytes than its
-//!    length, for `usize` a cut encoding. codec/src/error.rs:10-12: "Indicates that the
-//!    input buffer (`Buf`) did not contain enough bytes to read the next piece of data
-//!    required by a [crate::Read] implementation."
-//! 6. A written value decodes to itself. codec/src/lib.rs:162-167 (the crate's example):
-//!    "let bytes = point.encode();" ... "let decoded_point = Point::decode(bytes).unwrap();"
-//!    ... "assert_eq!(point, decoded_point);".
+//!    length, for `usize` a cut encoding. codec/src/error.rs, `Error::EndOfBuffer`:
+//!    "Indicates that the input buffer (`Buf`) did not contain enough bytes to read the next
+//!    piece of data required by a [crate::Read] implementation."
+//! 6. A written value decodes to itself. codec/src/lib.rs, crate docs, "Example 1.
+//!    Fixed-Size Type": "let bytes = point.encode();" ... "let decoded_point =
+//!    Point::decode(bytes).unwrap();" ... "assert_eq!(point, decoded_point);".
 //! 7. `encode_fixed` gives the written bytes as an array, and `decode_fixed` decodes such an
-//!    array in full. codec/src/codec.rs:366, on `encode_fixed`: "Encodes `self` into a
-//!    fixed-size byte array `[u8; N]`." codec/src/codec.rs:396, on `decode_fixed`: "Decodes
-//!    a value from a fixed-size byte array `[u8; N]`, ensuring all bytes are consumed."
-//! 8. `Uint` refuses a set bit beyond its width. codec/src/uint.rs:12-13: "Decoding refuses
+//!    array in full. codec/src/codec.rs, `EncodeFixed::encode_fixed`: "Encodes `self` into a
+//!    fixed-size byte array `[u8; N]`." codec/src/codec.rs, `DecodeFixed::decode_fixed`:
+//!    "Decodes a value from a fixed-size byte array `[u8; N]`, ensuring all bytes are
+//!    consumed."
+//! 8. `Uint` refuses a set bit beyond its width. codec/src/uint.rs, `Uint`: "Decoding refuses
 //!    an encoding with a bit set beyond the width, so every value has exactly one encoding."
-//! 9. `usize` is a varint of at most 32 bits. codec/src/types/primitives.rs:8-17: "it uses
-//!    variable-length (varint) encoding to save space" and "`usize` is restricted to values
-//!    that fit in a `u32`". A malformed varint is refused. codec/src/varint.rs:479-481, on
-//!    the varint read: "Returns an error if:" "The varint is invalid (too long or
+//! 9. `usize` is a varint of at most 32 bits. codec/src/types/primitives.rs, module docs: "it
+//!    uses variable-length (varint) encoding to save space" and "`usize` is restricted to
+//!    values that fit in a `u32`". A malformed varint is refused. codec/src/varint.rs, the
+//!    private `read`: "Returns an error if:" "The varint is invalid (too long or
 //!    malformed)". Which bytes are malformed: those that `UInt<u32>` refuses with
-//!    `InvalidVarint`. codec/src/varint.rs:117: "`Err(InvalidVarint)` if the varint is
-//!    malformed (overflow or invalid encoding)". The documentation of `usize` does not say
-//!    with which error `usize` itself refuses them.
+//!    `InvalidVarint`. codec/src/varint.rs, `Decoder::feed`: "`Err(InvalidVarint)` if the
+//!    varint is malformed (overflow or invalid encoding)". The documentation of `usize` does
+//!    not say with which error `usize` itself refuses them.
 //!
 //! From the crate's own tests, not from API documentation:
 //!
 //! 10. The bytes of zero do not decode as a non-zero integer.
-//!     codec/src/types/primitives.rs:649, in `test_nonzero_u16`:
-//!     "assert!(NonZeroU16::decode(0u16.encode()).is_err());" (the same at :664 and :679).
-//!     These tests assert that decoding fails. They do not assert with which error.
-//! 11. The failure of item 8 is `Error::Invalid`. codec/src/uint.rs:236-239, in
+//!     codec/src/types/primitives.rs, the test `test_nonzero_u16`:
+//!     "assert!(NonZeroU16::decode(0u16.encode()).is_err());" (the same in `test_nonzero_u32`
+//!     and `test_nonzero_u64`). These tests assert that decoding fails. They do not assert
+//!     with which error.
+//! 11. The failure of item 8 is `Error::Invalid`. codec/src/uint.rs, the test
 //!     `test_rejects_bits_beyond_the_width`, expects an `Error::Invalid` named `Uint` from
 //!     "U36::decode(Copying(&[0xff; 5])),".
 //!
@@ -104,7 +106,7 @@
 //!
 //! For `usize` the failure for a malformed varint is `InvalidVarint`. Item 9 documents that
 //! kind for `UInt<u32>`, not for `usize`, which reads a varint and then converts it, and
-//! which has an error kind of its own for that (`InvalidUsize`, codec/src/error.rs:34-36).
+//! which has an error kind of its own for that (codec/src/error.rs, `Error::InvalidUsize`).
 //! The cover checks that expect the malformed inputs under that kind are compiled only
 //! with the feature.
 //!

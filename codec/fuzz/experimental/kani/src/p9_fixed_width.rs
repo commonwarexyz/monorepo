@@ -6,63 +6,64 @@
 //! # Documented contract (asserted in every build: this is the gate)
 //!
 //! 1. Decoding does not panic, a failure is an error, and too few bytes fail with
-//!    `EndOfBuffer`. codec/src/codec.rs:223-228, on `Read::read_cfg`: "Implementations must
-//!    return [Error] if decoding fails due to invalid data, insufficient bytes in the buffer"
-//!    and "Parsing a message (often untrusted) should never result in a panic."
-//!    codec/src/error.rs:10-12: `EndOfBuffer` "Indicates that the input buffer (`Buf`) did
+//!    `EndOfBuffer`. codec/src/codec.rs, `Read::read_cfg`: "Implementations must return
+//!    [Error] if decoding fails due to invalid data, insufficient bytes in the buffer" and
+//!    "Parsing a message (often untrusted) should never result in a panic."
+//!    codec/src/error.rs, `Error::EndOfBuffer`: "Indicates that the input buffer (`Buf`) did
 //!    not contain enough bytes to read the next piece of data required by a [crate::Read]
-//!    implementation." A malformed varint fails with `InvalidVarint`.
-//!    codec/src/varint.rs:117: "`Err(InvalidVarint)` if the varint is malformed (overflow or
-//!    invalid encoding)". Reading a `UInt<U>` is that varint read and nothing more
-//!    (codec/src/varint.rs:335-340: "read(buf).map(UInt)").
+//!    implementation." A malformed varint fails with `InvalidVarint`. codec/src/varint.rs,
+//!    `Decoder::feed`: "`Err(InvalidVarint)` if the varint is malformed (overflow or invalid
+//!    encoding)". Reading a `UInt<U>` is that varint read and nothing more
+//!    (codec/src/varint.rs, `Read for UInt<U>`: "read(buf).map(UInt)").
 //! 2. An accepted input is read to the end of the value and no further.
-//!    codec/src/codec.rs:220-221: "Implementations should consume the exact number of bytes
-//!    required from `buf` to reconstruct the value."
+//!    codec/src/codec.rs, `Read::read_cfg`: "Implementations should consume the exact number
+//!    of bytes required from `buf` to reconstruct the value."
 //! 3. A fixed-size type has one encoded length, which is also its `encode_size` and its
-//!    `MAX_ENCODE_SIZE`. codec/src/codec.rs:12-15, on `FixedSize`: "the encoded
-//!    representation of this type *always* has the same byte length, regardless of the
-//!    specific value." "This automatically provides implementations of [EncodeSize] and
-//!    [MaxEncodeSize]." codec/src/codec.rs:39: `encode_size` "Returns the encoded size of
-//!    this value (in bytes)."
-//! 4. Integers and floats are big-endian. codec/src/types/primitives.rs:18-19: "All
+//!    `MAX_ENCODE_SIZE`. codec/src/codec.rs, `FixedSize`: "the encoded representation of this
+//!    type *always* has the same byte length, regardless of the specific value." "This
+//!    automatically provides implementations of [EncodeSize] and [MaxEncodeSize]."
+//!    codec/src/codec.rs, `EncodeSize::encode_size`: "Returns the encoded size of this value
+//!    (in bytes)."
+//! 4. Integers and floats are big-endian. codec/src/types/primitives.rs, module docs: "All
 //!    fixed-size integers and floats are written big-endian".
-//! 5. An array is fixed-size when its element is. codec/src/lib.rs:96-97: "Arrays: `[T; N]`
-//!    supports [Write] and [Read] when `T` does, and supports [FixedSize], [Encode], [Codec],
-//!    [EncodeFixed], and [CodecFixed] when `T: FixedSize`."
+//! 5. An array is fixed-size when its element is. codec/src/lib.rs, crate docs, "Supported
+//!    Types": "Arrays: `[T; N]` supports [Write] and [Read] when `T` does, and supports
+//!    [FixedSize], [Encode], [Codec], [EncodeFixed], and [CodecFixed] when `T: FixedSize`."
 //! 6. Tuples are supported, and the size bound of a composite type is the sum of the bounds
-//!    of its parts. codec/src/lib.rs:99: "Tuples: `(T1, T2, ...)` (up to 12 elements)".
-//!    codec/src/lib.rs:48-49: "[FixedSize] types contribute their fixed size. Composite types
-//!    sum their fields' bounds". codec/src/codec.rs:25: "An upper bound on the encoded size,
-//!    in bytes."
-//! 7. `Uint`. codec/src/uint.rs:10-13: "An unsigned integer of `BITS` bits held in `LIMBS`
+//!    of its parts. codec/src/lib.rs, crate docs, "Supported Types": "Tuples: `(T1, T2, ...)`
+//!    (up to 12 elements)". codec/src/lib.rs, crate docs, "Size Bounds": "[FixedSize] types
+//!    contribute their fixed size. Composite types sum their fields' bounds".
+//!    codec/src/codec.rs, `MaxEncodeSize::MAX_ENCODE_SIZE`: "An upper bound on the encoded
+//!    size, in bytes."
+//! 7. `Uint`. codec/src/uint.rs, `Uint`: "An unsigned integer of `BITS` bits held in `LIMBS`
 //!    limbs of 64 bits." "It encodes as its value in big-endian over the fewest bytes that
 //!    hold its bits. Decoding refuses an encoding with a bit set beyond the width, so every
-//!    value has exactly one encoding." codec/src/uint.rs:30: `BYTES` is the "Number of bytes
+//!    value has exactly one encoding." codec/src/uint.rs, `Uint::BYTES`: the "Number of bytes
 //!    the encoding takes."
-//! 8. A written value decodes to itself. codec/src/lib.rs:162-167 (the crate's example):
-//!    "let bytes = point.encode();" ... "let decoded_point = Point::decode(bytes).unwrap();"
-//!    ... "assert_eq!(point, decoded_point);".
+//! 8. A written value decodes to itself. codec/src/lib.rs, crate docs, "Example 1.
+//!    Fixed-Size Type": "let bytes = point.encode();" ... "let decoded_point =
+//!    Point::decode(bytes).unwrap();" ... "assert_eq!(point, decoded_point);".
 //!
 //! From the crate's own tests, not from API documentation. The documentation does not say in
 //! which order the parts of an array or of a tuple are written, or that zero is refused:
 //!
 //! 9. An array is its elements in order, with no length in front, and its size is the
-//!    element size times the count. codec/src/types/primitives.rs:493-518, in `test_array`:
+//!    element size times the count. codec/src/types/primitives.rs, the test `test_array`:
 //!    "`[u8; N]` encodes exactly N payload bytes, with no length prefix." and "Larger
 //!    fixed-size elements compose normally and preserve big-endian encoding." with
-//!    "assert_eq!(<[u16; 3] as FixedSize>::SIZE, 6);". Nested arrays:
-//!    codec/src/types/primitives.rs:519-527: "Nested arrays inherit the same fixed-size
-//!    encoding from their elements."
-//! 10. A tuple is its parts in order. codec/src/types/tuple.rs:84-104, `test_conformity`,
+//!    "assert_eq!(<[u16; 3] as FixedSize>::SIZE, 6);". Nested arrays, in the same test:
+//!    "Nested arrays inherit the same fixed-size encoding from their elements."
+//! 10. A tuple is its parts in order. codec/src/types/tuple.rs, the test `test_conformity`,
 //!     for example "assert_eq!(t2.encode(), &[0xAB, 0xCD, 0x00, 0xDE, 0xAD, 0xBE, 0xEF][..]);".
 //! 11. The bytes of zero do not decode as a non-zero integer.
-//!     codec/src/types/primitives.rs:649, in `test_nonzero_u16`:
-//!     "assert!(NonZeroU16::decode(0u16.encode()).is_err());" (the same at :664 and :679).
-//!     These tests assert that decoding fails. They do not assert with which error.
+//!     codec/src/types/primitives.rs, the test `test_nonzero_u16`:
+//!     "assert!(NonZeroU16::decode(0u16.encode()).is_err());" (the same in `test_nonzero_u32`
+//!     and `test_nonzero_u64`). These tests assert that decoding fails. They do not assert
+//!     with which error.
 //! 12. In a `Uint` of more than one limb the bytes of the most significant limb come first.
-//!     codec/src/uint.rs:221-229, in `test_partial_limbs_encode_their_bytes_only`: "A partial
+//!     codec/src/uint.rs, the test `test_partial_limbs_encode_their_bytes_only`: "A partial
 //!     limb above a whole one encodes its bytes first." The failure for a bit beyond the
-//!     width is `Error::Invalid`: codec/src/uint.rs:236-239, in
+//!     width is `Error::Invalid`: codec/src/uint.rs, the test
 //!     `test_rejects_bits_beyond_the_width`, expects an `Error::Invalid` named `Uint` from
 //!     "U36::decode(Copying(&[0xff; 5])),".
 //!

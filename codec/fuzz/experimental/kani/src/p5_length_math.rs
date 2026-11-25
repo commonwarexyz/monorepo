@@ -4,25 +4,27 @@
 //!
 //! `kani_p5_at_least_items`: for EVERY `len`, `item_size` and remaining count (all `usize`), the
 //! check does not panic, passes exactly when `len * item_size <= remaining` in 128-bit
-//! arithmetic, and fails with `EndOfBuffer`. codec/src/util.rs:19-20: "Checks if the buffer
-//! has at least `len * item_size` bytes remaining, treating multiplication overflow as
-//! insufficient. Returns an [Error::EndOfBuffer] if not."
+//! arithmetic, and fails with `EndOfBuffer`. codec/src/util.rs, `at_least_items`: "Checks if
+//! the buffer has at least `len * item_size` bytes remaining, treating multiplication overflow
+//! as insufficient. Returns an [Error::EndOfBuffer] if not."
 //!
 //! `kani_p5_max_items_size`: for EVERY `len <= u32::MAX` and `item_size <= u32::MAX`, the
 //! function does not panic and returns AT LEAST `len * item_size + 5` in 128-bit arithmetic.
-//! codec/src/util.rs:26-28: "Returns an upper bound on the encoded size of a ... sequence of
-//! `len` items that each encode to at most `item_size` bytes, with the length prefix at its
-//! widest"; the widest prefix is the five-byte `u32` varint (codec/src/lib.rs:45-46: "128
-//! bytes of data and a five-byte [`UInt<u32>`](varint::UInt) length prefix"). The proof
-//! assumes `len <= u32::MAX` because of codec/src/util.rs:30-32: "Panics if `len` exceeds
+//! codec/src/util.rs, `max_items_size`: "Returns an upper bound on the encoded size of a ...
+//! sequence of `len` items that each encode to at most `item_size` bytes, with the length
+//! prefix at its widest"; the widest prefix is the five-byte `u32` varint (codec/src/lib.rs,
+//! crate docs, "Size Bounds": "128 bytes of data and a five-byte
+//! [`UInt<u32>`](varint::UInt) length prefix"). The proof assumes `len <= u32::MAX` because
+//! of codec/src/util.rs, `max_items_size`, "# Panics": "Panics if `len` exceeds
 //! `u32::MAX`."
 //!
 //! `kani_p5_ensure_zeros`: for EVERY buffer of `0..=6` bytes, split at EVERY point into two
 //! chunks, and EVERY `size` (any `usize`), the function does not panic and returns `Ok` exactly
 //! when the buffer holds at least `size` bytes and the next `size` bytes are all zero.
-//! codec/src/util.rs:58-59: "Ensures the next `size` bytes are all zeroes in the provided
-//! buffer, returning an [Error] otherwise." No panic: codec/src/codec.rs:226-228, and
-//! codec/src/lib.rs:64-65 puts "length or padding validation" on the read path.
+//! codec/src/util.rs, `ensure_zeros`: "Ensures the next `size` bytes are all zeroes in the
+//! provided buffer, returning an [Error] otherwise." No panic: codec/src/codec.rs,
+//! `Read::read_cfg`, and codec/src/lib.rs, crate docs, "Decode Inputs", puts "length or
+//! padding validation" on the read path.
 //!
 //! # Implementation consistency (asserted only with `--features consistency`; not a gate)
 //!
@@ -30,7 +32,7 @@
 //!
 //! - `max_items_size` returns EXACTLY `len * item_size + 5` (the docs promise an upper bound);
 //! - `ensure_zeros` on `Ok` has consumed exactly `size` bytes (the docs do not say that it
-//!   advances; a unit test does, codec/src/util.rs:107-110);
+//!   advances; a unit test does, codec/src/util.rs, the test `test_ensure_zeros`);
 //! - `ensure_zeros` on a short buffer returns `EndOfBuffer` and consumes nothing;
 //! - `ensure_zeros` on a non-zero byte returns `Invalid("codec", "non-zero bytes")`, and
 //!   returns no other error.

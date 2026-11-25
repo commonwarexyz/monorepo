@@ -933,9 +933,10 @@ sections refer to it as "Choices made" and to its entries by item number.
    that player is not listed. Since #5708 the ceremony's documentation also states the secrecy
    of the shared secret across a reshare as a conditional bound: it holds only if the adversary
    knew at most `f` correct players' previous shares before the reshare
-   (`cryptography/src/bls12381/dkg/feldman_desmedt.rs`, lines 175-184, and the documentation of
-   `Output::revealed`). No target checks that bound. Section 12 records what a check of it
-   needs.
+   (`cryptography/src/bls12381/dkg/feldman_desmedt.rs`, module docs, section "Share Reveals": "the
+   shared secret stays safe if the adversary knew at most `f` honest players' previous shares", and
+   the documentation of `Output::revealed`). No target checks that bound. Section 12 records what a
+   check of it needs.
 5. **Scenario and leaders in the reshare target.** The twins scenario is drawn over the five
    identities, not over a committee, because the committee of an epoch depends on the outcome of
    the ceremonies before it. The scenario's scripted leaders are used (A1): a scripted leader
@@ -1061,19 +1062,20 @@ sections refer to it as "Choices made" and to its entries by item number.
     reply stands for the finalization its source was recorded to hold as its latest. There must be
     at least `f + 1` of them, 2 with 4 dealers, and the floor must be the highest of exactly the
     first `f + 1`: a reply delivered after those, however high, must not change it. That is the
-    moment the probe selects, as its documentation states (`glue/src/dkg/probe/mod.rs`, lines
-    73-75). It records at most one valid reply per dealer since its last request, selects after
+    moment the probe selects, as its documentation states (`glue/src/dkg/probe/mod.rs`, module docs:
+    "Once `f + 1` distinct dealers have replied, the highest finalization becomes the sampled
+    floor"). It records at most one valid reply per dealer since its last request, selects after
     each one it records, and the selection resolves once `f + 1` are recorded
-    (`glue/src/dkg/probe/actor/discovery.rs`, lines 301-351). Once the floor is selected the probe
-    judges no latest reply and sends no request for one, so the floor is final. A valid reply that
-    reaches a probe with no subscriber is not recorded and discards what was (`discovery.rs`, lines
-    332-335). The probe drops a closed subscription only when it next wakes, and the driver wakes
-    it as soon as the program drops its last one (7.4). The replies as listed include such a reply
-    all the same, which changes nothing: a probe with no subscriber records nothing, and the next
-    subscription makes it ask again (`discovery.rs`, lines 201-214), from where the replies are
-    listed anew. The negative control is a run in which the
-    third source's higher reply is delivered after the first two and before the boundary, with that
-    reply's finalization planted as the floor.
+    (`glue/src/dkg/probe/actor/discovery.rs`, `handle_latest` and `select`). Once the floor is
+    selected the probe judges no latest reply and sends no request for one, so the floor is final. A
+    valid reply that reaches a probe with no subscriber is not recorded and discards what was
+    (`discovery.rs`, `handle_latest`, the `self.subscribers.is_empty()` branch that resets the
+    sample). The probe drops a closed subscription only when it next wakes, and the driver wakes it
+    as soon as the program drops its last one (7.4). The replies as listed include such a reply all
+    the same, which changes nothing: a probe with no subscriber records nothing, and the next
+    subscription makes it ask again (`discovery.rs`, `subscribe`), from where the replies are listed
+    anew. The negative control is a run in which the third source's higher reply is delivered after
+    the first two and before the boundary, with that reply's finalization planted as the floor.
 
     Superseded on 2026-11-20 by item 37, for main #5555. Item 32 gives why and what changed.
     The text above is kept unchanged as the record of the check before that update.
@@ -1498,24 +1500,26 @@ section 10, step 1, which fails while a merge is staged and not committed.
     read off that code, so the table was read again: item 36 supersedes item 11. I14 itself did not
     change. What changed in the table, each read off the code at `c2627b4132`:
     - A latest reply that reaches a probe with no subscriber is ignored before any check
-      (`handle_latest`, line 370). Before, the sender that is not a dealer, and the sender of a
-      reply that did not verify, were blocked, and a valid reply discarded the sample. A probe
-      that does not block them while it has no subscriber is no longer detected, because the
-      module no longer judges those replies. A run showed this rule (a throwaway prototype of
-      the oracle with this one rule changed), and the negative control that planted the missing
-      block of the old rule plants no fault under the new one. It must be replaced by a control
-      that plants a block of a reply the probe ignores.
+      (`handle_latest`, the `self.subscribers.is_empty()` early return). Before, the sender that is
+      not a dealer, and the sender of a reply that did not verify, were blocked, and a valid reply
+      discarded the sample. A probe that does not block them while it has no subscriber is no longer
+      detected, because the module no longer judges those replies. A run showed this rule (a
+      throwaway prototype of the oracle with this one rule changed), and the negative control that
+      planted the missing block of the old rule plants no fault under the new one. It must be
+      replaced by a control that plants a block of a reply the probe ignores.
     - A selected floor is no longer final: when a pass of the primary fetch ends with no
       responder left, the probe asks the dealers again and judges their latest replies again
-      (lines 210-228; item 37).
+      (`run`, the retry arm: "responder pass exhausted, re-soliciting latest finalizations"; item
+      37).
     - A responder is held for the rest of its fetch's pass, not until the probe asks another
-      peer (`seen`, lines 482-484). A foreign boundary finalization from a held responder is
-      ignored where it was blocked before.
+      peer (`handle_boundary_finalization`, the `pending.seen` check). A foreign boundary
+      finalization from a held responder is ignored where it was blocked before.
     - A block response is decoded from every peer the fetch asked for the block, in any pass, not
-      only from the peer asked last (`requested`, lines 505-550). A damaged block from a peer asked
-      earlier blocks it where it was ignored before.
+      only from the peer asked last (`handle_boundary_block`, the `pending.requested` lookup). A
+      damaged block from a peer asked earlier blocks it where it was ignored before.
     - A boundary finalization of another epoch than a fetch's is judged against the primary's
-      boundary epoch, and the fallback's boundary epoch is judged by the fallback (lines 464-481).
+      boundary epoch, and the fallback's boundary epoch is judged by the fallback
+      (`handle_boundary_finalization`, the choice between the primary and the fallback fetch).
     - While serving, boundary requests are answered from checkpoints only (item 30).
     - Not a change of main #5555, found when the table was read again: a block response cut short
       inside its epoch blocks its sender while discovering, and a boundary or block request whose
@@ -1532,17 +1536,17 @@ section 10, step 1, which fails while a merge is staged and not committed.
     change the floor", read over the whole run, and the replies counted "since the probe's last
     latest-request". The module now documents a second sample after a pass of the primary fetch
     ends, a floor that a later selection in the same epoch with a higher round replaces, and a
-    fallback fetch (`glue/src/dkg/probe/mod.rs`, lines 90-95), so the old text would fire on a
-    correct probe whose second round selects a higher round in the epoch of its artifact (read off
-    the code; not yet seen in a run). Item 37, which supersedes item 12, gives the check that
-    replaces it. No longer detected: a probe that replaces its floor by a later selection in the
-    same epoch with a higher round, and an artifact from the fallback fetch. Still detected: a
-    floor that is no selection (built from other replies, from a reply after the first `f + 1` of
-    its round, from a reply its source did not build, or from a stale one), and a floor below
-    another selection of its epoch. Before main #5555 the probe made one selection. Now a second
-    round needs a pass of the primary fetch that ends with no responder left, which takes sources
-    that withhold a checkpoint (item 30) or a response, and the probe's timeout passing. Item 37
-    therefore gives the second round a negative control of its own.
+    fallback fetch (`glue/src/dkg/probe/mod.rs`, module docs, section "Discovery: boundary fetch"),
+    so the old text would fire on a correct probe whose second round selects a higher round in the
+    epoch of its artifact (read off the code; not yet seen in a run). Item 37, which supersedes item
+    12, gives the check that replaces it. No longer detected: a probe that replaces its floor by a
+    later selection in the same epoch with a higher round, and an artifact from the fallback fetch.
+    Still detected: a floor that is no selection (built from other replies, from a reply after the
+    first `f + 1` of its round, from a reply its source did not build, or from a stale one), and a
+    floor below another selection of its epoch. Before main #5555 the probe made one selection. Now
+    a second round needs a pass of the primary fetch that ends with no responder left, which takes
+    sources that withhold a checkpoint (item 30) or a response, and the probe's timeout passing.
+    Item 37 therefore gives the second round a negative control of its own.
 33. **The state-sync caller after main #5555 (R24, items 15 to 17).** The DKG module now records
     the height of the floor block with the state-sync material once marshal delivers that block,
     and resumes from marshal's processed position without reading the block when both are known.
@@ -1720,27 +1724,29 @@ section 10, step 1, which fails while a merge is staged and not committed.
     finalization its source was recorded to hold as its latest. A round that has at least `f + 1`
     replies, 2 with 4 dealers, makes one selection: the highest of exactly its first `f + 1`. A
     reply delivered after those, however high, must not change it. That is the moment the probe
-    selects, as its documentation states (`glue/src/dkg/probe/mod.rs`, lines 70-75). It records at
-    most one valid reply per dealer in a round, selects after each one it records, and judges no
+    selects, as its documentation states (`glue/src/dkg/probe/mod.rs`, module docs: "Once `f + 1`
+    distinct dealers have replied, the highest finalization becomes the sampled floor"). It records
+    at most one valid reply per dealer in a round, selects after each one it records, and judges no
     latest reply after it selected until it asks again (`glue/src/dkg/probe/actor/discovery.rs`,
-    `handle_latest` and `select`, lines 362-456). A reply that reaches a probe with no subscriber
-    is ignored: it is not recorded and discards nothing (line 370). The probe drops a closed
-    subscription only when it next wakes, and the driver wakes it as soon as the program drops its
-    last one (7.4), so a reply the program releases after that finds the probe with no subscriber
-    and is not listed.
+    `handle_latest` and `select`). A reply that reaches a probe with no subscriber is ignored: it is
+    not recorded and discards nothing (`handle_latest`, the `self.subscribers.is_empty()` early
+    return). The probe drops a closed subscription only when it next wakes, and the driver wakes it
+    as soon as the program drops its last one (7.4), so a reply the program releases after that
+    finds the probe with no subscriber and is not listed.
 
-    Since main #5555 a probe can make more than one selection (`glue/src/dkg/probe/mod.rs`, lines
-    90-95; `discovery.rs`, lines 210-228 and 405-456). When a pass of its primary fetch ends with
-    no responder left, it asks every peer for the boundary again and the dealers for their latest
-    finalizations again, which starts a new round. A selection in the epoch of the primary or of
-    the fallback replaces that fetch's floor if its round is higher. A selection in a later epoch
-    than the primary's starts a new primary, keeps the old primary as the fallback, and drops the
-    fallback before it. Any other selection changes nothing. The artifact carries the floor of the
-    fetch that completes first. Every selection in the artifact's epoch therefore reached that
-    fetch, which keeps the highest round among them: the first selection in an epoch starts its
-    fetch or changes nothing, and an epoch whose fetch was dropped never gets one again, because a
-    new fetch needs an epoch later than the primary's. The check lists the rounds up to the
-    artifact and judges the floor against the selections in the artifact's epoch.
+    Since main #5555 a probe can make more than one selection (`glue/src/dkg/probe/mod.rs`, module
+    docs, section "Discovery: boundary fetch"; `discovery.rs`, the retry arm of `run`, and
+    `select`). When a pass of its primary fetch ends with no responder left, it asks every peer for
+    the boundary again and the dealers for their latest finalizations again, which starts a new
+    round. A selection in the epoch of the primary or of the fallback replaces that fetch's floor if
+    its round is higher. A selection in a later epoch than the primary's starts a new primary, keeps
+    the old primary as the fallback, and drops the fallback before it. Any other selection changes
+    nothing. The artifact carries the floor of the fetch that completes first. Every selection in
+    the artifact's epoch therefore reached that fetch, which keeps the highest round among them: the
+    first selection in an epoch starts its fetch or changes nothing, and an epoch whose fetch was
+    dropped never gets one again, because a new fetch needs an epoch later than the primary's. The
+    check lists the rounds up to the artifact and judges the floor against the selections in the
+    artifact's epoch.
 
     The negative controls are a run in which the third source's higher reply is delivered after the
     first two of its round and before the boundary, with that reply's finalization planted as the
@@ -1833,12 +1839,12 @@ rests on and what is still open.
      `cryptography/src`.
    - *Then, in this feature.* Only after the harness records the selected dealer logs. Today
      `Records::placed` keeps the payload kind of a block and drops the log
-     (`glue/fuzz/src/dkg/invariants.rs`, lines 699-755), and the delivered `EpochInfo` names
-     the selected dealers without their logs. The record must hold every finalized dealer log
-     as a whole, and the check needs a sound rule for which log of a selected dealer the
-     ceremony used, since a dealer can have more than one log on the chain (Choices made,
-     item 9). The invariant would take the next free number and enter section 8 through an
-     update of this document, with its negative control (R19).
+     (`glue/fuzz/src/dkg/invariants.rs`, `Records::placed` and the `Carried` enum), and the
+     delivered `EpochInfo` names the selected dealers without their logs. The record must hold every
+     finalized dealer log as a whole, and the check needs a sound rule for which log of a selected
+     dealer the ceremony used, since a dealer can have more than one log on the chain (Choices made,
+     item 9). The invariant would take the next free number and enter section 8 through an update of
+     this document, with its negative control (R19).
 2. **The ack-loss gap.** Choices made, item 4 records two defects nothing detects: a correct
    dealer that loses a valid ack, and a correct player that does not acknowledge a valid
    dealing. Both show as a correct dealer's log that reveals a correct player.
@@ -1863,7 +1869,8 @@ rests on and what is still open.
 3. **The #5721 path.** One dealer sends two different dealings in one epoch, and the correct
    player that receives them restarts between them. The property at stake is that replay never
    pairs a journaled public message with the private half of another message
-   (`glue/src/dkg/reshare/store.rs`, lines 204-217).
+   (`glue/src/dkg/reshare/store.rs`, the replay in `init`: "A journaled message is restored only
+   with the private half that was received with it").
    - *Why no target reaches it.* Only the compromised identity deals twice (A2), and only in
      the Twins targets, which restart no engine (R15). The restart and state-sync targets run
      correct nodes only (R16, R23), and a correct dealer sends the same dealing again after a
@@ -1871,9 +1878,9 @@ rests on and what is still open.
      `glue/src/dkg/reshare/store.rs`, and the actor's order of calls). The probe target runs no
      ceremony (R21).
    - *What covers it instead.* The production regression `issue_5721_regression` and the test
-     after it (`glue/src/dkg/reshare/store.rs`, lines 1290-1388). They interrupt a dealing at
-     the secret store and before each journal mutation, for different dealings from one
-     dealer, at the level of the store.
+     after it, `interrupted_dealing_is_recorded_when_resent` (`glue/src/dkg/reshare/store.rs`). They
+     interrupt a dealing at the secret store and before each journal mutation, for different
+     dealings from one dealer, at the level of the store.
    - *What lifting it would take.* A change of R15, to restart a correct engine in a Twins
      target, or of R16 and P2, to put a dealer that deals twice into a restart target. The
      Twins targets pace no write (Choices made, item 13), so the crash would also need the

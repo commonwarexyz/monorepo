@@ -42,18 +42,21 @@
     change kept or lost). Any image reachable this way passes; anything else fails (2.1).
 12. **A successful reopen is a durability cut**: for that file generation, all data readable when
     the reopen returns must survive a later crash, and earlier pending crash choices are retired
-    (3.5; `runtime/src/lib.rs:692-701`).
+    (3.5; `runtime/src/lib.rs`, `Storage`, section "Durability": "A blob reopened within a run has
+    the same durability guarantee").
 13. **After an injected failed write**, two kinds:
     - a **write fault**: bytes outside its range keep their durable values; inside the range, the bytes
       `faulty.rs` keeps become **durable at once** (no later keep-or-lose choice). A failed write past the
       old end extends the blob to its highest kept byte, the gap filled with zeros;
     - a **sync fault in a fused `write_at(..., SYNC)`**: all bytes are applied, none is durable, and they
-      tear at a crash like an unsynced write; the caller still gets an error (`faulty.rs:854-865`).
+      tear at a crash like an unsynced write; the caller still gets an error (`faulty.rs`,
+      `Blob::write_at`, the branch for an injected sync failure).
 14. **After an injected failed resize**: the old length or one intermediate length; the
     intermediate length is always replayed at a crash (2.4, 3.1).
 15. **Sync**: a successful sync makes every earlier completed write and resize durable, also after
     an earlier failed sync, with no rewrite. A failed fused `write_at(..., SYNC)` is a failed write
-    (2.3; `runtime/src/lib.rs:993-1000`).
+    (2.3; `runtime/src/lib.rs`, `Blob::sync`: "Make every write and resize that completed before
+    this call durable.").
 16. **Namespace**: named and whole-partition removal, reads through old handles, recreating a
     removed name as a new blob, and scan after a crash compared as an unordered set; a failed
     injected remove changes nothing (2.9).

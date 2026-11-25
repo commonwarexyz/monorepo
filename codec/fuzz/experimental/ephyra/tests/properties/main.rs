@@ -204,28 +204,27 @@ where
 //
 // Contracts:
 //
-// - codec/src/varint.rs:5-8: "This module implements Google's Protocol Buffers
-//   variable-length integer encoding. Each byte uses: 7 bits for the value,
-//   1 "continuation" bit to indicate if more bytes follow".
-// - codec/src/varint.rs:27 (module example): "Signed example (ZigZag)";
-//   codec/src/varint.rs:244-245: "the encoding is done using ZigZag encoding,
+// - codec/src/varint.rs, module docs: "This module implements Google's Protocol
+//   Buffers variable-length integer encoding. Each byte uses: 7 bits for the
+//   value, 1 "continuation" bit to indicate if more bytes follow".
+// - codec/src/varint.rs, module example: "Signed example (ZigZag)";
+//   codec/src/varint.rs, `SPrim`: "the encoding is done using ZigZag encoding,
 //   which moves the sign bit to the least significant bit".
-// - codec/src/varint.rs:57-69: "Maximum encoded size of a u16 [u32, u64, u128]
-//   varint in bytes."
-// - codec/src/varint.rs:115-117 (`Decoder::feed`): "`Ok(Some(value))` when the
-//   varint is complete; `Ok(None)` when more bytes are needed;
-//   `Err(InvalidVarint)` if the varint is malformed (overflow or invalid
-//   encoding)".
-// - codec/src/varint.rs:479-481 (`read`): "Returns an error if: The varint is
-//   invalid (too long or malformed); The buffer ends while reading".
-// - codec/src/error.rs:25-28 (`InvalidVarint`): "The varint encoding itself is
+// - codec/src/varint.rs, `MAX_U16_VARINT_SIZE` to `MAX_U128_VARINT_SIZE`:
+//   "Maximum encoded size of a u16 [u32, u64, u128] varint in bytes."
+// - codec/src/varint.rs, `Decoder::feed`: "`Ok(Some(value))` when the varint is
+//   complete; `Ok(None)` when more bytes are needed; `Err(InvalidVarint)` if
+//   the varint is malformed (overflow or invalid encoding)".
+// - codec/src/varint.rs, `read`: "Returns an error if: The varint is invalid
+//   (too long or malformed); The buffer ends while reading".
+// - codec/src/error.rs, `Error::InvalidVarint`: "The varint encoding itself is
 //   malformed (e.g., too long). The decoded varint value exceeds the capacity
 //   of the target integer type."
-// - codec/src/types/primitives.rs:8-17: `usize` "uses variable-length (varint)
-//   encoding" and "is restricted to values that fit in a `u32`".
-// - codec/src/uint.rs:12-13 (`Uint`): "It encodes as its value in big-endian
-//   over the fewest bytes that hold its bits. Decoding refuses an encoding with
-//   a bit set beyond the width, so every value has exactly one encoding."
+// - codec/src/types/primitives.rs, module docs: `usize` "uses variable-length
+//   (varint) encoding" and "is restricted to values that fit in a `u32`".
+// - codec/src/uint.rs, `Uint`: "It encodes as its value in big-endian over the
+//   fewest bytes that hold its bits. Decoding refuses an encoding with a bit
+//   set beyond the width, so every value has exactly one encoding."
 //
 // Not asserted: what a padded varint such as `[0x80, 0x00]` decodes to. The
 // documentation calls a "malformed" varint an error but does not say that a
@@ -430,32 +429,32 @@ fn ephyra_p1_integer_encodings_match_reference_models(value: u128, stream: Vec<u
 //
 // Contracts:
 //
-// - codec/src/codec.rs:39 (`EncodeSize::encode_size`): "Returns the encoded
-//   size of this value (in bytes)."
-// - codec/src/codec.rs:290-293 (`Encode::encode`): "Panics if `encode_size()`
-//   does not return the same number of bytes actually written by `write()`".
-// - codec/src/lib.rs:158-167 and 236-245 (examples): "let decoded_point =
+// - codec/src/codec.rs, `EncodeSize::encode_size`: "Returns the encoded size of
+//   this value (in bytes)."
+// - codec/src/codec.rs, `Encode::encode`: "Panics if `encode_size()` does not
+//   return the same number of bytes actually written by `write()`".
+// - codec/src/lib.rs, module docs, Examples 1 and 2: "let decoded_point =
 //   Point::decode(bytes).unwrap(); assert_eq!(point, decoded_point);".
-// - codec/src/codec.rs:332-338 (`Decode::decode_cfg`): "Decodes a value from
-//   `buf` using `cfg`, ensuring the entire buffer is consumed. [...] Returns
-//   [Error] if decoding fails via [Read::read_cfg] or if there are leftover
-//   bytes in `buf` after reading."
-// - codec/src/error.rs:16-21 (`ExtraData`): "The contained `usize` is the
+// - codec/src/codec.rs, `Decode::decode_cfg`: "Decodes a value from `buf` using
+//   `cfg`, ensuring the entire buffer is consumed. [...] Returns [Error] if
+//   decoding fails via [Read::read_cfg] or if there are leftover bytes in `buf`
+//   after reading."
+// - codec/src/error.rs, `Error::ExtraData`: "The contained `usize` is the
 //   number of bytes that remained unconsumed."
-// - codec/src/codec.rs:155-157 (`Write::write_bufs`): "Must encode to the same
-//   format as [`Write::write`]."
-// - codec/src/codec.rs:65-67 (`encode_inline_size`): "it must not be less than
-//   the bytes written inline".
-// - codec/src/lib.rs:100: "`Arc<T>` (delegates to `T`)".
-// - codec/src/types/primitives.rs:18-19: "All fixed-size integers and floats
-//   are written big-endian".
-// - codec/src/mode.rs:135-142 (`Modes`): "The high bit indicates that another
-//   mode follows, and trailing zero-valued modes are omitted."
-//   codec/src/mode.rs:167-170 (`Modes::new`): "Returns `None` when every mode
-//   is zero."
-// - codec/fuzz/fuzz_targets/codec_roundtrip.rs:128-129 and
-//   codec/src/types/net.rs:78-86: a decoded `SocketAddrV6` has flowinfo and
-//   scope id 0, so the generator keeps them 0.
+// - codec/src/codec.rs, `Write::write_bufs`: "Must encode to the same format as
+//   [`Write::write`]."
+// - codec/src/codec.rs, `EncodeSize::encode_inline_size`: "it must not be less
+//   than the bytes written inline".
+// - codec/src/lib.rs, module docs, Supported Types: "`Arc<T>` (delegates to
+//   `T`)".
+// - codec/src/types/primitives.rs, module docs: "All fixed-size integers and
+//   floats are written big-endian".
+// - codec/src/mode.rs, `Modes`: "The high bit indicates that another mode
+//   follows, and trailing zero-valued modes are omitted." codec/src/mode.rs,
+//   `Modes::new`: "Returns `None` when every mode is zero."
+// - codec/fuzz/fuzz_targets/codec_roundtrip.rs, `roundtrip_socket_v6`, and
+//   codec/src/types/net.rs, `Read for SocketAddrV6`: a decoded `SocketAddrV6`
+//   has flowinfo and scope id 0, so the generator keeps them 0.
 
 struct Net {
     ip4: Ipv4Addr,
@@ -613,27 +612,27 @@ fn ephyra_p2_roundtrip_exact_size_full_consumption(s: Sample) {
 //
 // Contracts:
 //
-// - codec/src/lib.rs:9-11: "Deserialization of untrusted data is made safer
-//   via the `Cfg` associated type in the [Read] trait, allowing users to impose
-//   limits (like maximum lengths)".
-// - codec/src/config.rs:8-10 (`RangeCfg`): "Configuration for limiting the
-//   range of a value. This is often used to configure length limits for
-//   variable-length types or collections."
-// - codec/src/config.rs:131 (`RangeCfg::contains`): "Returns true if the value
-//   is within this range."
-// - codec/src/error.rs:48-53 (`InvalidLength`): "A length prefix (e.g., for
+// - codec/src/lib.rs, module docs: "Deserialization of untrusted data is made
+//   safer via the `Cfg` associated type in the [Read] trait, allowing users to
+//   impose limits (like maximum lengths)".
+// - codec/src/config.rs, `RangeCfg`: "Configuration for limiting the range of a
+//   value. This is often used to configure length limits for variable-length
+//   types or collections."
+// - codec/src/config.rs, `RangeCfg::contains`: "Returns true if the value is
+//   within this range."
+// - codec/src/error.rs, `Error::InvalidLength`: "A length prefix (e.g., for
 //   `Vec<T>`, `Bytes`, `HashMap<K, V>`) was decoded, but its value fell outside
 //   the permitted range. [...] The contained `usize` is the invalid length that
 //   was decoded."
-// - codec/src/types/primitives.rs:11-13: "When decoding a `usize`, callers must
-//   supply a [RangeCfg] to bound the allowable value." Together with
-//   codec/src/codec.rs:223-224 ("Implementations must return [Error] if
-//   decoding fails due to [...] violation of constraints imposed by the
-//   `cfg`") this promises an error for a bare `usize` outside its range, but
-//   not which one: `InvalidLength` is documented for a length prefix. So the
-//   bare `usize` is only required to fail.
-// - codec/src/extensions.rs:90 (`decode_range`): "Decodes a value using only
-//   a range configuration."
+// - codec/src/types/primitives.rs, module docs: "When decoding a `usize`,
+//   callers must supply a [RangeCfg] to bound the allowable value." Together
+//   with codec/src/codec.rs, `Read::read_cfg` ("Implementations must return
+//   [Error] if decoding fails due to [...] violation of constraints imposed by
+//   the `cfg`") this promises an error for a bare `usize` outside its range,
+//   but not which one: `InvalidLength` is documented for a length prefix. So
+//   the bare `usize` is only required to fail.
+// - codec/src/extensions.rs, `DecodeRangeExt::decode_range`: "Decodes a value
+//   using only a range configuration."
 
 /// Reference: is `n` inside the two bounds?
 fn within(n: usize, start: Bound<usize>, end: Bound<usize>) -> bool {
@@ -741,20 +740,20 @@ fn ephyra_p3_length_limits_are_enforced(l: Limits) {
 //
 // Contracts:
 //
-// - codec/src/codec.rs:226-228 (`Read::read_cfg`): "Parsing a message (often
-//   untrusted) should never result in a panic."
-// - codec/src/codec.rs:223-224: "Implementations must return [Error] if
-//   decoding fails due to invalid data, insufficient bytes in the buffer, or
+// - codec/src/codec.rs, `Read::read_cfg`: "Parsing a message (often untrusted)
+//   should never result in a panic."
+// - codec/src/codec.rs, `Read::read_cfg`: "Implementations must return [Error]
+//   if decoding fails due to invalid data, insufficient bytes in the buffer, or
 //   violation of constraints imposed by the `cfg`."
-// - codec/src/error.rs:10-13 (`EndOfBuffer`): "the input buffer (`Buf`) did not
+// - codec/src/error.rs, `Error::EndOfBuffer`: "the input buffer (`Buf`) did not
 //   contain enough bytes to read the next piece of data [...] This suggests the
 //   input data is truncated or incomplete."
-// - codec/src/util.rs:41-43 (`read_fixed_vec`): "Checks that the buffer
-//   contains all `len * SIZE` bytes before allocating or decoding, so a
-//   maliciously large `len` fails fast with [Error::EndOfBuffer]."
-// - codec/src/lib.rs:54-62 (Decode Inputs): owned `Bytes`, `Viewing`, an owned
-//   `Vec<u8>` and `Copying` are four inputs to the same decoder; they differ
-//   in who owns the bytes, so the decoded value must be the same.
+// - codec/src/util.rs, `read_fixed_vec`: "Checks that the buffer contains all
+//   `len * SIZE` bytes before allocating or decoding, so a maliciously large
+//   `len` fails fast with [Error::EndOfBuffer]."
+// - codec/src/lib.rs, module docs, Decode Inputs: owned `Bytes`, `Viewing`, an
+//   owned `Vec<u8>` and `Copying` are four inputs to the same decoder; they
+//   differ in who owns the bytes, so the decoded value must be the same.
 // - The round-trip contract of property 2, applied to every value that the
 //   decoder accepts.
 //
@@ -930,25 +929,24 @@ fn ephyra_p4_untrusted_bytes_never_panic_and_accepted_values_roundtrip(h: Hostil
 //
 // Contracts:
 //
-// - codec/src/codec.rs:10-13 (`FixedSize`): "the encoded representation of
-//   this type *always* has the same byte length, regardless of the specific
-//   value."
-// - codec/src/codec.rs:366 (`encode_fixed`): "Encodes `self` into a
-//   fixed-size byte array `[u8; N]`."; codec/src/codec.rs:396
-//   (`decode_fixed`): "Decodes a value from a fixed-size byte array `[u8; N]`,
-//   ensuring all bytes are consumed."
-// - codec/src/codec.rs:21-25 (`MaxEncodeSize`): "An upper bound on the encoded
-//   size, in bytes."
-// - codec/src/lib.rs:39-50 (Size Bounds): "a `UInt<u64>` field contributes ten
-//   bytes even when its valid values fit in one"; "`util::max_items_size`
-//   gives a 133-byte bound for a `Vec<u8>` limited to 128 bytes: 128 bytes of
-//   data and a five-byte `UInt<u32>` length prefix"; "[FixedSize] types
-//   contribute their fixed size. Composite types sum their fields' bounds, and
-//   enums add their tag's bound to the largest variant bound."
-// - codec/src/util.rs:26-28 (`max_items_size`): "Returns an upper bound on the
-//   encoded size of a `Vec` or other length-prefixed sequence of `len` items
-//   that each encode to at most `item_size` bytes, with the length prefix at
-//   its widest."
+// - codec/src/codec.rs, `FixedSize`: "the encoded representation of this type
+//   *always* has the same byte length, regardless of the specific value."
+// - codec/src/codec.rs, `EncodeFixed::encode_fixed`: "Encodes `self` into a
+//   fixed-size byte array `[u8; N]`."; codec/src/codec.rs,
+//   `DecodeFixed::decode_fixed`: "Decodes a value from a fixed-size byte array
+//   `[u8; N]`, ensuring all bytes are consumed."
+// - codec/src/codec.rs, `MaxEncodeSize`: "An upper bound on the encoded size,
+//   in bytes."
+// - codec/src/lib.rs, module docs, Size Bounds: "a `UInt<u64>` field
+//   contributes ten bytes even when its valid values fit in one";
+//   "`util::max_items_size` gives a 133-byte bound for a `Vec<u8>` limited to
+//   128 bytes: 128 bytes of data and a five-byte `UInt<u32>` length prefix";
+//   "[FixedSize] types contribute their fixed size. Composite types sum their
+//   fields' bounds, and enums add their tag's bound to the largest variant
+//   bound."
+// - codec/src/util.rs, `max_items_size`: "Returns an upper bound on the encoded
+//   size of a `Vec` or other length-prefixed sequence of `len` items that each
+//   encode to at most `item_size` bytes, with the length prefix at its widest."
 //
 // Not asserted: what `max_items_size` does when that bound (the items plus a
 // five-byte prefix) does not fit a `usize`. The check below runs on arguments

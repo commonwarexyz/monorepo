@@ -222,7 +222,8 @@ Excluded because the contract forbids them:
 
 - `read_at_buf` with buffer capacity below `len` (documented panic).
 - Empty version ranges (`versions` must be non-empty).
-- Partition names that differ only by letter case (`lib.rs:716-718`).
+- Partition names that differ only by letter case (`runtime/src/lib.rs`, `Storage`
+  "Partition Names": "partition names that differ only by letter case must not both be used").
 
 ### Names
 
@@ -468,9 +469,10 @@ confirmed as RF-2, RF-1 and RF-3 in `runtime/fuzz/FINDINGS.md`. The fourth is ne
 both outcomes are errors:
 
 - `write_at(offset, empty)` without `SYNC` grows a memory blob to `offset`
-  (`runtime/src/storage/memory/mod.rs:469-488`). On tokio it is a no-op
-  (`runtime/src/storage/tokio/blob.rs:633`).
-- A zero-length read past the end succeeds on tokio (`tokio/blob.rs:511`) and fails with
+  (`runtime/src/storage/memory/mod.rs`, `Blob::write_at`). On tokio it is a no-op
+  (`runtime/src/storage/tokio/blob.rs`, the empty-write early return in `Blob::write_at`).
+- A zero-length read past the end succeeds on tokio (`tokio/blob.rs`, the zero-length early
+  return in `Blob::read_at_buf`) and fails with
   `BlobInsufficientLength` on memory.
 - An empty blob name, a blob name over 127 bytes, and a partition over 255 characters fail to open
   on tokio (filesystem limits) and succeed on memory. A failed tokio open has already created the
@@ -494,7 +496,7 @@ SF-R17), and the trigger of RF-2 is a named coverage exception (SF-X5).
 | Term | Meaning |
 |---|---|
 | Session | One start of a `deterministic::Runner`. The first session starts from a `deterministic::Config`, every later one from the checkpoint of the session before it |
-| Crash | The end of a session that another session follows. The root task returns with every handle dropped, `start_and_recover` returns the checkpoint, and the next session starts with `deterministic::Runner::from(checkpoint)`. The runtime decides at this point what happens to every unsynced mutation (`runtime/src/deterministic.rs:689-695`) |
+| Crash | The end of a session that another session follows. The root task returns with every handle dropped, `start_and_recover` returns the checkpoint, and the next session starts with `deterministic::Runner::from(checkpoint)`. The runtime decides at this point what happens to every unsynced mutation (`runtime/src/deterministic.rs`, `Runner::run`, the storage `crash()` call at the end of a session) |
 | Baseline operation | One of the four fixed operations every run starts with (SF-R3) |
 | Input operation | An operation decoded from the fuzz input |
 | Verification operation | An open, read or scan that the oracle issues by itself, to learn the state. It is never decoded from the input |
@@ -529,7 +531,8 @@ SF-R17), and the trigger of RF-2 is a named coverage exception (SF-X5).
   `deterministic::Config::new().with_rng(FuzzRng::from(entropy))` with
   `with_storage_fault_config(FaultConfig::default())`, where `entropy` comes from the shared
   decoder. Faults MUST be armed through `Context::storage_fault_config()`
-  (`runtime/src/deterministic.rs:1101`) and MUST NOT be set in the start configuration.
+  (`runtime/src/deterministic.rs`, `Context::storage_fault_config`) and MUST NOT be set in the
+  start configuration.
 - **SF-R3.** A run MUST be, in this order:
   1. The four baseline operations, unarmed: `Open` slot 0 on partition `p0`, name `a`, versions
      `0..=0`; `Write` slot 0, offset 0, `BASELINE_LEN` = 64 bytes in one chunk, no `SYNC`;
@@ -558,8 +561,8 @@ SF-R17), and the trigger of RF-2 is a named coverage exception (SF-X5).
 No input operation for the empty input, and between 1 and `MAX_OPS` = 48 input operations for
 every other input (SF-R5). Handles live in `SLOTS` = 4 slots, each
 held in an `Arc`, so every blob call goes through the `Arc<B>` forwarding implementation
-(`runtime/src/lib.rs:1004`). An operation that names an empty slot is skipped. `Open` on an
-occupied slot first drops the old handle, also when the open then fails.
+(`runtime/src/lib.rs`, `impl<B: Blob> Blob for Arc<B>`). An operation that names an empty slot is
+skipped. `Open` on an occupied slot first drops the old handle, also when the open then fails.
 
 | Operation | Parameters | Call | Fault it may carry |
 |---|---|---|---|
@@ -643,9 +646,10 @@ The bounds follow from the 50 ms target. They are derived, and how they are chec
 - **SF-R7.** The harness MUST treat a write fault with `failure_rate` 0 as the crash policy of a
   write that succeeds, not as a failure. The backend keeps bytes of an unsynced write at a crash
   only when the write was issued under a `WriteConfig` with a retention rate above zero
-  (`runtime/src/storage/faulty.rs:342-349`, `867-879`), so this fault lets the write be torn at a
-  later crash. The same holds for the resize fault at 50 percent: the resize may succeed, and a
-  success may be kept at a later crash (`faulty.rs:352-363`).
+  (`runtime/src/storage/faulty.rs`, `Oracle::check_write_fault` and the pending-write selection
+  in `Blob::write_at`), so this fault lets the write be torn at a later crash. The same holds for
+  the resize fault at 50 percent: the resize may succeed, and a success may be kept at a later
+  crash (`faulty.rs`, `Oracle::check_resize_fault`).
 - **SF-R8.** Decoding MUST keep the success path common: an operation that may carry a fault MUST
   carry one in 1 draw of 4, and a `Write` that carries a write fault MUST have `failure_rate` 1
   in 1 draw of 2. The two draws MUST be made by two public samplers of the library module
@@ -677,7 +681,8 @@ The bounds follow from the 50 ms target. They are derived, and how they are chec
 - **SF-R9.** Every verification operation MUST run while the configuration equals
   `FaultConfig::default()`. The configuration MUST also equal the default at every crash, so
   every session starts without faults (the checkpoint carries the configuration,
-  `runtime/src/deterministic.rs:694`) [9].
+  `runtime/src/deterministic.rs`, `Runner::run`, where `storage_fault_cfg` is read at the crash)
+  [9].
 - **SF-R10.** Recovery verification. At the start of every session after a crash, before any
   input operation, the oracle MUST:
   1. scan `p0` and `p1`. For a partition the model holds, the scan must succeed and return
@@ -713,8 +718,8 @@ The bounds follow from the 50 ms target. They are derived, and how they are chec
 
 ### Model
 
-The model is the public contract of `Storage` and `Blob` (`runtime/src/lib.rs:685-1001`), with the
-failure and crash rules of the intents on top. It holds:
+The model is the public contract of `Storage` and `Blob` (`runtime/src/lib.rs`, the `Storage` and
+`Blob` traits), with the failure and crash rules of the intents on top. It holds:
 
 - which partitions exist, and the live names of each;
 - for each blob generation: its version, its base, its log, and whether it was removed; and,
@@ -797,7 +802,8 @@ Reads never change the model. Their rules are SF-I1 and SF-I2.
 
 A handle whose generation was removed stays checked for reads (SF-I15). The first mutation through
 it (`Write`, `Resize`, `Sync`, `StartSync`) makes it unchecked: the contract leaves such a
-mutation unspecified (`runtime/src/lib.rs:794-795`), so its result and every later result through
+mutation unspecified (`runtime/src/lib.rs`, `Storage::remove`: "Mutating a removed blob [...] is
+unspecified"), so its result and every later result through
 that handle are not judged, except the length of returned buffers (SF-X8).
 
 #### Transitions of injected failures
@@ -826,7 +832,9 @@ that handle are not judged, except the length of returned buffers (SF-X8).
 - **SF-R17.** An injected failure of a `Write` with `SYNC` that carries a sync fault and no write
   fault with `failure_rate` 1. This is the second kind of failed write of [13], the sync fault in
   a fused write: all bytes are applied, none is durable, and the caller still gets an error
-  (`runtime/src/storage/faulty.rs:854-865`; unit tests at `faulty.rs:2035` and `2479`). The
+  (`runtime/src/storage/faulty.rs`, the sync-fault branch of `Blob::write_at`; unit tests
+  `test_faulty_storage_write_at_sync_failure_is_not_durable` and
+  `test_sync_failure_journals_the_successful_inner_write` in the same file). The
   length search and whole-blob read of SF-R11 give the new view. It MUST satisfy SF-I4a to
   SF-I4c, and every byte in the write's range MUST be the submitted byte (SF-I4d). The log MUST
   get `Torn(offset, bytes)` for the whole write: these bytes may tear at a crash like an unsynced
@@ -854,10 +862,10 @@ Behaviour that is not judged, because the contract leaves it open:
   documented variants of SF-I3a and SF-I3b (Future work 9).
 - Whether a remove of a target the model does not hold, or a scan of a partition the model does
   not hold, succeeds or fails on a valid partition. `Storage::remove` and `Storage::scan` promise
-  no error there (`runtime/src/lib.rs:778-805`). Only invented names and a changed namespace are
-  violations.
+  no error there (`runtime/src/lib.rs`, `Storage::remove` and `Storage::scan`). Only invented
+  names and a changed namespace are violations.
 - Which version of the requested range a new blob gets. The contract does not choose one
-  (`runtime/src/lib.rs:756-759`).
+  (`runtime/src/lib.rs`, `Storage::open_versioned` "Versions").
 - Whether an armed operation fails (SF-C7).
 
 ### Invariants
@@ -891,20 +899,20 @@ names the row that failed (SF-R19).
 
 | Id | What must hold | Measured when | Source | Class |
 |---|---|---|---|---|
-| SF-I1a | A read through a checked handle that succeeds returns the view's bytes of its range | every unarmed baseline or input read operation through a checked handle of a live generation that succeeds | `Blob` "Concurrency" (`lib.rs:915-921`) | `read_bytes` |
-| SF-I1b | A read of 1 byte or more through a checked handle succeeds exactly when it ends at or before the view length. A zero-length read that starts at or before the view length succeeds. A read at an overflow-edge offset fails | every unarmed baseline or input read operation through a checked handle of a live generation | `Blob::read_at`: "Read exactly `len` bytes" (`lib.rs:937-945`) | `read_len` |
-| SF-I2a | A successful `read_at_buf` returns the caller's buffers: capacity, chunk shape and start addresses, as in `storage_differential` | every unarmed `ReadAtBuf` that succeeds | `Blob::read_at_buf` (`lib.rs:923-935`) | `buffer_layout` |
-| SF-I2b | `read_many` yields every range index exactly once and no other index, unless it yields an error | every unarmed `ReadMany` | `Blob::read_many` (`lib.rs:947-958`) | `read_many` |
-| SF-I2c | An awaited `start_read_many` that succeeds returns exactly one buffer per range | every unarmed `StartReadMany` whose handle is awaited and succeeds | `Blob::start_read_many` (`lib.rs:961-975`) | `read_many` |
-| SF-I3a | An open that is valid in every other way (valid partition, recorded version inside the range) returns `BlobAlreadyOpen` while a handle of the live generation is alive | every unarmed open of a live name on a valid partition while a handle of its generation is alive and its recorded version is inside the range | `open_versioned` "Uniqueness" (`lib.rs:740-747`) | `open_error` |
-| SF-I3b | An open of a live name whose recorded version is outside the requested range returns `BlobVersionMismatch` | every unarmed open of a live name whose recorded version is outside the requested range | `open_versioned` "Versions" (`lib.rs:756-759`) | `open_error` |
-| SF-I3c | An open on an invalid partition fails | every unarmed open on an invalid partition | `Storage` "Partition Names" (`lib.rs:711-718`) | `open_error` |
+| SF-I1a | A read through a checked handle that succeeds returns the view's bytes of its range | every unarmed baseline or input read operation through a checked handle of a live generation that succeeds | `Blob` "Concurrency" (`runtime/src/lib.rs`) | `read_bytes` |
+| SF-I1b | A read of 1 byte or more through a checked handle succeeds exactly when it ends at or before the view length. A zero-length read that starts at or before the view length succeeds. A read at an overflow-edge offset fails | every unarmed baseline or input read operation through a checked handle of a live generation | `Blob::read_at`: "Read exactly `len` bytes" (`runtime/src/lib.rs`) | `read_len` |
+| SF-I2a | A successful `read_at_buf` returns the caller's buffers: capacity, chunk shape and start addresses, as in `storage_differential` | every unarmed `ReadAtBuf` that succeeds | `Blob::read_at_buf` (`runtime/src/lib.rs`) | `buffer_layout` |
+| SF-I2b | `read_many` yields every range index exactly once and no other index, unless it yields an error | every unarmed `ReadMany` | `Blob::read_many` (`runtime/src/lib.rs`) | `read_many` |
+| SF-I2c | An awaited `start_read_many` that succeeds returns exactly one buffer per range | every unarmed `StartReadMany` whose handle is awaited and succeeds | `Blob::start_read_many` (`runtime/src/lib.rs`) | `read_many` |
+| SF-I3a | An open that is valid in every other way (valid partition, recorded version inside the range) returns `BlobAlreadyOpen` while a handle of the live generation is alive | every unarmed open of a live name on a valid partition while a handle of its generation is alive and its recorded version is inside the range | `open_versioned` "Uniqueness" (`runtime/src/lib.rs`) | `open_error` |
+| SF-I3b | An open of a live name whose recorded version is outside the requested range returns `BlobVersionMismatch` | every unarmed open of a live name whose recorded version is outside the requested range | `open_versioned` "Versions" (`runtime/src/lib.rs`) | `open_error` |
+| SF-I3c | An open on an invalid partition fails | every unarmed open on an invalid partition | `Storage` "Partition Names" (`runtime/src/lib.rs`) | `open_error` |
 | SF-I3d | A remove on an invalid partition fails | every unarmed `Remove` on an invalid partition | `Storage` "Partition Names" | `partition_name` |
 | SF-I3e | A scan on an invalid partition fails | every unarmed `Scan` on an invalid partition | `Storage` "Partition Names" | `partition_name` |
 | SF-I3f | A blob opened under a name that is not live gets a version inside the requested range (`0` for `OpenDefault`) | every successful open of a name that is not live | `open_versioned` "Versions" | `create` |
-| SF-I3g | An open of a live name returns the version recorded when the generation was created | every successful open of a live name: a reopen in a session, and the opens of the recovery verification | `open_versioned` "Versions"; "An Ok result indicates the blob is durably created" (`lib.rs:749-751`) | `open_version` |
-| SF-I3h | A blob opened under a name that is not live is empty, whatever an earlier generation of that name held | every successful open of a name that is not live | `Storage::remove`: a removed name opens as "a new, independent blob" (`lib.rs:790-792`) | `create` |
-| SF-I4a | After an injected failed `Write`: every byte below the old length and outside the write's range is unchanged | every injected failed `Write`, on the length search and whole-blob read after it (SF-R11) | [13], `Blob` "Durability" (`lib.rs:909-913`) | `failed_write` |
+| SF-I3g | An open of a live name returns the version recorded when the generation was created | every successful open of a live name: a reopen in a session, and the opens of the recovery verification | `open_versioned` "Versions"; "An Ok result indicates the blob is durably created" (`runtime/src/lib.rs`, `open_versioned` "Durability") | `open_version` |
+| SF-I3h | A blob opened under a name that is not live is empty, whatever an earlier generation of that name held | every successful open of a name that is not live | `Storage::remove`: a removed name opens as "a new, independent blob" (`runtime/src/lib.rs`) | `create` |
+| SF-I4a | After an injected failed `Write`: every byte below the old length and outside the write's range is unchanged | every injected failed `Write`, on the length search and whole-blob read after it (SF-R11) | [13], `Blob` "Durability" (`runtime/src/lib.rs`) | `failed_write` |
 | SF-I4b | After an injected failed `Write`: every byte inside the write's range is the submitted byte, or the old byte when the position is below the old length, or zero when the position is at or past the old length | every injected failed `Write`, on the same reads | [13] | `failed_write` |
 | SF-I4c | After an injected failed `Write`: the length is the old length, or the highest position that holds its submitted byte plus one when that is larger; every position at or past the old length that does not hold its submitted byte is zero; the blob is never longer than the write's end or the old length | every injected failed `Write`, on the same reads | [13] | `failed_write` |
 | SF-I4d | After a sync fault in a fused write (SF-R17): every byte in the write's range is the submitted byte | every injected failed fused `Write` with a sync fault (SF-R17), on the same reads | [13], second kind | `failed_write` |
@@ -916,16 +924,16 @@ names the row that failed (SF-R19).
 | SF-I6c | An injected failure of a `Sync` or of an awaited `StartSync` changes nothing the storage shows: the length and bytes of the view are the same. Whether it made data durable cannot be seen (SF-R15) | every injected failed `Sync` or awaited `StartSync`, on the unchanged check after it | [15], SF-C3 | `failed_op_effect` |
 | SF-I6d | An injected failure of a remove changes nothing the storage shows: the names are the same | every injected failed `Remove` on a valid partition, on the scan after it | [16] | `failed_op_effect` |
 | SF-I6e | An injected failure of a scan changes nothing the storage shows: the names are the same | every injected failed `Scan` on a valid partition, on the scan after it | SF-C3 | `failed_op_effect` |
-| SF-I7 | A completed sync is a durability cut: everything written and resized before it survives a crash, also when an earlier sync failed | the recovery verification of a generation whose history since its creation or last recovery holds a sync cut that closed a log with at least one entry | `Blob::sync` (`lib.rs:993`), [15] | `crash_image` |
-| SF-I8 | The bytes of a successful `Write` with `SYNC` survive a crash | the recovery verification of a generation whose log or history holds a `Kept` entry of a successful `SYNC` write | `WriteOptions::SYNC` (`lib.rs:859-863`), [15] | `crash_image` |
+| SF-I7 | A completed sync is a durability cut: everything written and resized before it survives a crash, also when an earlier sync failed | the recovery verification of a generation whose history since its creation or last recovery holds a sync cut that closed a log with at least one entry | `Blob::sync` (`runtime/src/lib.rs`), [15] | `crash_image` |
+| SF-I8 | The bytes of a successful `Write` with `SYNC` survive a crash | the recovery verification of a generation whose log or history holds a `Kept` entry of a successful `SYNC` write | `WriteOptions::SYNC` (`runtime/src/lib.rs`), [15] | `crash_image` |
 | SF-I9 | The bytes a `Write` left in the view after a write fault survive a crash | the recovery verification of a generation whose log or history holds a `Kept` entry of a failed write with at least one marked byte | [13], first kind | `crash_image` |
 | SF-I10 | The intermediate length of a failed `Resize` is replayed at a crash | the recovery verification of a generation whose log or history holds a `ForcedResize` | [14] | `crash_image` |
-| SF-I11 | A successful reopen is a durability cut: the image read after the reopen survives a later crash, and no mutation issued before the reopen can change it at that crash | the recovery verification of a generation whose history holds a reopen cut | `Storage` "Durability" (`lib.rs:692-701`), [12] | `crash_image` |
-| SF-I12 | The image a reopen shows is in `Reach_reopen` | every successful reopen in a session of a generation whose log holds at least one entry, on the image read after it | `Blob`: "When a blob is dropped, any unsynced changes may be discarded" (`lib.rs:905-907`), SF-C5 | `reopen_image` |
+| SF-I11 | A successful reopen is a durability cut: the image read after the reopen survives a later crash, and no mutation issued before the reopen can change it at that crash | the recovery verification of a generation whose history holds a reopen cut | `Storage` "Durability" (`runtime/src/lib.rs`), [12] | `crash_image` |
+| SF-I12 | The image a reopen shows is in `Reach_reopen` | every successful reopen in a session of a generation whose log holds at least one entry, on the image read after it | `Blob`: "When a blob is dropped, any unsynced changes may be discarded" (`runtime/src/lib.rs`), SF-C5 | `reopen_image` |
 | SF-I13 | Unsynced mutations tear only by the replay rules: an image after a crash that no undoing of SF-I7 to SF-I11 explains is a violation of this row | the recovery verification of a generation whose log holds at least one `Torn` or `MaybeResize` entry | [11], `Blob` "Durability" | `crash_image` |
-| SF-I14a | A scan inside a session that succeeds returns exactly the model's live names of the partition, each once. For a partition the model does not hold it returns no name | every unarmed input `Scan` on a valid partition that succeeds | `Storage::scan` (`lib.rs:802-804`), [16] | `scan` |
-| SF-I14b | After a crash the namespace is the model's: a scan of a partition the model holds succeeds and returns exactly its live names, each once; a scan of a partition the model does not hold fails or returns no name; every live name opens. So every blob whose open returned `Ok` exists, and no blob whose remove returned `Ok` does | the scans and opens of every recovery verification | `open_versioned` "Durability" (`lib.rs:749-751`), `remove` (`lib.rs:782`), [16] | `crash_namespace` |
-| SF-I15 | A read through a handle opened before a remove of its blob follows SF-I1a and SF-I1b against that handle's view, unsynced bytes included | every unarmed read operation through a checked handle of a removed generation | `Storage::remove` "Read-after-remove" (`lib.rs:784-792`), [16] | `removed_read` |
+| SF-I14a | A scan inside a session that succeeds returns exactly the model's live names of the partition, each once. For a partition the model does not hold it returns no name | every unarmed input `Scan` on a valid partition that succeeds | `Storage::scan` (`runtime/src/lib.rs`), [16] | `scan` |
+| SF-I14b | After a crash the namespace is the model's: a scan of a partition the model holds succeeds and returns exactly its live names, each once; a scan of a partition the model does not hold fails or returns no name; every live name opens. So every blob whose open returned `Ok` exists, and no blob whose remove returned `Ok` does | the scans and opens of every recovery verification | `open_versioned` "Durability", `remove`: "An Ok result indicates the blob is durably removed" (`runtime/src/lib.rs`), [16] | `crash_namespace` |
+| SF-I15 | A read through a handle opened before a remove of its blob follows SF-I1a and SF-I1b against that handle's view, unsynced bytes included | every unarmed read operation through a checked handle of a removed generation | `Storage::remove` "Read-after-remove" (`runtime/src/lib.rs`), [16] | `removed_read` |
 | SF-I16a | An unarmed open on a valid partition succeeds, unless SF-I3a or SF-I3b names an error | every unarmed baseline or input open on a valid partition for which SF-I3a and SF-I3b name no error | fuzzing guide: unexpected errors panic | `unexpected_error` |
 | SF-I16b | An unarmed `Write` through a checked handle of a live generation succeeds | every unarmed baseline or input `Write` through a checked handle of a live generation | same | `unexpected_error` |
 | SF-I16c | An unarmed `Resize` through a checked handle of a live generation succeeds | every unarmed `Resize` through a checked handle of a live generation | same | `unexpected_error` |
@@ -934,7 +942,7 @@ names the row that failed (SF-R19).
 | SF-I16f | An unarmed remove of a name or a partition the model holds succeeds | every unarmed `Remove` of a name or a partition the model holds | `Storage::remove` | `unexpected_error` |
 | SF-I16g | An unarmed scan of a partition the model holds succeeds | every unarmed input `Scan` of a partition the model holds | `Storage::scan` | `unexpected_error` |
 | SF-I17 | No panic, abort or sanitizer report | the whole run | fuzzing guide | none (the panic itself) |
-| SF-I18a | The size an open returns is at most `MAX_SIZE`. The check fails before any read or allocation that uses the size | every successful open, baseline, input or verification | `open_versioned` "Returns" (`lib.rs:768-770`); no operation of the run makes a longer blob | `open_size` |
+| SF-I18a | The size an open returns is at most `MAX_SIZE`. The check fails before any read or allocation that uses the size | every successful open, baseline, input or verification | `open_versioned` "Returns" (`runtime/src/lib.rs`); no operation of the run makes a longer blob | `open_size` |
 | SF-I18b | The size an open returns is the blob's length: a 1-byte read at the size fails, a 1-byte read just below it succeeds, and the read of the whole blob at that size succeeds | every successful open, on the two 1-byte reads and the whole-blob read after it (SF-R11) | `open_versioned` "Returns" | `open_size` |
 
 A read inside the view that fails is SF-I1b, not SF-I16. For a handle of a removed generation it is
@@ -984,8 +992,9 @@ breaks one of the invariants above. Three things look like findings and are not:
 
 If the target finds something, the most intricate code is the most likely place, though nothing
 there is suspected: the bookkeeping of durable ranges over pending writes and resizes
-(`faulty.rs:665-771`, `record_durable_range`), the crash replay order (`faulty.rs:520-569`), and
-the retirement of pending outcomes at remove and reopen (`faulty.rs:470-518`).
+(`faulty.rs`, `Blob::record_durable_range`), the crash replay order (`faulty.rs`, `Storage::crash`),
+and the retirement of pending outcomes at remove and reopen (`faulty.rs`, `Storage::retire_names`,
+`Storage::remove_retired` and `Storage::admit`).
 
 ### API coverage and its exceptions
 
@@ -998,14 +1007,14 @@ both `PartialWriteMode` values and both fields of `ResizeConfig`.
 
 | Id | Not covered | Reason |
 |---|---|---|
-| SF-X1 | `read_at_buf` with buffer capacity below `len` | Documented panic (`lib.rs:927-929`) |
-| SF-X2 | Empty version ranges | The contract forbids them: `versions` must be non-empty (`lib.rs:758-759`) |
-| SF-X3 | Partition names that differ only by letter case | The contract forbids using both (`lib.rs:716-718`) |
+| SF-X1 | `read_at_buf` with buffer capacity below `len` | Documented panic (`runtime/src/lib.rs`, `Blob::read_at_buf` "Panics": "Panics if `len` exceeds the total capacity of `bufs`") |
+| SF-X2 | Empty version ranges | The contract forbids them: `versions` must be non-empty (`runtime/src/lib.rs`, `Storage::open_versioned` "Versions") |
+| SF-X3 | Partition names that differ only by letter case | The contract forbids using both (`runtime/src/lib.rs`, `Storage` "Partition Names") |
 | SF-X4 | Dropping the future of an operation before it completes (`Storage` "Cancellation") | A crash inside an operation is out of scope [7]. Dropped `start_sync` and `start_read_many` handles are covered: they are handles, not operation futures |
 | SF-X5 | An empty `write_at` without `SYNC` that starts past the end of the blob. Such a write is issued only at offsets inside the blob | A named coverage exception [17]. The call triggers RF-2 (#5752, open) on the deterministic backend alone, and with no allowlist every campaign would stop on it within seconds. `storage_differential` keeps covering it under its RF-2 entry |
 | SF-X6 | `write_at` and `resize` past `MAX_SIZE`, overflow-edge offsets included | The memory backend allocates up to `offset + len` before any check, so the process would abort (Future work 7 and 8) |
-| SF-X7 | A crash in the middle of an accepted `start_sync` | Not reachable: the memory backend finishes the sync before `start_sync` returns its handle (`runtime/src/storage/memory/mod.rs:514-516`). A recorded limit [6] |
-| SF-X8 | The results of mutations through a handle of a removed blob | The calls are issued, for SF-I17. Their results are unspecified by the contract (`lib.rs:794-795`) |
+| SF-X7 | A crash in the middle of an accepted `start_sync` | Not reachable: the memory backend finishes the sync before `start_sync` returns its handle (`runtime/src/storage/memory/mod.rs`, `Blob::start_sync`). A recorded limit [6] |
+| SF-X8 | The results of mutations through a handle of a removed blob | The calls are issued, for SF-I17. Their results are unspecified by the contract (`runtime/src/lib.rs`, `Storage::remove`: "Mutating a removed blob [...] is unspecified") |
 | SF-X9 | `Context::logical_blob` and the raw-image accessors of the memory storage | Test utilities, not part of `Storage` or `Blob`. The oracle must see only what a caller of the public contract sees |
 
 ### What the recovery targets of `storage/fuzz` do, and what this target adds
@@ -1022,7 +1031,7 @@ Reused from them:
 - the crash recipe: `start_and_recover`, then `deterministic::Runner::from(checkpoint)`;
 - arming at run time through `Context::storage_fault_config()`, and resetting it to
   `FaultConfig::default()` before every crash and before every check
-  (`storage/fuzz/src/lib.rs:135-169`);
+  (`storage/fuzz/src/lib.rs`, `faulted_recovery`);
 - a bounded chain of crash and recovery cycles (their chain is 1 to 4; ours is 1 to 4 crashes);
 - a clean final check after the last crash.
 
@@ -1140,7 +1149,8 @@ The target file `runtime/fuzz/fuzz_targets/storage_faults.rs` holds only the typ
   records of
   baseline and input operations and the same images at every recovery verification [20]. This
   holds because verification runs under `FaultConfig::default()`, and a rate of 0 draws nothing
-  from the RNG (`runtime/src/storage/faulty.rs:1857`).
+  from the RNG (`runtime/src/storage/faulty.rs`, the test
+  `test_probability_endpoints_do_not_consume_randomness`).
 - **SF-R26.** The harness MUST NOT read the wall clock or OS randomness, and no result MAY depend
   on the iteration order of a hash map or on task timing [20, 21].
 
@@ -1261,13 +1271,15 @@ failure. A differing byte is a byte other than the one at that position.
 - **SF-R27.** One fault MUST be planted in a copy of `runtime/src` (SF-R28) to show that the target finds a bug in the
   runtime itself and not only at the seam [25]. The patch is the diff below, in this rule, and
   this rule holds its only copy. It removes the retirement of pending crash outcomes
-  from `Context::open_versioned` (`runtime/src/deterministic.rs:1580` and `1582`, the `admit`
-  call), so a successful reopen is no longer a durability cut: a write that was unsynced before
-  the reopen can still land at the next crash and change bytes the reopen had shown. It breaks
+  from `Context::open_versioned` (`runtime/src/deterministic.rs`, `impl crate::Storage for
+  Context`, the `admit` call and the `drop(retired)` after it), so a successful reopen is no
+  longer a durability cut: a write that was unsynced before the reopen can still land at the
+  next crash and change bytes the reopen had shown. It breaks
   SF-I11 and looks like a real omission. None of the ten recovery targets checks this rule at the
   blob level. The removed call is the only caller of the faulty storage's `admit`
-  (`runtime/src/storage/faulty.rs:506`), and the workspace denies warnings (`Cargo.toml:91`), so
-  without more the plant build stops on `dead_code` before the target runs. The patch MUST
+  (`runtime/src/storage/faulty.rs`, `Storage::admit`), and the workspace denies warnings
+  (`Cargo.toml`, `[workspace.lints.rust]`: `warnings = "deny"`), so without more the plant build
+  stops on `dead_code` before the target runs. The patch MUST
   therefore also add one line, `#[allow(dead_code)]`, directly above that method, and MUST NOT
   add any other line. The attribute changes no behaviour. It is part of the plant, so SF-R28
   keeps it out of `runtime/src` in the repository tree and in the delivered diff. The plant build
@@ -1405,11 +1417,11 @@ Choices the intents file leaves open, each stated as it is.
 
 | Id | Choice | Reason | What it costs |
 |---|---|---|---|
-| SF-C1 | Failure rates are 0 or 1, except the resize fault at 50 percent. Retention rates are 0, 25, 50, 75, 100 | The input, not the RNG, decides which operation fails, so the fuzzer steers failures directly. The resize needs 50 percent, because the backend keeps a successful resize at a crash only by the same rate (`faulty.rs:352-363`) | Whether a resize armed at 50 percent fails is decided by the runtime RNG, which the input also sets |
-| SF-C2 | An unarmed `start_sync` whose handle is dropped counts as a completed sync | The memory backend finishes the sync before it returns the handle (`memory/mod.rs:514-516`; `faulty.rs:1443`). This asserts implementation behaviour: the contract only says the sync continues | On a backend with a delayed sync this rule would have to wait for the completion |
-| SF-C3 | An injected failure of an open, a read, a scan or a sync changes nothing | The injector fails these before it touches the storage (`faulty.rs:586-588`, `604-606`, `781-783`, `905-907`). Intent [16] says it for remove; this extends it | A future injector that fails after a partial effect would be reported, and this spec would then change first |
-| SF-C4 | A reopen may drop the intermediate length of a failed resize; a crash may not | The backend replays it only at a crash (`faulty.rs:883-895`, `503-518`). Intent [14] speaks of the crash only | None for a crash. A reopen that loses it is accepted |
-| SF-C5 | The image a reopen shows must be in `Reach_reopen` | The contract lets a drop discard unsynced changes and promises nothing else (`lib.rs:905-907`). The intents fix what a reopen makes durable [12], not what it may show | None |
+| SF-C1 | Failure rates are 0 or 1, except the resize fault at 50 percent. Retention rates are 0, 25, 50, 75, 100 | The input, not the RNG, decides which operation fails, so the fuzzer steers failures directly. The resize needs 50 percent, because the backend keeps a successful resize at a crash only by the same rate (`faulty.rs`, `Oracle::check_resize_fault`) | Whether a resize armed at 50 percent fails is decided by the runtime RNG, which the input also sets |
+| SF-C2 | An unarmed `start_sync` whose handle is dropped counts as a completed sync | The memory backend finishes the sync before it returns the handle (`memory/mod.rs`, `Blob::start_sync`; `faulty.rs`, the test `test_dropped_completed_start_sync_clears_the_crash_epoch`). This asserts implementation behaviour: the contract only says the sync continues | On a backend with a delayed sync this rule would have to wait for the completion |
+| SF-C3 | An injected failure of an open, a read, a scan or a sync changes nothing | The injector fails these before it touches the storage (`faulty.rs`: the `should_fail` checks at the start of `Storage::open_versioned`, `Storage::scan`, `Blob::read_at` and `Blob::sync`). Intent [16] says it for remove; this extends it | A future injector that fails after a partial effect would be reported, and this spec would then change first |
+| SF-C4 | A reopen may drop the intermediate length of a failed resize; a crash may not | The backend replays it only at a crash (`faulty.rs`, `Blob::resize` and `Storage::admit`). Intent [14] speaks of the crash only | None for a crash. A reopen that loses it is accepted |
+| SF-C5 | The image a reopen shows must be in `Reach_reopen` | The contract lets a drop discard unsynced changes and promises nothing else (`runtime/src/lib.rs`, `Blob`: "When a blob is dropped, any unsynced changes may be discarded"). The intents fix what a reopen makes durable [12], not what it may show | None |
 | SF-C6 | The mandatory crash is the last crash, after all input operations. Extra crashes come from `Crash` operations, at most 3 | Every run ends with a crash check of whatever the input left unsynced, and the empty input still runs the full cycle [8, 10]. The chain of 1 to 4 matches the recovery targets | None |
 | SF-C7 | An armed operation that does not fail is judged as unarmed. The target does not assert that the injector injects | The target tests the storage contract, not the dice of the injector. Some armed calls must not fail, for example an empty `SYNC` write | An injector that stops injecting is not reported. The lineage coverage of `faulty.rs` shows it |
 | SF-C8 | The target is behind the feature `storage-faults` and runs on FuzzCorp only | The rule this spec already has for `storage_differential` and `iobuf` [26] | It does not run in `slow.yml` |
@@ -1454,7 +1466,8 @@ Up to 8 live objects, each paired with a model:
 - `IoBufs`: content as one concatenated `Vec<u8>`.
 - `IoBufsMut`: content, plus a flag set by the first read. Once the flag is set, write operations
   on it are skipped, because writing after reading is outside the `IoBufsMut` contract
-  (`runtime/src/iobuf/bufs.rs:770-790`).
+  (`runtime/src/iobuf/bufs.rs`, `IoBufsMut` "Capacity retention": "Interleaving writes after reads
+  is outside this contract").
 - `Builder`: the inline capacity left, and the expected output as an ordered list of inline and
   pushed segments.
 
@@ -1541,7 +1554,7 @@ where the intents file leaves one open.
 | Term | Meaning |
 |---|---|
 | Page | A logical page of the page cache: `PAGE_SIZE` bytes. Page `p` holds the logical offsets `p * PAGE_SIZE .. (p + 1) * PAGE_SIZE` |
-| Physical page | Page `p` as stored in the blob: `PAGE_SIZE + CHECKSUM_SIZE` bytes at offset `p * (PAGE_SIZE + CHECKSUM_SIZE)` (`runtime/src/utils/buffer/paged/mod.rs:230-239`) |
+| Physical page | Page `p` as stored in the blob: `PAGE_SIZE + CHECKSUM_SIZE` bytes at offset `p * (PAGE_SIZE + CHECKSUM_SIZE)` (`runtime/src/utils/buffer/paged/mod.rs`, `physical_page`) |
 | Sealed blob | The `Sealed` handle (`runtime/src/utils/buffer/paged/sealed.rs`) that the construction (SR-R3) returns. Every reader reads through a clone of it |
 | Read | One call of `Sealed::read_at`, `Sealed::read_into` or `Sealed::read_ranges_into`, and the future it returns |
 | Form | Which of the three calls a read is |
@@ -1557,11 +1570,11 @@ where the intents file leaves one open.
 | Deadline | `DEADLINE` of simulated time, counted from the start of the read phase (SR-R12) [9] |
 | Model | The function `value` of SR-R3: the byte the blob holds at each logical offset |
 | Backend read | One call of `read_at` or `read_at_buf` that reaches the storage blob under the mock. It is counted once for every physical page its range touches (SR-R13) |
-| Standalone fetch | The cache's read of one page by `read_after_page_fault`, shared by its waiters (`runtime/src/utils/buffer/paged/cache.rs:928-1010`) |
-| Batch | The cache's read of several pages with one `Blob::read_many` call, started by `read_after_misses` (`cache.rs:818-925`) |
+| Standalone fetch | The cache's read of one page by `read_after_page_fault`, shared by its waiters (`runtime/src/utils/buffer/paged/cache.rs`, `CacheRef::read_after_page_fault`) |
+| Batch | The cache's read of several pages with one `Blob::read_many` call, started by `read_after_misses` (`cache.rs`, `CacheRef::read_after_misses`) |
 | Waiter | A read registered on a standalone fetch |
 | Starter, joiner | The read that started a batch, and a read that selected pages of a batch it did not start |
-| Fetch generation | One standalone fetch of a page, from the read that installs it until it completes or its last waiter is dropped (`cache.rs:56-66`) |
+| Fetch generation | One standalone fetch of a page, from the read that installs it until it completes or its last waiter is dropped (`cache.rs`, `PageFetchEntry`) |
 
 ### Goals
 
@@ -1579,7 +1592,7 @@ where the intents file leaves one open.
 - **SR-R1.** The target MUST run on the deterministic runtime only, MUST use the public API of
   `commonware-runtime` with its `test-utils` feature, and MUST NOT change anything under
   `runtime/src` [3, 19]. The two `test-utils` items it uses are `mocks::MigratingReadBlob`
-  (`runtime/src/mocks.rs:781-867`) and `CacheRef::clear` (`cache.rs:1058-1063`).
+  (`runtime/src/mocks.rs`) and `CacheRef::clear` (`cache.rs`).
 - **SR-R2.** Every run MUST start one `deterministic::Runner` from
   `deterministic::Config::new().with_rng(FuzzRng::from(entropy))`, where `entropy` comes from
   the shared decoder (Shared input decoding). The configuration keeps its default cycle of 1 ms,
@@ -1589,12 +1602,13 @@ where the intents file leaves one open.
   2. Wrap it as `MigratingReadBlob::new(Counter(blob), false)`, where `Counter` is the counting
      wrapper of SR-R13. Every later call reaches the storage through these two wrappers.
   3. Create `CacheRef::new(PAGE_SIZE, cache_pages)`. Create `Writer::new(blob, 0, 2 * PAGE_SIZE,
-     cache)` (`runtime/src/utils/buffer/paged/writer.rs:464`), append the model bytes of
+     cache)` (`runtime/src/utils/buffer/paged/writer.rs`, `Writer::new`), append the model bytes of
      `pages` full pages in one `append` call, call `seal()`
-     (`writer.rs:720`), and await the sync handle it returns. The sealed blob's `size()` must be
-     `pages * PAGE_SIZE`.
+     (`writer.rs`, `Writer::seal`), and await the sync handle it returns. The sealed blob's
+     `size()` must be `pages * PAGE_SIZE`.
   4. Call `CacheRef::clear()`, so that no page is cached when the read phase starts. The writer
-     caches pages as it flushes them (`writer.rs:837`, `951`), and `clear` may be called only
+     caches pages as it flushes them (`writer.rs`, the `cache` call in `Writer::append_owned` and
+     the `cache_pages` call in `Writer::flush_internal`), and `clear` may be called only
      with no read in flight, which holds here.
   5. Reset the counts of SR-R13 to zero.
 
@@ -1690,8 +1704,9 @@ Bounds, all constants at the top of the harness [7]:
 
   Read A's first poll MUST be pending. It always is under SR-R3: page `p0` is cold, and the mock
   returns pending on the first poll of every backend read, whatever the read below it returns
-  (`runtime/src/mocks.rs:820-845`). When read A's first poll is ready, the arrangement of this
-  rule no longer holds, and the run MUST end with a panic that says so. It is not a violation
+  (`runtime/src/mocks.rs`, `MigratingReadBlob::read_at_buf`). When read A's first poll is ready,
+  the arrangement of this rule no longer holds, and the run MUST end with a panic that says so.
+  It is not a violation
   and not a run that leaves SR-I3 unmeasured. History: this spec was accepted on 2026-11-24 with
   a ready first poll of read A counted as a run that does not measure SR-I3. The construction
   makes that case unreachable, so no test could exercise it. Since the same day it is a failed
@@ -1714,7 +1729,7 @@ Bounds, all constants at the top of the harness [7]:
 - **SR-R13.** Backend reads. `Counter` is a `Blob` wrapper of the fuzz side. Every `read_at` and
   `read_at_buf` it receives MUST add one to the count of each physical page its range touches,
   and then forward the call. Every other call MUST be forwarded unchanged. The mock's default
-  `read_many` issues one `read_at` per range (`runtime/src/lib.rs:1083-1096`), so the reads of a
+  `read_many` issues one `read_at` per range (`runtime/src/lib.rs`, `read_each`), so the reads of a
   batch are counted too. The counts are reset at the end of the construction (SR-R3) and read at
   the end of the opening and at the end of the run.
 - **SR-R14.** A violation MUST name its invariant, its class and its location, and MUST say
@@ -1750,11 +1765,11 @@ Each row is one check. A violation names its row (SR-R14).
 
 | Id | What must hold | Measured when | Source | Class |
 |---|---|---|---|---|
-| SR-I1 | A read that completes returns exactly the model's bytes of its ranges: for `read_at` the returned buffers in order, for `read_into` the buffer, for `read_ranges_into` the buffer, which holds the ranges back to back | every read that completes, in the opening and in the free phase | [8]; `Sealed::read_at`, `read_into`, `read_ranges_into` (`sealed.rs:112-176`) | `read_bytes` |
+| SR-I1 | A read that completes returns exactly the model's bytes of its ranges: for `read_at` the returned buffers in order, for `read_into` the buffer, for `read_ranges_into` the buffer, which holds the ranges back to back | every read that completes, in the opening and in the free phase | [8]; `Sealed::read_at`, `read_into`, `read_ranges_into` (`sealed.rs`) | `read_bytes` |
 | SR-I2a | Every read that is not cancelled, and every reader, finishes before the deadline | every run, at the end of the read phase | [9] | `read_incomplete` |
 | SR-I2b | No read that is not cancelled returns `Err`. Storage never fails in this target, and every range is valid | every read that is not cancelled | [9, 20]; fuzzing guide: unexpected errors panic | `read_error` |
-| SR-I3 | In the opening, the physical page of `p0` is read from the blob exactly once | every run, at the end of the opening (read A is always pending after its first poll, SR-R9) | [11]; a fetch generation "reads and validates the logical page exactly once" for all its waiters (`cache.rs:54-66`) | `single_fetch_count` |
-| SR-I4 | No panic, abort, sanitizer report or runtime stall (`runtime stalled`, `runtime/src/deterministic.rs:451-452`) | the whole run | [9]; fuzzing guide | none (the panic itself) |
+| SR-I3 | In the opening, the physical page of `p0` is read from the blob exactly once | every run, at the end of the opening (read A is always pending after its first poll, SR-R9) | [11]; a fetch generation "reads and validates the logical page exactly once" for all its waiters (`cache.rs`, `PageFetchEntry::fetch`) | `single_fetch_count` |
+| SR-I4 | No panic, abort, sanitizer report or runtime stall (`runtime stalled`, `runtime/src/deterministic.rs`, `Executor::wake_until_progress`) | the whole run | [9]; fuzzing guide | none (the panic itself) |
 
 - **SR-R15.** When a row counts as measured. A row MUST enter `measured` (SR-R16) only when the
   condition of its "Measured when" cell occurred in the run and its check ran and passed. SR-I3
@@ -1768,19 +1783,22 @@ Not judged, because the intents leave it out or the contract does not promise it
   1. Eviction. The cache always holds fewer pages than the blob (SR-C3). A page that was evicted
      is read again by a later read that misses it.
   2. A cancelled sole standalone waiter. Dropping the only waiter of a standalone fetch removes
-     the fetch (`cache.rs:103-127`), so a later read of the page starts a new fetch, although the
-     dropped one had already read the page [22].
+     the fetch (`cache.rs`, `impl Drop for PageFetchGuard`), so a later read of the page starts
+     a new fetch, although the dropped one had already read the page [22].
   3. A cancelled batch starter. A flagged starter is dropped in the turn it started its batch,
      so the batch ends, and a later read reads its pages again (SR-X7).
   4. The lock window. A read that examines its misses over several holds of the cache lock can
-     miss a page that another read registers in between (`cache.rs:18-24`, `130-134`). A read
-     here touches at most 4 pages, fewer than the 64 misses of one hold (`MISSES_PER_LOCK`), so
+     miss a page that another read registers in between (`cache.rs`, the module docs: "another
+     reader that misses one of those pages in between starts its own read of it"; the docs of
+     `MISSES_PER_LOCK`). A read here touches at most 4 pages, fewer than the 64 misses of one
+     hold (`MISSES_PER_LOCK`), so
      this reason is not expected at these bounds.
 
   What no reason allows: one read reads each page it touches from the blob at most once.
   `read_after_miss` reads its missing pages one at a time, `read_after_misses` reads the pages
   it does not join with one batch of its own, and a read that joins a fetch or a batch issues no
-  backend read (`cache.rs:778-805`, `818-925`, `928-1010`). So the free-phase count of a page is
+  backend read (`cache.rs`, `CacheRef::read_after_miss`, `CacheRef::read_after_misses` and
+  `CacheRef::read_after_page_fault`). So the free-phase count of a page is
   at most the number of free-phase reads whose ranges touch it, cancelled reads included. The
   counts are recorded in the trace and held to this bound in the acceptance evidence only
   (SR-V10); they are not an invariant of the target [12]. The one strict count is SR-I3, in the
@@ -1994,10 +2012,10 @@ diff --git a/runtime/src/utils/buffer/paged/cache.rs b/runtime/src/utils/buffer/
 | SR-C1 | The target is `shared_reads`, behind the feature `shared-reads`, in `runtime-all`, and runs on FuzzCorp only | The rule this spec has for the other new targets (SF-C8) | It does not run in `slow.yml` |
 | SR-C2 | `PAGE_SIZE` is fixed at 64 | Small pages give many pages in a small blob, so reads cross pages and share them often. The intents fuzz the counts, not the page size [7] | Other page sizes, and pages that do not align with blob pages, are not explored |
 | SR-C3 | The cache always holds fewer pages than the blob | [4] asks this of the baseline; keeping it for every input means every run can evict | A run where the whole blob fits in the cache is not explored |
-| SR-C4 | SR-B3 and SR-F2 as decided on 2026-11-24 [22] | With a hold of one poll, the second waiter of a standalone fetch drives it to completion in the turn it registers: the mock's read yields once and wakes the shared future, and the next clone that polls a woken idle future polls it again (`runtime/src/mocks.rs:820-845`; `utils/src/futures/shared.rs:239-305`, `344-348`). A batch is different. Its reads run in a `FuturesUnordered`, which yields once two of its reads woke themselves in one poll (`futures-util` 0.3.34, `src/stream/futures_unordered/mod.rs:548-556`). So the starter's first drive starts two reads, and a joiner that drives the batch in the same cycle first polls the reads not started yet. With four pages or more, that drive starts two more reads and yields: the joiner stays pending, can be cancelled, and the starter survives (the trace of SR-F2). With three pages, the same drive finishes the batch, and the joiner completes (the trace of SR-F1). A joiner that joins later can stay pending in other schedules too | SR-X6: a fault in the standalone "keep the fetch for the others" branch is not detected |
-| SR-C5 | The opening's read A is `read_at` or `read_into`, flagged in 1 draw of 2; read B is never flagged | Read A must install a standalone fetch, which only these two forms do: `read_ranges_into` never starts a standalone fetch, it starts or joins batches and joins standalone fetches (`cache.rs:818-925`). Read B must survive [11] | None for the forms: `read_ranges_into` is covered as a joiner of the opening's fetch (read B) and as a starter and joiner of batches in the free phase. Read B is never cancelled, but it completes on its first poll in every run the prototype made, so a flag would not cancel it |
+| SR-C4 | SR-B3 and SR-F2 as decided on 2026-11-24 [22] | With a hold of one poll, the second waiter of a standalone fetch drives it to completion in the turn it registers: the mock's read yields once and wakes the shared future, and the next clone that polls a woken idle future polls it again (`runtime/src/mocks.rs`, `MigratingReadBlob::read_at_buf`; `utils/src/futures/shared.rs`, `Future for Shared::poll` and `ArcWake for Inner::wake_by_ref`). A batch is different. Its reads run in a `FuturesUnordered`, which yields once two of its reads woke themselves in one poll (`futures-util` 0.3.34, `src/stream/futures_unordered/mod.rs`, `FuturesUnordered::poll_next`: "If a future yields, we respect it and yield here."). So the starter's first drive starts two reads, and a joiner that drives the batch in the same cycle first polls the reads not started yet. With four pages or more, that drive starts two more reads and yields: the joiner stays pending, can be cancelled, and the starter survives (the trace of SR-F2). With three pages, the same drive finishes the batch, and the joiner completes (the trace of SR-F1). A joiner that joins later can stay pending in other schedules too | SR-X6: a fault in the standalone "keep the fetch for the others" branch is not detected |
+| SR-C5 | The opening's read A is `read_at` or `read_into`, flagged in 1 draw of 2; read B is never flagged | Read A must install a standalone fetch, which only these two forms do: `read_ranges_into` never starts a standalone fetch, it starts or joins batches and joins standalone fetches (`cache.rs`, `CacheRef::read_after_misses`). Read B must survive [11] | None for the forms: `read_ranges_into` is covered as a joiner of the opening's fetch (read B) and as a starter and joiner of batches in the free phase. Read B is never cancelled, but it completes on its first poll in every run the prototype made, so a flag would not cancel it |
 | SR-C6 | The free phase starts after the opening ends | SR-I3 counts the reads of the opening alone | The readers never overlap with the opening's two reads |
-| SR-C7 | One deadline of 10 s of simulated time for the whole read phase | A prototype of this scenario at these bounds took at most 12 ms of simulated time over 2,000 random runs, and 5 ms with every count at its maximum. Time advances 1 ms per cycle and skips to the next sleeper when no task is ready (`runtime/src/deterministic.rs:367-385`, `396-453`), so a lost wakeup reaches the deadline at once and a busy loop reaches it after 10,000 cycles | A reader that is only slow, but finishes after 10 s, is reported |
+| SR-C7 | One deadline of 10 s of simulated time for the whole read phase | A prototype of this scenario at these bounds took at most 12 ms of simulated time over 2,000 random runs, and 5 ms with every count at its maximum. Time advances 1 ms per cycle and skips to the next sleeper when no task is ready (`runtime/src/deterministic.rs`, `Executor::advance_time`, `Executor::skip_idle_time` and `Executor::wake_until_progress`), so a lost wakeup reaches the deadline at once and a busy loop reaches it after 10,000 cycles | A reader that is only slow, but finishes after 10 s, is reported |
 | SR-C8 | A free-phase operation is flagged in 1 draw of 4 | Most reads complete and are checked; cancellations are still common | Runs with many cancellations are rarer |
 | SR-C9 | Every range has at least 1 byte, and the ranges of one read touch at most 4 pages | Zero-length ranges are left out [20]. `MAX_SPAN` = 4 admits batches of four pages, the size at which a joiner of the same cycle stays pending (SR-C4), which SR-B4 and the trace of SR-F2 need | Batches of more than four pages are not explored (Future work 39), and zero-length ranges are never issued (Future work 46) |
 | SR-C10 | The number `read_ranges_into` returns is not judged | It depends on the cache state at the call, which the target does not model | A wrong count of served ranges is not detected |
@@ -2350,7 +2368,7 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 10 | Allowlist | Entries can hide neighbouring bugs | Keep entries narrow and remove them when `runtime/src` is fixed. Add a feature that disables the allowlist for periodic strict runs |
 | 11 | Hangs left to libFuzzer's `-timeout` | Hangs (a leaked hold blocking `Runner::start`, a stuck blocking-pool operation) are reported late and without context | Add a per-operation watchdog that panics with the operation index |
 | 12 | Small name pool, no case variants, no arbitrary names | Unusual hex names in `scan`, and stray files in partition directories (`.DS_Store` yields `PartitionCorrupt`), are not explored | Add an arbitrary-names mode, and seed stray files into the tokio partition directory before `scan` |
-| 13 | No on-disk image seeding on tokio | Header resolution of arbitrary file contents on tokio is untested, including the unchecked `metadata.len() - data_offset` (`storage/tokio/mod.rs:266`, `storage/tokio/blob.rs:262`). `blob_creation` covers this for `mocks::Storage` only | Before `Open`, write arbitrary raw bytes to `<dir>/<partition>/<hex(name)>`. This needs no change under `runtime/src` |
+| 13 | No on-disk image seeding on tokio | Header resolution of arbitrary file contents on tokio is untested, including the unchecked `metadata.len() - data_offset` (`storage/tokio/mod.rs`, `Storage::open_versioned`; `storage/tokio/blob.rs`, `Blob::complete`). `blob_creation` covers this for `mocks::Storage` only | Before `Open`, write arbitrary raw bytes to `<dir>/<partition>/<hex(name)>`. This needs no change under `runtime/src` |
 | 14 | Filesystem decides the Linux I/O paths | On tmpfs, O_DIRECT, AIO and `RWF_DONTCACHE` may fall back silently | Point `COMMONWARE_RUNTIME_FUZZ_DIR` at ext4 or xfs on fuzzcorp, and check `storage/tokio/blob/aio.rs` in the lineage coverage |
 | 15 | One tokio worker thread | Fewer interleavings in the executor and supervision code | Vary `worker_threads` per input once 4 is in place |
 | 16 | `iobuf` built for 64-bit only | The 32-bit descriptor (128-byte tail threshold) goes unfuzzed | Add an i686 build where fuzzcorp supports it |
@@ -2362,14 +2380,14 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 22 | No sweep of leftover tokio directories | A timeout, out-of-memory kill or backend panic leaves a `commonware_runtime_fuzz_<pid>_<n>` directory that later processes never remove, because their pid differs | Remove stale `commonware_runtime_fuzz_*` directories of dead processes at startup |
 | 23 | Linux-only tokio paths checked by reading only | Native AIO `read_many`, O_DIRECT reads, `RWF_DONTCACHE` and the startup `syncfs` have not been executed under the harness; all smoke runs were on macOS | Run a short Docker-Linux smoke run of `storage_differential` before the first fuzzcorp deployment |
 | 24 | `storage_faults`: a crash only between two sequential operations (SF-R4, SF-X4) | A crash inside a write, resize or sync, a dropped operation future, and faults under concurrent operations are not explored | Park an operation and crash while it is pending, as `DelayedSyncContext` and `poll_interrupted` do in `storage/fuzz`; then add concurrency as in row 4 |
-| 25 | `storage_faults`: no crash inside an accepted `start_sync` (SF-X7) | The pending-sync marker path of the fault injection (`runtime/src/storage/faulty.rs:220-235`, `525-531`) never sees a sync that is still running at the crash | A backend whose `start_sync` returns before the sync completes: with the parked-sync adapter of row 24, or on tokio with row 6 |
+| 25 | `storage_faults`: no crash inside an accepted `start_sync` (SF-X7) | The pending-sync marker path of the fault injection (`runtime/src/storage/faulty.rs`, `PendingMutation::Sync`, `PendingSync`, and the `PendingMutation::Sync` arm of `Storage::crash`) never sees a sync that is still running at the crash | A backend whose `start_sync` returns before the sync completes: with the parked-sync adapter of row 24, or on tokio with row 6 |
 | 26 | `storage_faults`: small sizes (blobs up to 2304 bytes, writes up to 256 bytes) and a small name pool | Large blobs, long logs and unusual names under faults are not explored | Raise `MAX_SIZE` and `MAX_WRITE` once the 50 ms measurement shows the room; names as in row 12 |
 | 27 | `storage_faults`: the trigger of RF-2 is not issued (SF-X5) | An empty write past the end is never combined with faults or crashes | Remove the clamp when #5752 is fixed, together with the RF-2 entry of `storage_differential` |
 | 28 | `storage_faults`: the oracle accepts any subset of an unsynced write and ignores the armed retention rate and mode (SF-R12) | An injector that keeps bytes outside its own policy, for example a non-prefix under `Prefix`, is not reported | Add a strict injector check behind a feature that also holds each write to its armed mode and to the 0 and 100 percent endpoints |
 | 29 | `storage_faults`: an armed operation that does not fail is accepted (SF-C7) | An injector that stops injecting is silent | Track the count of injected failures per kind in a campaign, or check the lineage coverage of `runtime/src/storage/faulty.rs` |
 | 30 | `storage_faults`: the images seen are the ones the deterministic injector produces | Images the contract allows but the injector never makes are not seen: it tears only writes issued under a write fault and drops every other unsynced write whole | Extend the injector upstream (a default tearing policy), or lift rows 5 and 6 for tokio |
 | 31 | `storage_faults`: one planted runtime fault (SF-R27) | The end-to-end proof on `runtime/src` covers the reopen cut only; the other invariants are proven at the seam | Add more plant diffs to this spec, one per durability rule, each in a rule of its own and with a mark of its own for the script of V9, and run each in a disposable worktree |
-| 32 | `storage_faults`: durability is seen only at a crash or a reopen (SF-R15, SF-R17) | A failure that makes data durable too early is not detected: a failed sync that syncs, a failed open that takes its reopen cut, a fused write with a sync fault that persists its bytes | Compare the durable image after every operation through a test accessor such as `Context::logical_blob` (`runtime/src/deterministic.rs:1086-1094`). This leaves the public contract (SF-X9), so it needs a separate decision |
+| 32 | `storage_faults`: durability is seen only at a crash or a reopen (SF-R15, SF-R17) | A failure that makes data durable too early is not detected: a failed sync that syncs, a failed open that takes its reopen cut, a fused write with a sync fault that persists its bytes | Compare the durable image after every operation through a test accessor such as `Context::logical_blob` (`runtime/src/deterministic.rs`). This leaves the public contract (SF-X9), so it needs a separate decision |
 | 33 | `shared_reads`: a backend read is held for one poll (SR-C4, SR-X6) [22] | A standalone fetch is never kept alive for a pending survivor, so a fault in the branch of `PageFetchGuard::drop` that keeps the fetch for the other waiters is not detected | A fuzz-side blob wrapper over `MigratingReadBlob` that holds a read for 1 to k turns, with k from the input. It changes the construction [4, 19], so it needs a separate decision |
 | 34 | `shared_reads`: a cancelled read is dropped right after its first poll [6] (SR-X7) | A batch starter is never cancelled while joiners wait | Cancel a read after its n-th poll, with n from the input; together with row 33. Needs a separate decision |
 | 35 | `shared_reads`: no read failure and no live writer [2] (SR-X2, SR-X3) | A failed page read with joined readers (`Batch::fail`, the error of a standalone fetch) and reads during appends are not explored | Arm the deterministic read fault around chosen reads as a non-baseline choice, with an oracle that every joined read fails and no page is cached; then reads through a live `Writer` and its snapshots |
@@ -2383,4 +2401,4 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 43 | `shared_reads`: a free-phase operation is flagged in 1 draw of 4, and the opening's read A in 1 draw of 2 (SR-C5, SR-C8) | Runs where most reads are cancelled are rare | Draw the flag rate per run from the input, as one more sampled field |
 | 44 | `shared_reads`: the planted fault SR-F2 also fires without a cancellation (SR-C14) | The end-to-end proof does not show that the cancellation path alone is checked | A plant that acts only when a subscription is dropped with pages still undelivered, written as a diff in this spec |
 | 45 | `shared_reads`: the first operation of every reader starts in one hot page (SR-C15) | A free phase whose readers never meet is not explored; it reaches no join, so it adds little | Draw per input whether the hot page is used |
-| 46 | `shared_reads`: only valid reads of at least one byte inside the blob (SR-X4, SR-C9) [20] | Zero-length ranges, reads that end past the blob, offsets that overflow, and range lists that `read_ranges_into` rejects are never issued, so the paths that refuse them (`validate_read_ranges`, the bounds checks of `View::read_into`) are not reached under concurrent readers | Add these reads as non-baseline operations, judged by their documented results: a zero-length range that starts at or before the blob's end succeeds and counts as served (`Sealed::read_ranges_into`); a read or range that ends past the blob, a zero-length one that starts past it included, returns `BlobInsufficientLength`; an overflowing offset returns `OffsetOverflow` (`runtime/src/utils/buffer/paged/view.rs:171-177`); a range list returns the same two errors for the same cases (`runtime/src/utils/buffer/paged/mod.rs:196-226`). Range lists whose ranges overlap stay out: the method documents a panic for them |
+| 46 | `shared_reads`: only valid reads of at least one byte inside the blob (SR-X4, SR-C9) [20] | Zero-length ranges, reads that end past the blob, offsets that overflow, and range lists that `read_ranges_into` rejects are never issued, so the paths that refuse them (`validate_read_ranges`, the bounds checks of `View::read_into`) are not reached under concurrent readers | Add these reads as non-baseline operations, judged by their documented results: a zero-length range that starts at or before the blob's end succeeds and counts as served (`Sealed::read_ranges_into`); a read or range that ends past the blob, a zero-length one that starts past it included, returns `BlobInsufficientLength`; an overflowing offset returns `OffsetOverflow` (`runtime/src/utils/buffer/paged/view.rs`, `View::read_into`); a range list returns the same two errors for the same cases (`runtime/src/utils/buffer/paged/mod.rs`, `validate_read_ranges`). Range lists whose ranges overlap stay out: the method documents a panic for them |

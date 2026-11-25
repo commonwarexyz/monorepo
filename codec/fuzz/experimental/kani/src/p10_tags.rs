@@ -8,29 +8,29 @@
 //! # Documented contract (asserted in every build: this is the gate)
 //!
 //! 1. Decoding does not panic, a failure is an error, and an accepted input is read to the
-//!    end of the value and no further. codec/src/codec.rs:220-228, on `Read::read_cfg`:
+//!    end of the value and no further. codec/src/codec.rs, `Read::read_cfg`:
 //!    "Implementations should consume the exact number of bytes required from `buf` to
 //!    reconstruct the value." "Implementations must return [Error] if decoding fails due to
 //!    invalid data, insufficient bytes in the buffer" and "Parsing a message (often
 //!    untrusted) should never result in a panic."
-//! 2. A byte that is not `0` or `1` is `InvalidBool`. codec/src/error.rs:36-41, on
-//!    `InvalidBool`: "A byte representing a boolean was expected to be `0` (false) or `1`
-//!    (true), but a different value was encountered during decoding."
-//! 3. A `bool` writes as one byte and reads back as the same value. codec/src/types/primitives.rs:
-//!    199-217, the `Write` and `Read` impls for `bool`: "buf.put_u8(if *self { 1 } else { 0 })"
-//!    and "0 => Ok(false), 1 => Ok(true), _ => Err(Error::InvalidBool)". The crate's own test
-//!    codec/src/types/primitives.rs:449-460 (`test_bool`) asserts the same round trip and an
-//!    `encode_size` of 1.
+//! 2. A byte that is not `0` or `1` is `InvalidBool`. codec/src/error.rs,
+//!    `Error::InvalidBool`: "A byte representing a boolean was expected to be `0` (false) or
+//!    `1` (true), but a different value was encountered during decoding."
+//! 3. A `bool` writes as one byte and reads back as the same value.
+//!    codec/src/types/primitives.rs, `Write for bool` and `Read for bool`: "buf.put_u8(if
+//!    *self { 1 } else { 0 })" and "0 => Ok(false), 1 => Ok(true), _ =>
+//!    Err(Error::InvalidBool)". The crate's own test codec/src/types/primitives.rs,
+//!    `test_bool`, asserts the same round trip and an `encode_size` of 1.
 //! 4. An `Option` writes as a tag byte plus the payload, and `encode_size` is the number of
-//!    bytes written. codec/src/types/primitives.rs:253-283, the `Write` and `EncodeSize`
-//!    impls for `Option<T>`: "self.is_some().write(buf)" and "self.as_ref().map_or(1, |inner|
-//!    1 + inner.encode_size())". codec/src/codec.rs:39, on `encode_size`: "Returns the encoded
-//!    size of this value (in bytes)." The crate's own test
-//!    codec/src/types/primitives.rs:616-634 (`test_option`, `test_option_length`) asserts
-//!    the same for `Some(42u32)` and `None`.
+//!    bytes written. codec/src/types/primitives.rs, `Write for Option<T>` and `EncodeSize for
+//!    Option<T>`: "self.is_some().write(buf)" and "self.as_ref().map_or(1, |inner| 1 +
+//!    inner.encode_size())". codec/src/codec.rs, `EncodeSize::encode_size`: "Returns the
+//!    encoded size of this value (in bytes)." The crate's own tests
+//!    codec/src/types/primitives.rs, `test_option` and `test_option_length`, assert the same
+//!    for `Some(42u32)` and `None`.
 //! 5. An `Option` reads as `None` for a tag of `0` and as `Some(v)` for a tag of `1` plus
-//!    `v`'s encoding. codec/src/types/primitives.rs:289-299, the `Read` impl for `Option<T>`:
-//!    "if bool::read(buf)? { Ok(Some(T::read_cfg(buf, cfg)?)) } else { Ok(None) }".
+//!    `v`'s encoding. codec/src/types/primitives.rs, `Read for Option<T>`: "if
+//!    bool::read(buf)? { Ok(Some(T::read_cfg(buf, cfg)?)) } else { Ok(None) }".
 //!
 //! # What is proven
 //!

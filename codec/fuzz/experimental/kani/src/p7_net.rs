@@ -8,46 +8,47 @@
 //!
 //! From the API documentation:
 //!
-//! 1. Decoding does not panic. codec/src/codec.rs:226-228, on `Read::read_cfg`: "Parsing a
-//!    message (often untrusted) should never result in a panic."
+//! 1. Decoding does not panic. codec/src/codec.rs, `Read::read_cfg`: "Parsing a message
+//!    (often untrusted) should never result in a panic."
 //! 2. A failed decoding is an error, and an input that is too short fails with `EndOfBuffer`.
-//!    codec/src/codec.rs:223-224: "Implementations must return [Error] if decoding fails due
-//!    to invalid data, insufficient bytes in the buffer". codec/src/error.rs:10-12:
-//!    `EndOfBuffer` "Indicates that the input buffer (`Buf`) did not contain enough bytes to
-//!    read the next piece of data required by a [crate::Read] implementation."
+//!    codec/src/codec.rs, `Read::read_cfg`: "Implementations must return [Error] if decoding
+//!    fails due to invalid data, insufficient bytes in the buffer". codec/src/error.rs,
+//!    `Error::EndOfBuffer`: "Indicates that the input buffer (`Buf`) did not contain enough
+//!    bytes to read the next piece of data required by a [crate::Read] implementation."
 //! 3. An accepted input is read to the end of the value and no further.
-//!    codec/src/codec.rs:220-221: "Implementations should consume the exact number of bytes
-//!    required from `buf` to reconstruct the value." codec/src/codec.rs:39: `encode_size`
-//!    "Returns the encoded size of this value (in bytes)."
-//! 4. The four address types with one layout have one size. codec/src/codec.rs:12-13, on
-//!    `FixedSize`: "the encoded representation of this type *always* has the same byte
-//!    length, regardless of the specific value."
+//!    codec/src/codec.rs, `Read::read_cfg`: "Implementations should consume the exact number
+//!    of bytes required from `buf` to reconstruct the value." codec/src/codec.rs,
+//!    `EncodeSize::encode_size`: "Returns the encoded size of this value (in bytes)."
+//! 4. The four address types with one layout have one size. codec/src/codec.rs, `FixedSize`:
+//!    "the encoded representation of this type *always* has the same byte length, regardless
+//!    of the specific value."
 //! 5. The declared maximum is the sum of the parts and is never exceeded.
-//!    codec/src/codec.rs:25: "An upper bound on the encoded size, in bytes."
-//!    codec/src/lib.rs:48-49: "[FixedSize] types contribute their fixed size. Composite types
-//!    sum their fields' bounds, and enums add their tag's bound to the largest variant
-//!    bound."
-//! 6. A written value decodes to itself. codec/src/lib.rs:162-167 (the crate's example):
-//!    "let bytes = point.encode();" ... "let decoded_point = Point::decode(bytes).unwrap();"
-//!    ... "assert_eq!(point, decoded_point);". codec/src/codec.rs:330, on `Decode`: "Ensures
-//!    that *all* bytes from the input buffer were consumed during decoding."
+//!    codec/src/codec.rs, `MaxEncodeSize::MAX_ENCODE_SIZE`: "An upper bound on the encoded
+//!    size, in bytes." codec/src/lib.rs, crate docs, "Size Bounds": "[FixedSize] types
+//!    contribute their fixed size. Composite types sum their fields' bounds, and enums add
+//!    their tag's bound to the largest variant bound."
+//! 6. A written value decodes to itself. codec/src/lib.rs, crate docs, "Example 1.
+//!    Fixed-Size Type": "let bytes = point.encode();" ... "let decoded_point =
+//!    Point::decode(bytes).unwrap();" ... "assert_eq!(point, decoded_point);".
+//!    codec/src/codec.rs, `Decode`: "Ensures that *all* bytes from the input buffer were
+//!    consumed during decoding."
 //!
 //! From the crate's own tests, not from API documentation. The documentation says nothing on
 //! the byte layout of an address or on its tag. These tests are the only statement of it:
 //!
 //! 7. Only the tags 4 and 6 are accepted, and any other tag fails with `Error::Invalid`.
-//!    codec/src/types/net.rs:281-286, in `test_ip_addr`: "Test invalid version", with the
-//!    input `[5]` and the expected result "Err(Error::Invalid(_, _))". The same for
-//!    `SocketAddr`: codec/src/types/net.rs:321-326, in `test_socket_addr`.
+//!    codec/src/types/net.rs, the test `test_ip_addr`: "Test invalid version", with the input
+//!    `[5]` and the expected result "Err(Error::Invalid(_, _))". The same for `SocketAddr`:
+//!    codec/src/types/net.rs, the test `test_socket_addr`.
 //! 8. The byte layout. An IPv4 address is its 4 octets in order, an IPv6 address its 16
 //!    octets in order, a port is 2 bytes with the most significant first, a socket address
 //!    is the address and then the port, and `IpAddr` and `SocketAddr` start with one tag
-//!    byte: 4 for IPv4, 6 for IPv6. codec/src/types/net.rs:340-395, `test_conformity`, for
+//!    byte: 4 for IPv4, 6 for IPv6. codec/src/types/net.rs, the test `test_conformity`, for
 //!    example "assert_eq!(sa_v4.encode(), &[0x04, 127, 0, 0, 1, 0x1F, 0x90][..]);". The
-//!    sizes 5 and 17 (`IpAddr`) and 7 and 19 (`SocketAddr`): codec/src/types/net.rs:264-279
-//!    and :299-319.
+//!    sizes 5 and 17 (`IpAddr`) and 7 and 19 (`SocketAddr`): codec/src/types/net.rs, the
+//!    tests `test_ip_addr` and `test_socket_addr`.
 //! 9. `SocketAddrV6` round-trips with flow information 0 and scope id 0.
-//!    codec/src/types/net.rs:243-256, `test_socket_addr_v6`, builds every value it
+//!    codec/src/types/net.rs, the test `test_socket_addr_v6`, builds every value it
 //!    round-trips with "SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)" and the like. The
 //!    18 bytes of item 8 have no room for the two fields.
 //!

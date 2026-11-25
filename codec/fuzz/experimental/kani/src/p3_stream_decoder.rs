@@ -4,21 +4,21 @@
 //!
 //! For EVERY sequence of `MAX + 1` bytes fed to a fresh `Decoder::<T>` until it stops asking:
 //!
-//! 1. `feed` does not panic. codec/src/varint.rs:73-76: `Decoder` is "for reading varints
-//!    byte-by-byte from streams"; codec/src/codec.rs:226-228: "Parsing a message (often
-//!    untrusted) should never result in a panic."
+//! 1. `feed` does not panic. codec/src/varint.rs, `Decoder`: it is "for reading varints
+//!    byte-by-byte from streams"; codec/src/codec.rs, `Read::read_cfg`: "Parsing a message
+//!    (often untrusted) should never result in a panic."
 //! 2. it asks for more (`Ok(None)`) only after a byte with the continuation bit.
-//!    codec/src/varint.rs:116: "`Ok(None)` when more bytes are needed";
-//!    codec/src/varint.rs:52-54: "If this bit is set, the varint continues, if clear this is
-//!    the final byte."
-//! 3. a failure is `InvalidVarint` (any payload). codec/src/varint.rs:117:
+//!    codec/src/varint.rs, `Decoder::feed`: "`Ok(None)` when more bytes are needed";
+//!    codec/src/varint.rs, `CONTINUATION_BIT_MASK`: "If this bit is set, the varint
+//!    continues, if clear this is the final byte."
+//! 3. a failure is `InvalidVarint` (any payload). codec/src/varint.rs, `Decoder::feed`:
 //!    "`Err(InvalidVarint)` if the varint is malformed (overflow or invalid encoding)".
 //! 4. it stops (a value or an error) at or before byte number `MAX`.
-//!    codec/src/varint.rs:57-71: `MAX_U*_VARINT_SIZE` is the "Maximum encoded size", so a
-//!    varint that still continues at byte `MAX` is malformed, and item 3 makes that an
-//!    error. The implementation states the intent in a comment, codec/src/varint.rs:134-136:
-//!    the last-byte check "prevents continuing to read". (That third source is a comment in
-//!    the code, not API documentation.)
+//!    codec/src/varint.rs, `MAX_U16_VARINT_SIZE` to `MAX_U128_VARINT_SIZE`: the "Maximum
+//!    encoded size", so a varint that still continues at byte `MAX` is malformed, and item 3
+//!    makes that an error. The implementation states the intent in a comment in
+//!    codec/src/varint.rs, `Decoder::feed`: the last-byte check "prevents continuing to read".
+//!    (That third source is a comment in the code, not API documentation.)
 //!
 //! # Implementation consistency (asserted only with `--features consistency`; not a gate)
 //!
@@ -30,8 +30,8 @@
 //! - The contract part says nothing about the VALUE `feed` returns. P1 checks values, through
 //!   `UInt::read`.
 //! - The consistency check is not an independent oracle: `UInt::read` calls the same
-//!   `Decoder::feed` for every multi-byte varint (codec/src/varint.rs:492-497). A wrong rule
-//!   shared by both passes it.
+//!   `Decoder::feed` for every multi-byte varint (codec/src/varint.rs, the private `read`). A
+//!   wrong rule shared by both passes it.
 //!
 //! # Bounds
 //!

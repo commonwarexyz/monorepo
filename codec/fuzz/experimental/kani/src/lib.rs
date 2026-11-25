@@ -6,9 +6,9 @@
 //! Each `p*` module holds one proof and states it in its header:
 //!
 //! - "Documented contract": what the documentation of `commonware-codec` promises, each item
-//!   with its quote and source (file and lines of `codec/src` as of `main` at commit
-//!   c2627b4132). Where the documentation is silent, for example on the byte layout of an
-//!   address, an item quotes a test of `commonware-codec` instead and says so. These
+//!   with its quote and source (the file of `codec/src` and the item in it, as of `main` at
+//!   commit c2627b4132). Where the documentation is silent, for example on the byte layout of
+//!   an address, an item quotes a test of `commonware-codec` instead and says so. These
 //!   assertions are in every build. The default build is the gate.
 //! - "Implementation consistency": checks that are stronger than the documentation. They are
 //!   asserted only with `--features consistency` (the `consistency!` macro) and are not a gate:

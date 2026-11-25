@@ -2,7 +2,7 @@
 
 use commonware_codec::Write;
 
-/// The continuation bit of a varint byte (codec/src/varint.rs:55).
+/// The continuation bit of a varint byte (codec/src/varint.rs, `CONTINUATION_BIT_MASK`).
 pub const CONT: u8 = 0x80;
 
 /// An implementation-consistency check: an assertion that is STRONGER than the documented

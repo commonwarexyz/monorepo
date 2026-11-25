@@ -4,13 +4,17 @@
 //!
 //! This proof has no consistency-only assertions.
 //!
-//! - codec/src/varint.rs:5-8: protobuf varints, 7 value bits per byte plus a continuation bit.
-//! - codec/src/varint.rs:501-505: `size` is "the number of bytes needed to encode" a value.
-//! - codec/src/varint.rs:57-71: `MAX_U*_VARINT_SIZE` is the maximum encoded size.
-//! - codec/src/varint.rs:244-246: signed values use ZigZag, which "moves the sign bit to the
-//!   least significant bit", so values close to zero stay short.
-//! - codec/src/codec.rs:39: `encode_size` "Returns the encoded size of this value (in bytes)".
-//! - codec/src/codec.rs:220-228, on `Read::read_cfg`: "Implementations should consume the exact
+//! - codec/src/varint.rs, module docs: protobuf varints, 7 value bits per byte plus a
+//!   continuation bit.
+//! - codec/src/varint.rs, the private `size`: it is "the number of bytes needed to encode" a
+//!   value.
+//! - codec/src/varint.rs, `MAX_U16_VARINT_SIZE` to `MAX_U128_VARINT_SIZE`: the maximum encoded
+//!   size.
+//! - codec/src/varint.rs, the sealed trait `SPrim`: signed values use ZigZag, which "moves the
+//!   sign bit to the least significant bit", so values close to zero stay short.
+//! - codec/src/codec.rs, `EncodeSize::encode_size`: "Returns the encoded size of this value (in
+//!   bytes)".
+//! - codec/src/codec.rs, `Read::read_cfg`: "Implementations should consume the exact
 //!   number of bytes required from `buf` to reconstruct the value"; "Parsing a message (often
 //!   untrusted) should never result in a panic."
 //!

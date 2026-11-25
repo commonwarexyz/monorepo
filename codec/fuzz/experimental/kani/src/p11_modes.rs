@@ -6,26 +6,26 @@
 //!
 //! # Documented contract (asserted in every build: this is the gate)
 //!
-//! 1. A mode is a seven-bit value. codec/src/mode.rs:14-16: "A seven-bit value in an ordered
-//!    [`Modes`] packet." "The high bit is reserved for packet framing and cannot be
-//!    represented by this type." codec/src/mode.rs:31, on `Mode::new`: "Creates a mode value,
-//!    or returns `None` when the reserved high bit is set."
-//! 2. The packet. codec/src/mode.rs:135-142: "A canonical packet of ordered mode values."
+//! 1. A mode is a seven-bit value. codec/src/mode.rs, `Mode`: "A seven-bit value in an
+//!    ordered [`Modes`] packet." "The high bit is reserved for packet framing and cannot be
+//!    represented by this type." codec/src/mode.rs, `Mode::new`: "Creates a mode value, or
+//!    returns `None` when the reserved high bit is set."
+//! 2. The packet. codec/src/mode.rs, `Modes`: "A canonical packet of ordered mode values."
 //!    "`N` is the maximum number of modes and must be greater than zero." "The high bit
 //!    indicates that another mode follows, and trailing zero-valued modes are omitted.
 //!    Appending a new mode with value zero therefore preserves the existing encoding. A
 //!    `Modes` value denotes a present packet. An all-zero list denotes no packet."
-//! 3. No packet for a list of zeros. codec/src/mode.rs:167-170, on `Modes::new`: "Returns
-//!    `None` when every mode is zero."
+//! 3. No packet for a list of zeros. codec/src/mode.rs, `Modes::new`: "Returns `None` when
+//!    every mode is zero."
 //! 4. Decoding does not panic, a failure is an error, and an accepted input is read to the
-//!    end of the value and no further. codec/src/codec.rs:220-228, on `Read::read_cfg`:
+//!    end of the value and no further. codec/src/codec.rs, `Read::read_cfg`:
 //!    "Implementations should consume the exact number of bytes required from `buf` to
 //!    reconstruct the value." "Implementations must return [Error] if decoding fails due to
 //!    invalid data, insufficient bytes in the buffer" and "Parsing a message (often
 //!    untrusted) should never result in a panic."
-//! 5. `encode_size` is the number of bytes written. codec/src/codec.rs:39: "Returns the
-//!    encoded size of this value (in bytes)."
-//! 6. A written value decodes to itself. codec/src/mode.rs:149-152 (the example of `Modes`):
+//! 5. `encode_size` is the number of bytes written. codec/src/codec.rs,
+//!    `EncodeSize::encode_size`: "Returns the encoded size of this value (in bytes)."
+//! 6. A written value decodes to itself. codec/src/mode.rs, `Modes`, its example:
 //!    "assert_eq!(encoded.as_ref(), &[0x81, 0x80, 0x02]);" and
 //!    "assert_eq!(Modes::<3>::decode(encoded).unwrap(), modes);".
 //!
@@ -34,11 +34,11 @@
 //!
 //! 7. An input whose every byte asks for another byte fails with `EndOfBuffer` while fewer
 //!    than `N` bytes were given, and with `Error::Invalid` once `N` bytes were given.
-//!    codec/src/mode.rs:321-342, `rejects_truncated_and_oversized_packets`, for example
+//!    codec/src/mode.rs, the test `rejects_truncated_and_oversized_packets`, for example
 //!    "Modes::<2>::decode(Copying(&[0x80]))," with "Err(Error::EndOfBuffer)", and an
 //!    `Error::Invalid` named `Modes` from "Modes::<2>::decode(Copying(&[0x80, 0x80])),".
 //! 8. A packet that ends in a zero byte fails with `Error::Invalid`.
-//!    codec/src/mode.rs:345-358, `rejects_non_canonical_packets`, for example
+//!    codec/src/mode.rs, the test `rejects_non_canonical_packets`, for example
 //!    an `Error::Invalid` named `Modes` from "Modes::<2>::decode(Copying(&[0x81, 0x00])),".
 //!
 //! # What is proven
@@ -227,7 +227,7 @@ macro_rules! modes {
 modes!(kani_p11_modes_1, 1);
 modes!(kani_p11_modes_3, 3);
 
-/// Item 2, codec/src/mode.rs:140-141: "Appending a new mode with value zero therefore
+/// Item 2, codec/src/mode.rs, `Modes`: "Appending a new mode with value zero therefore
 /// preserves the existing encoding."
 #[kani::proof]
 #[kani::unwind(8)]

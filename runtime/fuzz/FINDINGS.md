@@ -47,16 +47,17 @@ All entries were found at commit `3deaf6b12` on macOS (APFS).
   - tokio: `Ok([])`
 - Also reached through `read_at_buf`, `read_many` and `start_read_many` with a zero-length range
   whose offset is past the end (97 of 236 smoke-run crashes).
-- Contract: `Blob::read_at` / `Blob::read_at_buf` (`runtime/src/lib.rs:923-946`) say "Read exactly
+- Contract: `Blob::read_at` / `Blob::read_at_buf` (`runtime/src/lib.rs`) say "Read exactly
   `len` bytes at `offset`" and name no outcome for a zero-length read past the end. Neither backend
   violates the trait docs, but they disagree on Ok/Err for the same call, and the shared
   conformance suite (`runtime/src/storage/mod.rs`, `test_read_zero_length`) only covers offsets
   inside the blob.
 - Code:
-  - tokio returns before any bound check: `runtime/src/storage/tokio/blob.rs:511` (`read_at_buf`,
-    reached from `read_at`) and `runtime/src/storage/tokio/blob.rs:600` (`start_read_many`);
+  - tokio returns before any bound check: `runtime/src/storage/tokio/blob.rs`, the `len == 0`
+    early return in `read_at_buf` (reached from `read_at`) and in `start_read_many`;
     `read_many` off Linux goes through `read_at` per range.
-  - memory checks `offset + len` against the contents first: `runtime/src/storage/memory/mod.rs:456`.
+  - memory checks `offset + len` against the contents first: `runtime/src/storage/memory/mod.rs`,
+    `read_at_buf`, the `BlobInsufficientLength` return.
 - Failure class: `cross_backend_read`
 - Reproducer: `runtime/fuzz/artifacts/storage_differential/rf1_zero_len_read_past_end`
 - Verified not a harness artifact: both backends receive the identical call
@@ -80,14 +81,16 @@ All entries were found at commit `3deaf6b12` on macOS (APFS).
 - Consequence: code tested on the deterministic runtime can observe a blob size that the
   production runtime never produces. A later `sync` makes the grown size durable on memory, so a
   reopen also returns it.
-- Contract: `Blob::write_at` (`runtime/src/lib.rs:977-985`): "Write every remaining byte in `bufs`
+- Contract: `Blob::write_at` (`runtime/src/lib.rs`): "Write every remaining byte in `bufs`
   to the blob at `offset`." An empty buffer has no bytes to write. The conformance suite asserts
   the no-growth reading for `SYNC` only (`runtime/src/storage/mod.rs`, `test_write_at_sync`:
   "Empty writes should be accepted without extending the blob").
 - Code:
-  - memory returns early only for `SYNC` empty writes (`runtime/src/storage/memory/mod.rs:470`),
-    then resizes to `offset + 0` (`runtime/src/storage/memory/mod.rs:486`).
-  - tokio returns early for every empty write: `runtime/src/storage/tokio/blob.rs:633`.
+  - memory returns early only for `SYNC` empty writes (`runtime/src/storage/memory/mod.rs`,
+    `write_at`, `if sync && !bufs.has_remaining()`), then resizes to `offset + 0` (the same
+    function, `content.resize(required, 0)`).
+  - tokio returns early for every empty write: `runtime/src/storage/tokio/blob.rs`, `write_at`,
+    `if !bufs.has_remaining()`.
 - Failure classes: `model_read_len` when a read sees the grown size first, and `model_reopen` when
   a `Sync` and a reopen come first (Open, empty `Write{At(1)}`, `Sync`, `Drop`, `Open`: the
   deterministic reopen returns size 1 where the model allows 0, while tokio returns size 0).
@@ -122,13 +125,14 @@ All entries were found at commit `3deaf6b12` on macOS (APFS).
 - From code reading: a failed tokio open of a too-long name has already created the partition
   directory (`create_dir_all` runs first), so tokio's `scan` of that partition returns `Ok([])`
   where no blob was ever created.
-- Contract: `Storage` "Partition Names" (`runtime/src/lib.rs:712-718`) restricts the character set
-  and requires a non-empty partition, but names no length limit. `Storage::open_versioned`
-  (`runtime/src/lib.rs:771`) takes any `&[u8]` name and names no limit or rejected value, so
+- Contract: `Storage` "Partition Names" (`runtime/src/lib.rs`, the `Storage` docs) restricts the
+  character set and requires a non-empty partition, but names no length limit.
+  `Storage::open_versioned` (`runtime/src/lib.rs`) takes any `&[u8]` name and names no limit or rejected value, so
   memory's acceptance and tokio's failure are both within the trait docs; the backends disagree on
   Ok/Err for the same call.
-- Code: `runtime/src/storage/tokio/mod.rs:194` (path construction), `:215-216` (`create_dir_all` ->
-  `PartitionCreationFailed`), `:225` (`BlobOpenFailed`); `validate_partition_name` in
+- Code: `runtime/src/storage/tokio/mod.rs`, `Storage::open_versioned`: the path construction
+  ("Construct the full path"), then `create_dir_all` -> `PartitionCreationFailed`, then the file
+  open -> `BlobOpenFailed`; `validate_partition_name` in
   `runtime/src/storage/mod.rs` (character set only).
 - Failure class: `cross_backend_open`
 - Reproducers in `runtime/fuzz/artifacts/storage_differential/`: `rf3_partition_256_chars`,
