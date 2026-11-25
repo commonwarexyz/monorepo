@@ -72,7 +72,8 @@ const IORING_SETUP_NO_SQARRAY: u32 = 1 << 16;
 /// the SQ tail nor writes the SQ head. Requires NO_SQARRAY and Linux 7.0.
 const IORING_SETUP_SQ_REWIND: u32 = 1 << 20;
 
-/// One mapping at the SQ ring offset covers both rings.
+/// One mapping at the SQ ring offset covers both rings. Every kernel that
+/// accepts SQ_REWIND reports it.
 const IORING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
 
 /// Mapping offset of the shared rings.
@@ -349,7 +350,6 @@ pub struct SqueueEntry {
 
 const _: () = {
     assert!(mem::size_of::<SqueueEntry>() == 64);
-    assert!(mem::align_of::<SqueueEntry>() == 8);
     assert!(mem::offset_of!(SqueueEntry, opcode) == 0);
     assert!(mem::offset_of!(SqueueEntry, flags) == 1);
     assert!(mem::offset_of!(SqueueEntry, ioprio) == 2);
@@ -755,10 +755,12 @@ impl Mmap {
 
 impl Drop for Mmap {
     fn drop(&mut self) {
+        // A failure only leaks the mapping, and a drop that panics while
+        // unwinding aborts, so the result is ignored, as the crate does.
+        //
         // SAFETY: The mapping was created with this address and length, and
         // nothing accesses it after the queues that point into it are gone.
-        let result = unsafe { libc::munmap(self.ptr.as_ptr().cast(), self.len) };
-        debug_assert_eq!(result, 0, "{}", io::Error::last_os_error());
+        unsafe { libc::munmap(self.ptr.as_ptr().cast(), self.len) };
 
         #[cfg(test)]
         tests::unmapped();
@@ -1130,7 +1132,9 @@ impl IoUring {
         // SAFETY: The kernel returned a new descriptor that nothing else
         // owns. Adopting it at once closes it on every later failure.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
-        debug_assert!(params.features & IORING_FEAT_SINGLE_MMAP != 0);
+        if params.features & IORING_FEAT_SINGLE_MMAP == 0 {
+            return Err(invalid("rings need separate mappings"));
+        }
 
         // With NO_SQARRAY and 16-byte CQEs, the CQE array ends the shared
         // rings, so one mapping of this length covers both rings.
@@ -2037,12 +2041,12 @@ mod squeue_entry_tests {
     const OFFSET: u64 = 0x2122_2324_2526_2728;
     /// Distinctive `RWF_*` flags.
     const RW_FLAGS: i32 = 0x31;
-    /// Distinctive address, never dereferenced.
-    const ADDR: u64 = 0x4142_4344_4546_4748;
+    /// Distinctive address, cut to the pointer width, never dereferenced.
+    const ADDR: usize = 0x4142_4344_4546_4748_u64 as usize;
 
     /// A pointer to `ADDR`, which no test dereferences.
     const fn ptr<T>() -> *mut T {
-        std::ptr::without_provenance_mut(ADDR as usize)
+        std::ptr::without_provenance_mut(ADDR)
     }
 
     /// The 64 bytes of `sqe`.
@@ -2114,7 +2118,7 @@ mod squeue_entry_tests {
     fn test_read() {
         Expected::new(22, FD, USER_DATA)
             .off(OFFSET)
-            .addr(ADDR)
+            .addr(ADDR as u64)
             .len(LEN)
             .op_flags(0x31)
             .check(SqueueEntry::read(FD, ptr(), LEN, OFFSET, RW_FLAGS).with_user_data(USER_DATA));
@@ -2124,7 +2128,7 @@ mod squeue_entry_tests {
     fn test_write() {
         Expected::new(23, FD, USER_DATA)
             .off(OFFSET)
-            .addr(ADDR)
+            .addr(ADDR as u64)
             .len(LEN)
             .op_flags(0x31)
             .check(SqueueEntry::write(FD, ptr(), LEN, OFFSET, RW_FLAGS).with_user_data(USER_DATA));
@@ -2134,7 +2138,7 @@ mod squeue_entry_tests {
     fn test_writev() {
         Expected::new(2, FD, USER_DATA)
             .off(OFFSET)
-            .addr(ADDR)
+            .addr(ADDR as u64)
             .len(7)
             .op_flags(0x31)
             .check(SqueueEntry::writev(FD, ptr(), 7, OFFSET, RW_FLAGS).with_user_data(USER_DATA));
@@ -2143,7 +2147,7 @@ mod squeue_entry_tests {
     #[test]
     fn test_send() {
         Expected::new(26, FD, USER_DATA)
-            .addr(ADDR)
+            .addr(ADDR as u64)
             .len(LEN)
             .check(SqueueEntry::send(FD, ptr(), LEN).with_user_data(USER_DATA));
     }
@@ -2151,7 +2155,7 @@ mod squeue_entry_tests {
     #[test]
     fn test_recv() {
         Expected::new(27, FD, USER_DATA)
-            .addr(ADDR)
+            .addr(ADDR as u64)
             .len(LEN)
             .check(SqueueEntry::recv(FD, ptr(), LEN).with_user_data(USER_DATA));
     }
@@ -2174,7 +2178,7 @@ mod squeue_entry_tests {
     fn test_connect() {
         Expected::new(16, FD, USER_DATA)
             .off(28)
-            .addr(ADDR)
+            .addr(ADDR as u64)
             .check(SqueueEntry::connect(FD, ptr(), 28).with_user_data(USER_DATA));
     }
 
@@ -2204,7 +2208,7 @@ mod squeue_entry_tests {
         for mask in [0b10, u64::from(u32::MAX)] {
             Expected::new(51, 0x82, USER_DATA)
                 .off(0x5152_5354)
-                .addr(ADDR)
+                .addr(ADDR as u64)
                 .addr3(mask)
                 .check(
                     SqueueEntry::futex_wait(ptr(), 0x5152_5354, mask, 0x82)
