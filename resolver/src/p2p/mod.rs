@@ -246,6 +246,10 @@ pub trait Producer: Clone + Send + 'static {
     type Key: Span;
 
     /// Serve a request received from the network.
+    ///
+    /// If the data is not ready, return the receiver so the caller can continue. Each sender
+    /// kept for a later reply represents one unanswered request. Send the data to answer the
+    /// request, or drop the sender to decline it.
     fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes>;
 }
 
