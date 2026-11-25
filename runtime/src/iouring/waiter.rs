@@ -471,11 +471,9 @@ impl Waiters {
         // succeeds, cleanup must remain able to finish the request locally.
         let sqe = waiter.request.build_sqe(id);
         waiter.in_flight = true;
-
         if waiter.request.is_storage() {
             self.storage_in_flight += 1;
         }
-
         self.in_flight += 1;
         sqe
     }
@@ -520,7 +518,6 @@ impl Waiters {
         if waiter.request.is_storage() {
             self.storage_in_flight -= 1;
         }
-
         self.in_flight -= 1;
         outcome
     }
