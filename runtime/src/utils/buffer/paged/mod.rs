@@ -65,6 +65,17 @@ mod writer;
 pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;
+
+/// A failed [Sealed::warm] and the progress it made before returning.
+#[derive(Debug, thiserror::Error)]
+#[error("page cache warm failed after reading {pages_read} pages: {source}")]
+pub struct WarmError {
+    /// Valid pages read and cached by this warm's own batch, excluding joined reads.
+    pub pages_read: usize,
+    /// The error reported by the warm.
+    pub source: Error,
+}
+
 use tracing::{debug, error};
 pub use writer::{Append, Recovering, Recovery, Writer};
 

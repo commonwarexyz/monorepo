@@ -28,7 +28,8 @@
 //! batch never needs the cache lock.
 
 use super::{
-    CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
+    CHECKSUM_SIZE, WarmError, get_page_with_checksum_from_blob, physical_page,
+    validate_physical_page,
 };
 use crate::{BLOB_PAGE_SIZE, Blob, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::{AHashMap, AHashSet};
@@ -901,7 +902,9 @@ impl CacheRef {
                     let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());
                     fetches.push((fetch, pieces));
                 } else if let Some((batch, index, driver)) =
-                    cache.batches.find_unpublished(blob_id, page_num, BatchKind::Demand)
+                    cache
+                        .batches
+                        .find_unpublished(blob_id, page_num, BatchKind::Demand)
                 {
                     let joined = reads
                         .iter()
@@ -918,8 +921,14 @@ impl CacheRef {
             if !unread.is_empty() {
                 let (physical, pieces): (Vec<_>, Vec<_>) = unread.into_iter().unzip();
                 let pages = pieces.iter().map(|pieces| pieces[0].0).collect();
-                let (batch, driver) =
-                    self.start_batch(&mut cache, blob, blob_id, pages, physical, BatchKind::Demand);
+                let (batch, driver) = self.start_batch(
+                    &mut cache,
+                    blob,
+                    blob_id,
+                    pages,
+                    physical,
+                    BatchKind::Demand,
+                );
                 reads.push(BatchRead::starting(batch, driver, pieces));
             }
         }
@@ -973,7 +982,7 @@ impl CacheRef {
         blob: &Arc<B>,
         blob_id: u64,
         page_nums: &[u64],
-    ) -> Result<usize, Error> {
+    ) -> Result<usize, WarmError> {
         // Leave referenced pages in place. The rest, by index in `page_nums`, need the write lock.
         let pending: Vec<usize> = {
             let cache = self.cache.read();
@@ -990,7 +999,11 @@ impl CacheRef {
         let physical = pending
             .iter()
             .map(|&i| physical_page(page_nums[i], page_size))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| WarmError {
+                pages_read: 0,
+                source,
+            })?;
 
         // Mark resident pages expected, join the fetches and batches other readers have in
         // flight, and read the rest with one batch of this call's own. A joined batch's pages are
@@ -1015,7 +1028,9 @@ impl CacheRef {
                     let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());
                     fetches.push((page_num, fetch));
                 } else if let Some((batch, index, driver)) =
-                    cache.batches.find_unpublished(blob_id, page_num, BatchKind::Warm)
+                    cache
+                        .batches
+                        .find_unpublished(blob_id, page_num, BatchKind::Warm)
                 {
                     let subscription = joined
                         .iter()
@@ -1031,20 +1046,11 @@ impl CacheRef {
             }
             (!unread.is_empty()).then(|| {
                 let (pages, physical) = unread.into_iter().unzip();
-                let (batch, driver) = self.start_batch(
-                    &mut cache,
-                    blob,
-                    blob_id,
-                    pages,
-                    physical,
-                    BatchKind::Warm,
-                );
+                let (batch, driver) =
+                    self.start_batch(&mut cache, blob, blob_id, pages, physical, BatchKind::Warm);
                 (Subscription::starting(batch, driver.clone()), driver)
             })
         };
-        let read = own
-            .as_ref()
-            .map_or(0, |(subscription, _)| subscription.batch.pages.len());
 
         // Mark each joined page expected as its source supplies it, and drive this call's batch,
         // which caches its own pages, until it ends. Pages that arrive together are marked under
@@ -1076,16 +1082,23 @@ impl CacheRef {
         };
         let own = async {
             let Some((mut subscription, driver)) = own else {
-                return Ok(());
+                return (0, Ok(()));
             };
+            let mut pages_read = 0;
             let mut result = Ok(());
             while let Some(page) = subscription.next().await {
-                result = result.and(page.map(drop));
+                match page {
+                    Ok(_) => pages_read += 1,
+                    Err(err) => result = result.and(Err(err)),
+                }
             }
-            result.and(driver.await)
+            (pages_read, result.and(driver.await))
         };
-        let (joined, own) = futures::join!(joins, own);
-        joined.and(own).map(|()| read)
+        let (joined, (pages_read, own)) = futures::join!(joins, own);
+        joined
+            .and(own)
+            .map(|()| pages_read)
+            .map_err(|source| WarmError { pages_read, source })
     }
 
     /// Start a batch reading `pages` (non-empty, strictly increasing) of `blob`, whose physical
@@ -3276,7 +3289,10 @@ mod tests {
             assert!(poll!(first.as_mut()).is_pending());
             let batch = {
                 let cache = cache_ref.cache.write();
-                let (batch, index, driver) = cache.batches.find_unpublished(0, 0, BatchKind::Demand).unwrap();
+                let (batch, index, driver) = cache
+                    .batches
+                    .find_unpublished(0, 0, BatchKind::Demand)
+                    .unwrap();
                 let mut subscription = Subscription::joining(batch.clone(), driver);
                 subscription.select(index, 0);
                 let reader = subscription.reader;
@@ -3875,7 +3891,13 @@ mod tests {
             // keeps page 0 cached.
             start.send(()).unwrap();
             assert!(matches!(batch.await, Err(Error::ReadFailed)));
-            assert!(matches!(warm.await, Err(Error::ReadFailed)));
+            assert!(matches!(
+                warm.await,
+                Err(WarmError {
+                    source: Error::ReadFailed,
+                    ..
+                })
+            ));
             assert!(is_cached(&cache_ref, 0, 0));
             assert!(!is_cached(&cache_ref, 0, 1));
             assert_idle(&cache_ref);
@@ -3887,7 +3909,10 @@ mod tests {
             let pages = [0, 1, 2];
             assert!(matches!(
                 cache_ref.warm(&blob, 2, &pages).await,
-                Err(Error::InvalidChecksum)
+                Err(WarmError {
+                    pages_read: 2,
+                    source: Error::InvalidChecksum
+                })
             ));
             assert!(is_cached(&cache_ref, 2, 0));
             assert!(!is_cached(&cache_ref, 2, 1));
@@ -3905,7 +3930,10 @@ mod tests {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
             assert!(matches!(
                 cache_ref.warm(&blob, 0, &[0]).await,
-                Err(Error::ReadFailed)
+                Err(WarmError {
+                    pages_read: 1,
+                    source: Error::ReadFailed
+                })
             ));
             assert!(is_cached(&cache_ref, 0, 0));
             assert_idle(&cache_ref);
@@ -3962,7 +3990,13 @@ mod tests {
                 }
 
                 open(&mut opens);
-                assert!(matches!(warm.await, Err(Error::ReadFailed)));
+                assert!(matches!(
+                    warm.await,
+                    Err(WarmError {
+                        source: Error::ReadFailed,
+                        ..
+                    })
+                ));
                 assert!(is_cached(&cache_ref, 0, 1));
                 assert_idle(&cache_ref);
             }

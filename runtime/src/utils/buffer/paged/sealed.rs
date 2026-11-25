@@ -13,7 +13,7 @@
 //! and the page cache.
 
 use super::{
-    CHECKSUM_SIZE, CacheRef, Replay,
+    CHECKSUM_SIZE, CacheRef, Replay, WarmError,
     read::PageReader,
     view::{Tail, View},
 };
@@ -191,10 +191,10 @@ impl<B: Blob> Sealed<B> {
     /// alongside the pages it admits in the meantime.
     ///
     /// A page that fails validation, or that a failed read never supplies, is not cached. A
-    /// failed read does not stop the others, and the warm returns an error once every read
-    /// finishes. Demand reads don't wait on a warm's reads. Dropping the future releases the reads
+    /// failed read does not stop the others. Once every read finishes, the error includes how
+    /// many valid pages the warm read and cached. Demand reads don't wait on a warm's reads. Dropping the future releases the reads
     /// it joined. A read it started still completes if another warm joined it.
-    pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, Error> {
+    pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, WarmError> {
         self.view().warm(ranges).await
     }
 

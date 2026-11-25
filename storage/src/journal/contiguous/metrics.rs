@@ -2,6 +2,7 @@
 
 use commonware_runtime::{
     Clock, Metrics as RuntimeMetrics,
+    buffer::paged::WarmError,
     telemetry::metrics::{
         Counter, Gauge, GaugeExt as _, MetricsExt as _,
         histogram::{ScopedTimer, Timed},
@@ -22,24 +23,23 @@ impl PrefetchMetrics {
         Self {
             pages: context.counter(
                 "prefetched_pages",
-                "Number of pages prefetches read into the page cache",
+                "Number of pages read into the page cache by completed prefetch reads, including partial failures",
             ),
             failures: context.counter("prefetch_failures", "Number of prefetch reads that failed"),
         }
     }
 
-    /// Record one prefetch read: the pages it read from storage, or its failure, which is also
-    /// logged.
-    pub(super) fn record(&self, result: Result<usize, commonware_runtime::Error>) {
-        match result {
-            Ok(pages) => {
-                self.pages.inc_by(pages as u64);
-            }
+    /// Record pages read from storage, even on failure. Also count and log any failure.
+    pub(super) fn record(&self, result: Result<usize, WarmError>) {
+        let pages = match result {
+            Ok(pages) => pages,
             Err(err) => {
                 self.failures.inc();
                 warn!(?err, "prefetch failed");
+                err.pages_read
             }
-        }
+        };
+        self.pages.inc_by(pages as u64);
     }
 }
 

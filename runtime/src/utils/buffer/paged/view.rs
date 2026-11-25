@@ -6,7 +6,7 @@
 //! back to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
 //! exactly one place.
 
-use super::{CacheRef, tip::Buffer};
+use super::{CacheRef, WarmError, tip::Buffer};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use commonware_utils::Widen;
 use std::{num::NonZeroUsize, sync::Arc};
@@ -312,7 +312,7 @@ impl<B: Blob> View<'_, B> {
     /// may overlap, and a page covered by several is read once. A range out of offset order is
     /// warmed only past the last page an earlier range covers. The warm stops after selecting
     /// half of Main (at least one page). See [CacheRef::warm].
-    pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, Error> {
+    pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, WarmError> {
         let page_size: u64 = self.cache_ref.page_size().widen();
         let limit = (self.cache_ref.main_capacity() / 2).max(1);
         let mut pages: Vec<u64> = Vec::with_capacity(ranges.len().min(limit));
