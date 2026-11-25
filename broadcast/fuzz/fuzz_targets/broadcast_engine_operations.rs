@@ -26,7 +26,7 @@ use std::{collections::BTreeMap, time::Duration};
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
-/// Maximum time, in milliseconds, that a single fuzz operation can advance the clock.
+/// Largest generated sleep, in milliseconds.
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Maximum number of recently broadcast digests tracked for `Recent` lookups.
