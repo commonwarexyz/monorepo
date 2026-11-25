@@ -8,8 +8,8 @@
 //! Unfinished requests and outstanding operation SQEs are counted separately.
 //! Retained results contribute to neither count, so a slow observer cannot hold
 //! staging capacity. Driver queues and deadlines must also reject these results
-//! even though their IDs still resolve in the slab.
-//! Outstanding storage SQEs are also counted on their own.
+//! even though their IDs still resolve in the slab. Outstanding storage SQEs
+//! are also counted on their own.
 //!
 //! Observer wakers, detached publications, and owners ready for destruction are handed
 //! to [`Deferred`]. The worker invokes callbacks after releasing its local borrow.
@@ -156,7 +156,7 @@ impl Waiters {
     }
 
     /// Number of staged storage operation SQEs whose CQEs have not been
-    /// consumed, including those of cancelled requests.
+    /// consumed.
     pub const fn storage_in_flight(&self) -> usize {
         self.storage_in_flight
     }
@@ -471,9 +471,12 @@ impl Waiters {
         // succeeds, cleanup must remain able to finish the request locally.
         let sqe = waiter.request.build_sqe(id);
         waiter.in_flight = true;
-        let storage = waiter.request.is_storage();
+
+        if waiter.request.is_storage() {
+            self.storage_in_flight += 1;
+        }
+
         self.in_flight += 1;
-        self.storage_in_flight += usize::from(storage);
         sqe
     }
 
@@ -503,7 +506,6 @@ impl Waiters {
         // whether the request completes or is requeued for another one.
         assert!(waiter.in_flight);
         waiter.in_flight = false;
-        let storage = waiter.request.is_storage();
 
         let outcome = match waiter.request.on_cqe(waiter.state, result) {
             Some(result) => CompletionOutcome::Complete(id, result),
@@ -514,8 +516,12 @@ impl Waiters {
             }
             None => CompletionOutcome::Requeue(id),
         };
+
+        if waiter.request.is_storage() {
+            self.storage_in_flight -= 1;
+        }
+
         self.in_flight -= 1;
-        self.storage_in_flight -= usize::from(storage);
         outcome
     }
 
@@ -899,76 +905,57 @@ pub mod tests {
 
     #[test]
     fn test_storage_sqes_count_until_their_cqes() {
-        let mut waiters = Waiters::new(4);
-        let mut deferred = Deferred::default();
-        let read = waiters.insert(make_read_request(), observer());
-        let recv = waiters.insert(make_recv_request(), observer());
-        let sync = waiters.insert(make_sync_request(), observer());
-        // Queued requests do not count until they stage.
-        assert_eq!(waiters.storage_in_flight(), 0);
-        stage(&mut waiters, read);
-        stage(&mut waiters, recv);
-        stage(&mut waiters, sync);
-        assert_eq!(waiters.in_flight(), 3);
-        assert_eq!(waiters.storage_in_flight(), 2);
-
-        // Partial progress releases the read's SQE until its follow-up stages.
-        assert!(matches!(
-            waiters.on_completion(read.user_data(), 2),
-            CompletionOutcome::Requeue(_)
-        ));
-        assert_eq!(waiters.storage_in_flight(), 1);
-        stage(&mut waiters, read);
-        assert_eq!(waiters.storage_in_flight(), 2);
-
-        // A cancelled read stays counted until its operation CQE.
-        assert!(waiters.cancel(read));
-        assert_eq!(waiters.storage_in_flight(), 2);
-        complete(&mut waiters, read, -libc::ECANCELED, &mut deferred);
-        assert_eq!(waiters.storage_in_flight(), 1);
-
-        complete(&mut waiters, sync, 0, &mut deferred);
-        assert_eq!(waiters.storage_in_flight(), 0);
-        assert_eq!(waiters.in_flight(), 1);
-    }
-
-    #[test]
-    fn test_storage_resizes_count_until_their_cqes() {
-        let mut waiters = Waiters::new(1);
+        let mut waiters = Waiters::new(5);
         let mut deferred = Deferred::default();
         let file = make_file(File::from(make_socket_fd()));
         file.tracker.write();
-        let resize = waiters.insert(Request::Resize(ResizeRequest::new(file, 0)), observer());
-        assert_eq!(waiters.storage_in_flight(), 0);
-        stage(&mut waiters, resize);
-        assert_eq!(waiters.storage_in_flight(), 1);
-        // A resize remains in flight after its observer disappears.
-        assert!(!waiters.orphan(resize, &mut deferred));
-        assert_eq!(waiters.storage_in_flight(), 1);
-        complete(&mut waiters, resize, 0, &mut deferred);
-        assert_eq!(waiters.storage_in_flight(), 0);
-    }
 
-    #[test]
-    fn test_storage_writes_count_each_staged_sqe() {
-        let mut waiters = Waiters::new(1);
-        let mut deferred = Deferred::default();
+        let read = waiters.insert(make_read_request(), observer());
         let write = waiters.insert(make_write_request(), observer());
+        let sync = waiters.insert(make_sync_request(), observer());
+        let resize = waiters.insert(Request::Resize(ResizeRequest::new(file, 0)), observer());
+        let recv = waiters.insert(make_recv_request(), observer());
+
+        // Queued requests do not count until they stage.
         assert_eq!(waiters.storage_in_flight(), 0);
+
+        // Every staged storage SQE counts, and the receive does not.
+        for id in [read, write, sync, resize, recv] {
+            stage(&mut waiters, id);
+        }
+        assert_eq!(waiters.in_flight(), 5);
+        assert_eq!(waiters.storage_in_flight(), 4);
+
+        // Partial progress releases an SQE until its follow-up stages.
+        for id in [read, write] {
+            assert!(matches!(
+                waiters.on_completion(id.user_data(), 2),
+                CompletionOutcome::Requeue(_)
+            ));
+        }
+        assert_eq!(waiters.storage_in_flight(), 2);
+        stage(&mut waiters, read);
         stage(&mut waiters, write);
-        assert_eq!(waiters.storage_in_flight(), 1);
-        assert!(matches!(
-            waiters.on_completion(write.user_data(), 2),
-            CompletionOutcome::Requeue(_)
-        ));
-        assert_eq!(waiters.storage_in_flight(), 0);
-        stage(&mut waiters, write);
-        assert_eq!(waiters.storage_in_flight(), 1);
-        // Storage mutations remain in flight after their observer disappears.
+        assert_eq!(waiters.storage_in_flight(), 4);
+
+        // A cancelled read stays counted until its operation CQE.
+        assert!(waiters.cancel(read));
+        assert_eq!(waiters.storage_in_flight(), 4);
+        complete(&mut waiters, read, -libc::ECANCELED, &mut deferred);
+        assert_eq!(waiters.storage_in_flight(), 3);
+
+        // Storage mutations stay counted after their observers disappear.
         assert!(!waiters.orphan(write, &mut deferred));
-        assert_eq!(waiters.storage_in_flight(), 1);
+        assert!(!waiters.orphan(resize, &mut deferred));
+        assert_eq!(waiters.storage_in_flight(), 3);
         complete(&mut waiters, write, 3, &mut deferred);
+        complete(&mut waiters, resize, 0, &mut deferred);
+        assert_eq!(waiters.storage_in_flight(), 1);
+
+        // The sync's CQE leaves only the receive in flight.
+        complete(&mut waiters, sync, 0, &mut deferred);
         assert_eq!(waiters.storage_in_flight(), 0);
+        assert_eq!(waiters.in_flight(), 1);
     }
 
     #[test]

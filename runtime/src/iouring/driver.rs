@@ -479,6 +479,7 @@ impl Driver {
                 let to_submit =
                     u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
                 let mut flags = EnterFlags::GETEVENTS;
+
                 if !iowait {
                     flags |= EnterFlags::NO_IOWAIT;
                 }
@@ -489,9 +490,11 @@ impl Driver {
                     .nsec(timeout.subsec_nanos());
                 let args = SubmitArgs::new().timespec(&ts);
                 let args = deadline.is_some().then_some(&args);
+
                 if args.is_some() {
                     flags |= EnterFlags::EXT_ARG;
                 }
+
                 #[cfg(test)]
                 tests::record_enter(1, flags);
 
@@ -500,6 +503,7 @@ impl Driver {
                 // passed exactly when EXT_ARG is set, outlives the call and wraps
                 // the kernel's `io_uring_getevents_arg`.
                 let result = unsafe { ring.submitter().enter(to_submit, 1, flags.bits(), args) };
+
                 match result {
                     // This timeout bounds the enter. Request expiry belongs to
                     // the wheel.
@@ -3310,9 +3314,11 @@ pub mod tests {
         // submits ends its wait, so the check depends on no deadline.
         let no_iowait = |harness: &mut Harness| {
             let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+
             // SAFETY: A NOP references no memory.
             unsafe { harness.driver.ring.submission().push(&nop).unwrap() };
             assert!(harness.park(0, None).unwrap());
+
             let (min_complete, flags) = LAST_ENTER.get().unwrap();
             assert_eq!(min_complete, 1);
             flags.contains(EnterFlags::NO_IOWAIT)
@@ -3342,12 +3348,16 @@ pub mod tests {
         harness.service();
         assert!(harness.driver.state.waiters.is_in_flight(read));
         assert!(!no_iowait(&mut harness));
+
+        // A failed cancellation does not release it either.
         harness
             .driver
             .state
             .handle_cqe(CANCEL_USER_DATA, -libc::EALREADY, &mut harness.deferred);
         assert_eq!(harness.driver.state.waiters.storage_in_flight(), 1);
         assert!(!no_iowait(&mut harness));
+
+        // Its operation CQE does.
         harness.simulated_completion(read, -libc::ECANCELED);
         assert!(no_iowait(&mut harness));
 
@@ -3355,6 +3365,7 @@ pub mod tests {
         file.tracker.write();
         let resize = harness.stage(Request::Resize(ResizeRequest::new(file, 0)), None, 2);
         assert!(!no_iowait(&mut harness));
+
         harness.simulated_completion(resize, 0);
         assert!(no_iowait(&mut harness));
 
