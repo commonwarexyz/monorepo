@@ -26,10 +26,7 @@ use std::{collections::BTreeMap, time::Duration};
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
-/// Maximum sleep duration in milliseconds for fuzz tests.
-///
-/// Capped to avoid overflow in governor rate limiter which uses nanoseconds internally
-/// and can only represent durations up to ~584 years.
+/// Largest generated sleep, in milliseconds.
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Maximum number of recently broadcast digests tracked for `Recent` lookups.

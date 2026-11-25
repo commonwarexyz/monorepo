@@ -153,11 +153,11 @@ where
         >,
     ) {
         // Create the rate limiters
-        let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
+        let mut ip_rate_limiter = KeyedRateLimiter::new(
             self.allowed_handshake_rate_per_ip,
             self.context.child("ip_rate_limiter"),
         );
-        let subnet_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
+        let mut subnet_rate_limiter = KeyedRateLimiter::new(
             self.allowed_handshake_rate_per_subnet,
             self.context.child("subnet_rate_limiter"),
         );

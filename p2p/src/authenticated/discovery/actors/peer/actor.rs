@@ -117,7 +117,7 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             bit_vec: sent_messages.get_or_create_owned(&metrics::Message::new_bit_vec(&peer)),
             peers: sent_messages.get_or_create_owned(&metrics::Message::new_peers(&peer)),
         };
-        let inbox = Inbox::new(
+        let mut inbox = Inbox::new(
             &self.context,
             peer.clone(),
             channels,
@@ -139,14 +139,12 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
         // jitter at message boundaries.
         let half = (self.gossip_bit_vec_frequency / 2).max(SYSTEM_TIME_PRECISION);
         let rate = Quota::with_period(half).unwrap();
-        let limiter =
-            RateLimiter::direct_with_clock(rate, self.context.child("bit_vec_rate_limiter"));
+        let limiter = RateLimiter::new(rate, self.context.child("bit_vec_rate_limiter"));
         let label = metrics::Message::new_bit_vec(&peer);
-        let bit_vec_throttle = Throttle::new(limiter, received, rate_limited, &label);
-        let limiter =
-            RateLimiter::direct_with_clock(rate, self.context.child("peers_rate_limiter"));
+        let mut bit_vec_throttle = Throttle::new(limiter, received, rate_limited, &label);
+        let limiter = RateLimiter::new(rate, self.context.child("peers_rate_limiter"));
         let label = metrics::Message::new_peers(&peer);
-        let peers_throttle = Throttle::new(limiter, received, rate_limited, &label);
+        let mut peers_throttle = Throttle::new(limiter, received, rate_limited, &label);
 
         // Send/Receive messages from the peer
         let send_handler = self.context.child("sender").spawn({

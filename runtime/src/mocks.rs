@@ -17,7 +17,6 @@ use futures::{
     future::{self, Either},
     stream,
 };
-use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
 use std::{
     collections::VecDeque,
@@ -487,9 +486,8 @@ impl State {
     }
 }
 
-/// Forwards [Supervisor], [Clock], [GovernorClock], [ReasonablyRealtime],
-/// [Metrics], [TryRng], and [TryCryptoRng] to the wrapped context for test
-/// context wrappers with one extra field (named by the second argument).
+/// Forwards [Supervisor], [Clock], [Metrics], [TryRng], and [TryCryptoRng] to the wrapped
+/// context for test context wrappers with one extra field (named by the second argument).
 macro_rules! forward_context {
     ($wrapper:ident, $field:ident) => {
         impl<E: Supervisor> Supervisor for $wrapper<E> {
@@ -531,16 +529,6 @@ macro_rules! forward_context {
                 self.inner.sleep_until(deadline)
             }
         }
-
-        impl<E: Clock> GovernorClock for $wrapper<E> {
-            type Instant = std::time::SystemTime;
-
-            fn now(&self) -> Self::Instant {
-                self.current()
-            }
-        }
-
-        impl<E: Clock> ReasonablyRealtime for $wrapper<E> {}
 
         impl<E: Metrics> Metrics for $wrapper<E> {
             fn register<N: Into<String>, H: Into<String>, M: Metric>(

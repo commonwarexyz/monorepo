@@ -305,16 +305,6 @@ mod tests {
         }
     }
 
-    impl governor::clock::Clock for ManualClock {
-        type Instant = SystemTime;
-
-        fn now(&self) -> Self::Instant {
-            self.current()
-        }
-    }
-
-    impl governor::clock::ReasonablyRealtime for ManualClock {}
-
     impl Clock for ManualClock {
         fn current(&self) -> SystemTime {
             *self.time.lock()

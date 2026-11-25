@@ -56,10 +56,8 @@ stability_scope!(BETA {
     use commonware_macros::select;
     use commonware_parallel::Rayon;
     use futures::FutureExt as _;
-    #[allow(dead_code, reason = "callers still use the governor aliases below")]
     mod limiter;
-    /// Re-export of [governor::Quota] for rate limiting configuration.
-    pub use governor::Quota;
+    pub use limiter::{KeyedRateLimiter, Quota, RateLimiter};
     use std::{
         future::Future,
         io::Error as IoError,
@@ -514,42 +512,12 @@ stability_scope!(BETA {
         fn encode(&self) -> String;
     }
 
-    /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
-    ///
-    /// This is a convenience type alias for creating single-entity rate limiters.
-    /// For per-key rate limiting, use [KeyedRateLimiter].
-    pub type RateLimiter<C> = governor::RateLimiter<
-        governor::state::NotKeyed,
-        governor::state::InMemoryState,
-        C,
-        governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
-    >;
-
-    /// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
-    ///
-    /// This is a convenience type alias for creating per-peer rate limiters
-    /// using governor's [HashMapStateStore].
-    ///
-    /// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
-    pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
-        K,
-        governor::state::keyed::HashMapStateStore<K>,
-        C,
-        governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
-    >;
-
     /// Interface that any task scheduler must implement to provide
     /// time-based operations.
     ///
     /// It is necessary to mock time to provide deterministic execution
     /// of arbitrary tasks.
-    pub trait Clock:
-        governor::clock::Clock<Instant = SystemTime>
-        + governor::clock::ReasonablyRealtime
-        + Send
-        + Sync
-        + 'static
-    {
+    pub trait Clock: Send + Sync + 'static {
         /// Returns the current time.
         fn current(&self) -> SystemTime;
 

@@ -28,7 +28,6 @@ commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime-macros.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
-governor.workspace = true
 libc.workspace = true
 loom = { workspace = true, optional = true }
 opentelemetry.workspace = true
