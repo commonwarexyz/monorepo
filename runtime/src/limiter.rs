@@ -38,7 +38,7 @@ impl Quota {
         }
     }
 
-    /// Admits `max_burst` cells per second with a burst of `max_burst`.
+    /// Targets a refill rate of `max_burst` cells per second with a burst size of `max_burst`.
     ///
     /// The replenish interval is rounded down to whole nanoseconds, with a minimum of one
     /// nanosecond.
@@ -46,12 +46,12 @@ impl Quota {
         Self::per_period(1, max_burst)
     }
 
-    /// Admits `max_burst` cells per minute with a burst of `max_burst`.
+    /// Targets a refill rate of `max_burst` cells per minute with a burst size of `max_burst`.
     pub const fn per_minute(max_burst: NonZeroU32) -> Self {
         Self::per_period(60, max_burst)
     }
 
-    /// Admits `max_burst` cells per hour with a burst of `max_burst`.
+    /// Targets a refill rate of `max_burst` cells per hour with a burst size of `max_burst`.
     pub const fn per_hour(max_burst: NonZeroU32) -> Self {
         Self::per_period(3_600, max_burst)
     }
@@ -196,7 +196,8 @@ impl<C: Clock> RateLimiter<C> {
 /// has fully refilled.
 pub struct KeyedRateLimiter<K, C: Clock> {
     gcra: Gcra<C>,
-    /// Theoretical arrival time for each tracked key. A key without an entry has its full allowance.
+    /// Theoretical arrival time for each tracked key.
+    /// A key without an entry has its full allowance.
     tats: HashMap<K, u128>,
 }
 
