@@ -385,6 +385,7 @@ mod tests {
     use commonware_p2p::{
         Provider, TrackedPeers,
         simulated::{Link, Network, Oracle},
+        utils::mocks::NoopBlocker,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -426,23 +427,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct DummyBlocker;
-
-    impl commonware_p2p::Blocker for DummyBlocker {
-        type PublicKey = ed25519::PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> commonware_actor::Feedback {
-            commonware_actor::Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) =
-                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
-            receiver
-        }
-    }
-
     type TestDb = fixed::Db<
         mmr::Family,
         deterministic::Context,
@@ -454,11 +438,12 @@ mod tests {
     >;
     type TestOp = <Shared<TestDb> as Source>::Op;
 
+    type TestBlocker = NoopBlocker<ed25519::PublicKey>;
     type TestActor = Actor<
         deterministic::Context,
         ed25519::PublicKey,
         DummyProvider,
-        DummyBlocker,
+        TestBlocker,
         mmr::Family,
         TestDb,
     >;
@@ -568,14 +553,14 @@ mod tests {
 
     fn test_config<DB>(
         database: Option<Shared<DB>>,
-    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, DB>
+    ) -> Config<ed25519::PublicKey, DummyProvider, TestBlocker, DB>
     where
         Shared<DB>: Source,
         Op<DB>: Read<Cfg = ()>,
     {
         Config {
             peer_provider: DummyProvider,
-            blocker: DummyBlocker,
+            blocker: NoopBlocker::default(),
             database,
             operation_codec_config: (),
             mailbox_size: NZUsize!(16),

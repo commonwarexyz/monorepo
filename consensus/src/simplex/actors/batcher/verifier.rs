@@ -2,11 +2,11 @@ use crate::{
     simplex::{
         scheme::Scheme,
         types::{
-            Attributable, Certificate, Finalization, Kind, Notarization, Notarize, Nullification,
-            Proposal, Subject, Vote,
+            Certificate, Finalization, Kind, Notarization, Notarize, Nullification, Proposal,
+            Subject, Vote,
         },
     },
-    types::{Participant, Round as Rnd},
+    types::{Attributable, Participant, Round as Rnd},
 };
 use commonware_cryptography::{
     Digest,

@@ -30,17 +30,17 @@
 //! at the database or parent batch's floor, and `with_inactivity_floor` sets a different one. That
 //! default holds the floor, so their logs grow until the application advances it.
 //!
-//! A batch records no commit metadata unless `with_metadata` sets it ([store] takes metadata in
-//! `finalize` instead). Metadata belongs to one batch. Child batches start without it, and [any]
-//! and [current] keep it through `stage` and `expand`.
+//! A batch records no commit metadata unless `with_metadata` sets it. Metadata belongs to one
+//! batch. Child batches start without it, and [any] and [current] keep it through `stage` and
+//! `expand`.
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
 //! # Batch validity
 //!
-//! A batch's chain has a set of states: its recorded database boundary, each ancestor's tip, and
-//! the batch's own tip. While the database is at one of them, value reads through the batch are
+//! An authenticated batch's chain includes the recorded database boundary, each ancestor's tip,
+//! and the batch's own tip. While the database is at one of them, value reads through the batch are
 //! exact, because the batch retains the writes of every ancestor the database has not applied. At
 //! any other state, for example after a sibling or a descendant of the batch is applied, reads
 //! return [`Error::StaleRead`], and merkleize and apply return [`Error::StaleBatch`]. Merkleize
@@ -82,8 +82,9 @@
 //! Mutating methods take the database by value and return it on success. If a mutating
 //! method returns an error, or its future is dropped before it finishes, the database is
 //! gone: state that was not yet durable is discarded, but everything already on disk stays
-//! recoverable. This applies to validation errors too (e.g. rejecting a stale batch);
-//! use each database's `validate_batch` to pre-check a batch without risking the handle.
+//! recoverable. This applies to validation errors too (e.g. rejecting a stale batch).
+//! On authenticated databases, call `validate_batch` before applying a batch to check it
+//! without risking the handle.
 //!
 //! # Traits
 //!
@@ -128,17 +129,16 @@ mod conformance;
 pub mod current;
 pub mod floor;
 pub mod immutable;
+mod index_build;
 pub mod keyless;
 mod metrics;
 pub mod operation;
-mod snapshot;
 pub mod store;
 pub mod sync;
 pub mod value;
 pub mod verify;
 
-pub use snapshot::SnapshotBuild;
-pub(super) use snapshot::build_snapshot_from_log;
+pub use index_build::IndexBuild;
 pub use verify::ProofExt;
 
 /// Reject a bound that cannot retain the bootstrap commit.
@@ -190,7 +190,7 @@ fn validate_initialization_commit<F: Family>(
     Ok(Some(floor))
 }
 
-/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// Check the selected commit before recovery discards history. Rebuilding an index from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
     pending: &Recovery<F, E, C, H, S>,
@@ -379,7 +379,7 @@ pub enum Error<F: Family> {
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
 
-    /// The requested key was not found in the snapshot.
+    /// The requested key was not found in the index.
     #[error("key not found")]
     KeyNotFound,
 
@@ -469,19 +469,19 @@ impl<F: Family> From<authenticated::Error<F>> for Error<F> {
     }
 }
 
-/// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+/// For the given `key` which is known to exist in the index with location `old_loc`, update
 /// its location to `new_loc`.
 ///
 /// # Panics
 ///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+/// Panics if `key` is not found in the index or if `old_loc` is not found in the cursor.
 fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
-    snapshot: &mut I,
+    index: &mut I,
     key: &[u8],
     old_loc: Location<F>,
     new_loc: Location<F>,
 ) {
-    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    let mut cursor = index.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
         "known key with given old_loc should have been found"
@@ -489,18 +489,18 @@ fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
     cursor.update(new_loc);
 }
 
-/// For the given `key` which is known to exist in the snapshot with location `old_loc`, delete
-/// it from the snapshot.
+/// For the given `key` which is known to exist in the index with location `old_loc`, delete
+/// it from the index.
 ///
 /// # Panics
 ///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+/// Panics if `key` is not found in the index or if `old_loc` is not found in the cursor.
 fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
-    snapshot: &mut I,
+    index: &mut I,
     key: &[u8],
     old_loc: Location<F>,
 ) {
-    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    let mut cursor = index.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
         "known key with given old_loc should have been found"

@@ -109,7 +109,7 @@ where
         E: Spawner,
         C: authenticated::Backing<E> + 'static,
     {
-        // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
+        // Keyless restores commit fields without replaying a keyed index, so its logical floor
         // may precede the retained operation prefix.
         let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
@@ -121,7 +121,7 @@ where
         let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, false)
             .await?
             .unwrap_or(Location::new(0));
-        // With no snapshot to build, the Merkle replay is all of initialization's work.
+        // With no index to build, the Merkle replay is all of initialization's work.
         let (mut journal, ()) = pending
             .finish_with(cfg.init_concurrency, |_| async { Ok::<_, Error<F>>(()) })
             .await?;

@@ -234,10 +234,10 @@ pub struct Db<
     /// Internal nodes are hashed using their position in the ops tree rather than their
     /// grafted position.
     ///
-    /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable snapshot to the
+    /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable view to the
     /// grafted-layer hashing job running off the calling task. Mutations go through
-    /// [`Arc::make_mut`]: they are in-place while no snapshot is held and copy-on-write
-    /// otherwise, so a snapshot never observes later mutations.
+    /// [`Arc::make_mut`]: they are in-place while no view is held and copy-on-write
+    /// otherwise, so a view never observes later mutations.
     pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
 
     /// Ops-tree roots at the grafting height, held whatever the ops tree's resident height.
@@ -308,7 +308,7 @@ where
         self.any.inactivity_floor()
     }
 
-    /// Whether the snapshot currently has no active keys.
+    /// Whether the index currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.any.is_empty()
     }
@@ -390,8 +390,8 @@ where
         &self.ops_root_witness
     }
 
-    /// Snapshot of the grafted tree for use in batch chains.
-    pub(super) fn grafted_snapshot(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
+    /// View of the grafted tree for use in batch chains.
+    pub(super) fn grafted_batch(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
         merkle::batch::MerkleizedBatch::from_mem_with_strategy(
             &self.grafted_tree,
             self.strategy.clone(),
@@ -590,7 +590,7 @@ where
     }
 
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
+    /// index.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.

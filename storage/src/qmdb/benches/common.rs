@@ -37,7 +37,7 @@ use commonware_storage::{
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
-        store::{Config as StoreConfig, Db as Store},
+        store::{Config as StoreConfig, partitioned::Db as StorePart, unpartitioned::Db as Store},
     },
     translator::EightCap,
 };
@@ -64,15 +64,15 @@ pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 
 pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
 pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
-/// Ordered "any" DB with a partitioned snapshot index (256 partitions, P=1). Exercises the
+/// Ordered "any" DB with a partitioned key index (256 partitions, P=1). Exercises the
 /// partitioned ordered index's cursor (get_mut/find/update) on apply.
 pub type AnyOFixP256Db<F> = OFixP256<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
-/// Ordered "any" DB with a partitioned snapshot index (~16.8M partitions, P=3). The inline-SoA config
+/// Ordered "any" DB with a partitioned key index (~16.8M partitions, P=3). The inline-SoA config
 /// for very large key sets (P=2 spills past ~33M entries), used by the `init_scale` bench.
 #[allow(dead_code)]
 pub type AnyOFixP3Db<F> = OFixPart<F, Context, Digest, Digest, Sha256, EightCap, 3, Rayon>;
-/// Unordered "any" DB with a partitioned snapshot index (65,536 partitions, P=2), used by the
-/// `init_scale` bench to exercise the unordered index's parallel snapshot build.
+/// Unordered "any" DB with a partitioned key index (65,536 partitions, P=2), used by the
+/// `init_scale` bench to exercise the unordered index's parallel index build.
 #[allow(dead_code)]
 pub type AnyUFixP64kDb<F> = UFixPart<F, Context, Digest, Digest, Sha256, EightCap, 2, Rayon>;
 pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
@@ -105,6 +105,11 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
 
 /// Unauthenticated store with variable-size values.
 pub type StoreDb = Store<Context, Digest, Vec<u8>, EightCap, Rayon>;
+
+/// [StoreDb] with a partitioned index (256 partitions, P=1), which can build its index on several
+/// tasks. It opens the same database as [StoreDb].
+#[allow(dead_code)]
+pub type StorePartDb = StorePart<Context, Digest, Vec<u8>, EightCap, 1, Rayon>;
 
 /// Open an unauthenticated store benchmark database using the shared benchmark configuration.
 pub async fn open_store_db(ctx: Context) -> StoreDb {
@@ -351,6 +356,7 @@ pub fn store_cfg(ctx: &impl Strategizer) -> StoreConfig<EightCap, VarVecCfg, Ray
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         strategy: ctx.strategy(THREADS),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -404,7 +410,7 @@ macro_rules! define_db_variants {
 
         #[allow(unused_macros)]
         macro_rules! $timed_dispatch_name {
-            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, $cache_size:expr, |$db_name:ident| $body:expr) => {
+            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, $cache_size:expr) => {
                 match $variant_expr {
                     $(
                         $enum_name::$entry => {
@@ -413,10 +419,7 @@ macro_rules! define_db_variants {
                             cfg.init_cache = $cache_size;
                             let start = std::time::Instant::now();
                             for _ in 0..$iters {
-                                #[allow(unused_mut)]
-                                let mut $db_name =
-                                    <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
-                                $body
+                                <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
                             }
                             start.elapsed()
                         }
