@@ -431,17 +431,15 @@ impl Driver {
         // completion with a zero timeout arms an expired timer and sleeps until
         // it fires whenever no completion is ready, so a deadline that already
         // passed runs only the task work.
-        let mut timeout = None;
+        let mut timeout = Duration::ZERO;
         if let Enter::Wait {
             deadline: Some(deadline),
             ..
         } = mode
         {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            timeout = deadline.saturating_duration_since(Instant::now());
+            if timeout.is_zero() {
                 mode = Enter::TaskWork;
-            } else {
-                timeout = Some(remaining);
             }
         }
 
@@ -453,8 +451,70 @@ impl Driver {
             // deferred task work and returns, as liburing's
             // `io_uring_submit_and_get_events` does. Newer kernels bound the
             // batch and leave the rest for a later enter.
-            Enter::TaskWork => Self::submit_and_enter(ring, 0, true, None),
-            Enter::Wait { iowait, .. } => Self::submit_and_enter(ring, 1, iowait, timeout),
+            Enter::TaskWork => {
+                let to_submit =
+                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+
+                // SAFETY: `to_submit` counts only entries already published to
+                // the SQ, whose resources stay alive until their CQEs, and no
+                // argument pointer is passed.
+                unsafe {
+                    ring.submitter().enter::<libc::sigset_t>(
+                        to_submit,
+                        0,
+                        EnterFlags::GETEVENTS.bits(),
+                        None,
+                    )
+                }
+            }
+            Enter::Wait { deadline, iowait } => {
+                let to_submit =
+                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+                let mut flags = EnterFlags::GETEVENTS;
+
+                if !iowait {
+                    flags |= EnterFlags::NO_IOWAIT;
+                }
+
+                if deadline.is_some() {
+                    flags |= EnterFlags::EXT_ARG;
+                }
+
+                #[cfg(test)]
+                tests::record_wait(flags);
+
+                if deadline.is_none() {
+                    // SAFETY: `to_submit` counts only entries already published
+                    // to the SQ, whose resources stay alive until their CQEs,
+                    // and no argument pointer is passed.
+                    unsafe {
+                        ring.submitter()
+                            .enter::<libc::sigset_t>(to_submit, 1, flags.bits(), None)
+                    }
+                } else {
+                    // EXT_ARG bounds the wait without reserving an SQE for a
+                    // timeout.
+                    let ts = Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos());
+                    let args = SubmitArgs::new().timespec(&ts);
+
+                    // SAFETY: `to_submit` counts only entries already published
+                    // to the SQ, whose resources stay alive until their CQEs,
+                    // and `args` outlives the call.
+                    let result = unsafe {
+                        ring.submitter()
+                            .enter(to_submit, 1, flags.bits(), Some(&args))
+                    };
+
+                    match result {
+                        // This timeout bounds the enter. Request expiry belongs
+                        // to the wheel.
+                        Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
+                        result => result,
+                    }
+                }
+            }
         };
 
         // A transient error falls through and returns `Ok`, so the caller
@@ -485,64 +545,6 @@ impl Driver {
             return Err(io::Error::from_raw_os_error(libc::EBADR));
         }
         Ok(())
-    }
-
-    /// Submit the published SQEs, run deferred task work and wait for
-    /// `min_complete` completions for at most `timeout` when one is given.
-    ///
-    /// A blocking wait counts as iowait only when `iowait` is set. A timeout
-    /// returns `Ok`.
-    fn submit_and_enter(
-        ring: &mut IoUring,
-        min_complete: u32,
-        iowait: bool,
-        timeout: Option<Duration>,
-    ) -> io::Result<usize> {
-        let to_submit = u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
-        let mut flags = EnterFlags::GETEVENTS;
-        if !iowait {
-            flags |= EnterFlags::NO_IOWAIT;
-        }
-        if timeout.is_some() {
-            flags |= EnterFlags::EXT_ARG;
-        }
-
-        #[cfg(test)]
-        tests::record_enter(min_complete, flags);
-
-        let Some(timeout) = timeout else {
-            // SAFETY: `to_submit` counts only entries already published to the
-            // SQ, whose resources stay alive until their CQEs, and no argument
-            // pointer is passed.
-            return unsafe {
-                ring.submitter().enter::<libc::sigset_t>(
-                    to_submit,
-                    min_complete,
-                    flags.bits(),
-                    None,
-                )
-            };
-        };
-
-        // EXT_ARG bounds the wait without reserving an SQE for a timeout.
-        let ts = Timespec::new()
-            .sec(timeout.as_secs())
-            .nsec(timeout.subsec_nanos());
-        let args = SubmitArgs::new().timespec(&ts);
-
-        // SAFETY: `to_submit` counts only entries already published to the SQ,
-        // whose resources stay alive until their CQEs, and `args` outlives the
-        // call.
-        let result = unsafe {
-            ring.submitter()
-                .enter(to_submit, min_complete, flags.bits(), Some(&args))
-        };
-
-        match result {
-            // This timeout bounds the enter. Request expiry belongs to the wheel.
-            Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
-            result => result,
-        }
     }
 }
 
@@ -941,9 +943,8 @@ pub mod tests {
         /// that leaves a durability request waiting for its permit.
         static WHILE_ACQUIRING: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
 
-        /// Minimum completion count and flags of this thread's latest
-        /// task-work or wait enter.
-        static LAST_ENTER: Cell<Option<(u32, EnterFlags)>> = const { Cell::new(None) };
+        /// Flags of this thread's latest wait enter.
+        static LAST_WAIT: Cell<Option<EnterFlags>> = const { Cell::new(None) };
     }
 
     /// Clear an unused injection when its test scope exits or unwinds.
@@ -988,9 +989,9 @@ pub mod tests {
         take_fault(ring, Fault::DropCompletion)
     }
 
-    /// Remember an enter's arguments for assertions on the calling thread.
-    pub fn record_enter(min_complete: u32, flags: EnterFlags) {
-        LAST_ENTER.set(Some((min_complete, flags)));
+    /// Remember a wait's flags for assertions on the calling thread.
+    pub fn record_wait(flags: EnterFlags) {
+        LAST_WAIT.set(Some(flags));
     }
 
     /// Fail service when retired resources are awaiting deferred cleanup, and
@@ -3321,9 +3322,7 @@ pub mod tests {
             unsafe { harness.driver.ring.submission().push(&nop).unwrap() };
             assert!(harness.park(0, None).unwrap());
 
-            let (min_complete, flags) = LAST_ENTER.get().unwrap();
-            assert_eq!(min_complete, 1);
-            flags.contains(EnterFlags::NO_IOWAIT)
+            LAST_WAIT.take().unwrap().contains(EnterFlags::NO_IOWAIT)
         };
 
         // A receive without data keeps only network I/O in flight.
