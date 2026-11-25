@@ -6,7 +6,7 @@ use crate::{
         probe::{ActorArtifact, Artifact, Bootstrap, mailbox::Message, wire},
         types::{EpochInfo, Payload},
     },
-    stateful::probe::sample::Sample,
+    probe::sample::Sample,
 };
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Buf, Encode as _, Read};
@@ -20,7 +20,7 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
-    NonZeroDuration,
+    N3f1, NonZeroDuration,
     channel::{fallible::OneshotExt as _, oneshot},
 };
 use futures::future::{self, Either};
@@ -151,7 +151,8 @@ where
     pub(super) block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     pub(super) retry_timeout: NonZeroDuration,
     pub(super) artifact: Option<ActorArtifact<S, V>>,
-    pub(super) sample: Sample<S, V::Commitment>,
+    pub(super) minimum_epoch: Epoch,
+    pub(super) sample: Sample<S::PublicKey, Finalization<S, V::Commitment>>,
     pub(super) subscribers: Vec<oneshot::Sender<ActorArtifact<S, V>>>,
     pub(super) pending: Option<Pending<S, V>>,
     pub(super) fallback: Option<Pending<S, V>>,
@@ -379,10 +380,10 @@ where
             commonware_p2p::block!(self.blocker, peer, "latest finalization from non-member");
             return;
         }
-        if finalization.epoch() < self.sample.minimum_epoch() {
+        if finalization.epoch() < self.minimum_epoch {
             debug!(
                 epoch = %finalization.epoch(),
-                minimum_epoch = %self.sample.minimum_epoch(),
+                minimum_epoch = %self.minimum_epoch,
                 "ignoring latest finalization below minimum epoch"
             );
             return;
@@ -403,10 +404,11 @@ where
     /// replied and starts a boundary fetch if the epoch is new.
     fn select(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) {
         // Every recorded reply was verified under the all-epoch verifier.
-        let Some(floor) = self
-            .sample
-            .select(self.bootstrap.participants.dealers.len(), |_| true)
-        else {
+        let Some(floor) = self.sample.select::<N3f1, _>(
+            self.bootstrap.participants.dealers.len(),
+            |_| true,
+            |finalization| finalization.round(),
+        ) else {
             return;
         };
         let target = floor.epoch();
