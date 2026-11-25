@@ -10,8 +10,9 @@
 //! # Submission and Cancellation
 //!
 //! Staging keeps every SQE-referenced resource alive until the operation CQE,
-//! including when submission returns a transient error. Cancellation CQEs only
-//! acknowledge the cancellation attempt. They cannot release those resources.
+//! including when submission returns a transient error. A successful
+//! cancellation posts no CQE of its own (CQE_SKIP_SUCCESS), and a failed one
+//! only reports the attempt. Neither can release those resources.
 //!
 //! Dropping a local or forwarded observer cancels reads and network operations.
 //! Queued requests can finish immediately, while in-flight requests need a cancellation
@@ -67,7 +68,7 @@ use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
 use io_uring::{
     EnterFlags, IoUring,
     opcode::AsyncCancel,
-    squeue::SubmissionQueue,
+    squeue::{Flags as SqeFlags, SubmissionQueue},
     types::{CancelBuilder, SubmitArgs, Timespec},
 };
 use std::{
@@ -749,8 +750,11 @@ impl State {
                 continue;
             }
 
+            // Only the target's CQE can retire it, so a successful
+            // cancellation posts no CQE. The kernel still posts a failure.
             let cancel = AsyncCancel::new(id.user_data())
                 .build()
+                .flags(SqeFlags::SKIP_SUCCESS)
                 .user_data(CANCEL_USER_DATA);
 
             // SAFETY: AsyncCancel carries only the stable user_data identity.
@@ -820,7 +824,8 @@ impl State {
         // Only the target operation's CQE can retire its resource owners.
         if user_data == CANCEL_USER_DATA {
             if result == 0 {
-                // Cancellation successful.
+                // Cancellation successful. SKIP_SUCCESS keeps the kernel from
+                // posting this result.
             } else if result == -libc::EALREADY {
                 // Cancellation is no longer possible at this stage. The target
                 // operation CQE should follow shortly.
@@ -1801,6 +1806,92 @@ pub mod tests {
         harness.collect();
         assert_eq!(harness.completed.len(), 1);
         assert_eq!(received(&harness.completed[0]).len(), 5);
+        harness.drain();
+    }
+
+    /// Drain the CQ through enters until `done` holds for the CQEs seen so
+    /// far, then once more, and return every CQE as (user_data, result).
+    /// Panics if `done` does not hold within a second.
+    fn reap_raw(
+        harness: &mut Harness,
+        done: impl Fn(&[(UserData, i32)]) -> bool,
+    ) -> Vec<(UserData, i32)> {
+        let mut cqes = Vec::new();
+        let mut last = false;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            assert!(Instant::now() < deadline, "expected CQEs missing: {cqes:?}");
+            Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
+            let completion = harness.driver.ring.completion();
+            cqes.extend(completion.map(|cqe| (cqe.user_data(), cqe.result())));
+            if last {
+                return cqes;
+            }
+            last = done(&cqes);
+        }
+    }
+
+    /// A successful cancellation posts only its target's CQE, while one that
+    /// finds no target still posts its failure.
+    #[test]
+    fn test_only_failed_cancellations_post_cqes() {
+        let mut harness = Harness::new(1);
+
+        // A receive without data stays in the kernel until cancelled.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let id = harness.admit(recv(left, 1, None), 0);
+        harness.service();
+        assert!(harness.driver.state.waiters.is_in_flight(id));
+        harness.driver.orphan(id, &mut harness.deferred);
+        assert!(
+            !harness
+                .driver
+                .state
+                .stage_cancellations(&mut harness.driver.ring.submission())
+        );
+        let cqes = reap_raw(&mut harness, |cqes| {
+            cqes.iter()
+                .any(|&(user_data, _)| user_data == id.user_data())
+        });
+        assert_eq!(cqes, [(id.user_data(), -libc::ECANCELED)]);
+        for (user_data, result) in cqes {
+            harness
+                .driver
+                .state
+                .handle_cqe(user_data, result, &mut harness.deferred);
+        }
+        assert!(!harness.driver.state.waiters.is_in_flight(id));
+
+        // A receive whose CQE is posted but not yet reaped is still in flight,
+        // so its cancellation stages and finds no target.
+        let (left, mut right) = UnixStream::pair().unwrap();
+        right.write_all(b"x").unwrap();
+        let id = harness.admit(recv(left, 1, None), 1);
+        assert!(!harness.driver.state.stage_ready_requests(
+            &mut harness.driver.ring.submission(),
+            None,
+            &mut harness.deferred,
+        ));
+        harness.driver.ring.submit_and_wait(1).unwrap();
+        harness.driver.orphan(id, &mut harness.deferred);
+        assert!(
+            !harness
+                .driver
+                .state
+                .stage_cancellations(&mut harness.driver.ring.submission())
+        );
+        let cqes = reap_raw(&mut harness, |cqes| cqes.len() == 2);
+        assert_eq!(
+            cqes,
+            [(id.user_data(), 1), (CANCEL_USER_DATA, -libc::ENOENT)]
+        );
+        for (user_data, result) in cqes {
+            harness
+                .driver
+                .state
+                .handle_cqe(user_data, result, &mut harness.deferred);
+        }
+        harness.collect();
         harness.drain();
     }
 
