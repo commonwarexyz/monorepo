@@ -514,10 +514,20 @@ impl CqeResult {
     }
 }
 
-/// Return the byte count capped at the SQE length limit.
+/// Return the byte count capped at the largest length every scalar opcode
+/// accepts.
+///
+/// Sends and receives store the length as a signed `int` and reject larger
+/// values with `EINVAL`, and reads and writes transfer at most
+/// `MAX_RW_COUNT`, which is below `i32::MAX`, per call anyway. Partial
+/// progress then covers the rest.
 fn scalar_len(remaining: usize) -> u32 {
-    remaining.min(u32::MAX as usize) as u32
+    remaining.min(i32::MAX as usize) as u32
 }
+
+/// `RWF_NOSIGNAL` (Linux 6.18), which makes a write to a socket whose peer
+/// has closed fail with `EPIPE` instead of raising `SIGPIPE`.
+const RWF_NOSIGNAL: i32 = 0x100;
 
 /// Logical network send request and its in-loop state.
 pub struct SendRequest {
@@ -551,8 +561,10 @@ impl SendRequest {
 
                 // `Writev` is sufficient here because network sends only need
                 // ordered byte delivery. This layer does not need sendmsg
-                // ancillary data or zerocopy completion management.
-                SqueueEntry::writev(fd, iovecs.as_ptr(), iovecs_len, 0, 0)
+                // ancillary data or zerocopy completion management. Unlike
+                // SEND, which the kernel always marks MSG_NOSIGNAL, a socket
+                // WRITEV raises SIGPIPE unless the SQE asks otherwise.
+                SqueueEntry::writev(fd, iovecs.as_ptr(), iovecs_len, 0, RWF_NOSIGNAL)
             }
         }
     }
@@ -1569,12 +1581,18 @@ mod tests {
 
     #[test]
     fn test_scalar_length_prefix_boundary() {
-        for len in [0, 1, u32::MAX as usize - 1, u32::MAX as usize] {
+        for len in [0, 1, i32::MAX as usize - 1, i32::MAX as usize] {
             assert_eq!(scalar_len(len), len as u32);
         }
 
-        for len in [u32::MAX as usize + 1, usize::MAX] {
-            assert_eq!(scalar_len(len), u32::MAX);
+        // Sends and receives reject lengths with the sign bit set.
+        for len in [
+            i32::MAX as usize + 1,
+            u32::MAX as usize,
+            u32::MAX as usize + 1,
+            usize::MAX,
+        ] {
+            assert_eq!(scalar_len(len), i32::MAX as u32);
         }
     }
 
@@ -1625,6 +1643,8 @@ mod tests {
         let mut bufs = IoBufs::from(IoBuf::from(b"abc"));
         bufs.append(IoBuf::from(b"de"));
         send.write = bufs.into();
+        let (opcode, _, _, _, _, flags) = read_fields(&send.build_sqe());
+        assert_eq!((opcode, flags), (SqueueEntry::WRITEV, RWF_NOSIGNAL));
         let mut request = Request::Send(send);
         assert!(request.on_cqe(ACTIVE, 3).is_none());
         assert!(matches!(

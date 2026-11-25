@@ -564,9 +564,11 @@ impl Driver {
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) => match error.raw_os_error() {
-                    // The wait already completed, or its SQE was never
-                    // submitted. Without SQPOLL, an unsubmitted SQE stays
-                    // inert through ring destruction.
+                    // The wait already completed, a wake already claimed it
+                    // (which leaves only its completion pending, and never
+                    // reads the word), or its SQE was never submitted.
+                    // Without SQPOLL, an unsubmitted SQE stays inert through
+                    // ring destruction.
                     Some(libc::ENOENT) => return Ok(()),
                     Some(libc::EINTR) => continue,
                     _ => {
@@ -909,7 +911,7 @@ pub mod tests {
             park::tests::{handles, unpark_when_armed, wait_until_armed, wake},
             request::{
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
-                ResizeRequest, SyncRequest, WriteAtRequest, WriteAtState,
+                ResizeRequest, SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
             },
             sys::tests::{
                 EXT_ARG, REGISTERED_RING, cq_entries, fail_next_enter, last_enter, set_overflow,
@@ -926,12 +928,14 @@ pub mod tests {
         cell::{Cell, RefCell},
         fs::{self, OpenOptions},
         io::Write,
+        mem::MaybeUninit,
         os::{
             fd::{AsRawFd as _, FromRawFd, OwnedFd, RawFd},
             unix::{fs::OpenOptionsExt as _, net::UnixStream},
         },
         panic::{AssertUnwindSafe, catch_unwind},
         path::PathBuf,
+        ptr,
         sync::Arc,
         task::Wake,
         thread,
@@ -3995,6 +3999,57 @@ pub mod tests {
         harness.until(before + 1);
         assert_eq!(received(&harness.completed[before]), b"x");
         harness.drain();
+    }
+
+    /// A vectored send to a socket whose peer has closed fails and raises no
+    /// SIGPIPE.
+    #[test]
+    fn test_vectored_send_to_a_closed_peer_raises_no_sigpipe() {
+        // Block SIGPIPE on this thread, which submits the send, so the kernel
+        // queues a raised SIGPIPE here instead of discarding it as ignored.
+        let mut set = MaybeUninit::<libc::sigset_t>::uninit();
+        let mut old = MaybeUninit::<libc::sigset_t>::uninit();
+        // SAFETY: Both pointers refer to signal sets owned by this frame.
+        let set = unsafe {
+            assert_eq!(libc::sigemptyset(set.as_mut_ptr()), 0);
+            assert_eq!(libc::sigaddset(set.as_mut_ptr(), libc::SIGPIPE), 0);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, set.as_ptr(), old.as_mut_ptr()),
+                0
+            );
+            set.assume_init()
+        };
+
+        let mut harness = Harness::new(1);
+        let (left, right) = UnixStream::pair().unwrap();
+        drop(right);
+        let mut bufs = IoBufs::from(IoBuf::from(b"abc"));
+        bufs.append(IoBuf::from(b"de"));
+        let send = SendRequest {
+            fd: Arc::new(left.into()),
+            write: bufs.into(),
+            deadline: None,
+        };
+        harness.admit(Request::Send(send), 0);
+        harness.until(1);
+        let failed = matches!(harness.completed[0].output, RequestOutput::Send(Err(_)));
+        harness.drain();
+
+        // Take a pending SIGPIPE, if any, before restoring the mask, so a
+        // failure cannot kill the test process.
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `set` and `timeout` are valid, the null info pointer is
+        // allowed, and `old` was filled by the first `pthread_sigmask`.
+        let raised = unsafe {
+            let raised = libc::sigtimedwait(&raw const set, ptr::null_mut(), &raw const timeout);
+            libc::pthread_sigmask(libc::SIG_SETMASK, old.as_ptr(), ptr::null_mut());
+            raised == libc::SIGPIPE
+        };
+        assert!(failed, "a send to a closed peer succeeded");
+        assert!(!raised, "the send raised SIGPIPE");
     }
 
     /// A driver registers its ring with the creating thread, enters through

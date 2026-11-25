@@ -96,7 +96,7 @@ const IORING_REGISTER_RING_FDS: c_long = 20;
 /// Register opcode that removes ring descriptors from the calling thread's
 /// table.
 const IORING_UNREGISTER_RING_FDS: c_long = 21;
-/// Register opcode that cancels requests and waits for them to finish.
+/// Register opcode that cancels requests synchronously.
 const IORING_REGISTER_SYNC_CANCEL: c_long = 24;
 
 /// Flags of `io_uring_enter`.
@@ -153,6 +153,11 @@ const _: () = {
 };
 
 impl From<Duration> for Timespec {
+    /// Convert `duration`, saturating at `i64::MAX` seconds.
+    ///
+    /// The kernel adds a relative timeout to the current time without an
+    /// overflow check, so callers bound timeouts well below its range of
+    /// about 292 years. The runtime caps them at 30 years.
     #[inline]
     fn from(duration: Duration) -> Self {
         Self {
@@ -1332,10 +1337,14 @@ impl IoUring {
         }
     }
 
-    /// Cancel a request with `user_data` and wait for it to finish.
+    /// Synchronously cancel a request with `user_data`.
     ///
-    /// Without cancel flags, the kernel cancels only the first match. Fails
-    /// with `ENOENT` when no such request is live.
+    /// Without cancel flags, the kernel cancels only the first match. On
+    /// success the request can no longer run, and its `ECANCELED`
+    /// completion is posted like any other, by a later enter. Fails with
+    /// `ENOENT` when no live request with `user_data` can still be
+    /// cancelled, for example because it completed or a wake already claimed
+    /// it.
     pub fn register_sync_cancel(&self, user_data: u64) -> io::Result<()> {
         let cancel = SyncCancelReg {
             addr: user_data,
@@ -1875,11 +1884,17 @@ pub mod tests {
         params.cq_off.cqes = CQES - 1;
         check(params);
 
-        // Misaligned SQEs.
+        // Misaligned SQEs, in an array one slot longer, so the shifted slots
+        // stay inside it.
         let params = fake_params();
-        // SAFETY: The fake ring's memory outlives the call, and no queue is
-        // returned. The shifted pointer stays within the SQE slots.
-        let result = unsafe { queues(&params, ring.rings, RINGS_LEN, ring.sqes.byte_add(4)) };
+        let mut slots = vec![[0u64; 8]; SQ_ENTRIES as usize + 1];
+        let sqes = NonNull::new(slots.as_mut_ptr())
+            .unwrap()
+            .cast::<SqueueEntry>();
+        // SAFETY: The rings and `slots` outlive the call, `SQ_ENTRIES`
+        // slots from the shifted pointer end within `slots`, and no queue is
+        // returned.
+        let result = unsafe { queues(&params, ring.rings, RINGS_LEN, sqes.byte_add(4)) };
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidData);
 
         // Ring sizes that disagree with the kernel's words: the entry count
@@ -1920,26 +1935,25 @@ pub mod tests {
         let null = std::fs::File::open("/dev/null").unwrap().into();
         assert!(Mmap::new(&null, 4096, 0).is_err());
 
+        let name = c"commonware_iouring_mmap_test";
         // SAFETY: The name is a valid C string, and the call creates a new
         // descriptor that nothing else owns.
-        let fd = unsafe { libc::memfd_create(c"mmap".as_ptr(), libc::MFD_CLOEXEC) };
+        let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
         assert!(fd >= 0, "{}", io::Error::last_os_error());
         // SAFETY: `fd` is a new descriptor that nothing else owns.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         // SAFETY: `fd` is an open memfd.
         assert_eq!(unsafe { libc::ftruncate(fd.as_raw_fd(), 4096) }, 0);
+        // Only this mapping maps the memfd, whatever else the process maps.
+        let mapped = || {
+            std::fs::read_to_string("/proc/self/maps")
+                .unwrap()
+                .contains(name.to_str().unwrap())
+        };
         let mapping = Mmap::new(&fd, 4096, 0).unwrap();
-        let address = mapping.ptr.as_ptr().cast::<libc::c_void>();
+        assert!(mapped());
         drop(mapping);
-
-        // SAFETY: `msync` only inspects the address range, which fails with
-        // ENOMEM once nothing is mapped there.
-        let result = unsafe { libc::msync(address, 4096, libc::MS_ASYNC) };
-        assert_eq!(result, -1);
-        assert_eq!(
-            io::Error::last_os_error().raw_os_error(),
-            Some(libc::ENOMEM)
-        );
+        assert!(!mapped());
     }
 
     /// A failed mapping unmaps the mappings made before it.
