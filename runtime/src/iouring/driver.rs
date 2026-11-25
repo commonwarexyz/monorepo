@@ -421,10 +421,28 @@ impl Driver {
     /// turn retries, so `Ok` does not mean the kernel consumed the SQ or posted
     /// a completion. Other errors are permanent, and once the kernel has
     /// dropped a completion every enter fails with `EBADR`.
-    fn enter(ring: &mut IoUring, mode: Enter) -> io::Result<()> {
+    fn enter(ring: &mut IoUring, mut mode: Enter) -> io::Result<()> {
         #[cfg(test)]
         if matches!(mode, Enter::Flush) && tests::stall_flush(ring) {
             return Ok(());
+        }
+
+        // Read the clock once, right before the syscall. A wait for one
+        // completion with a zero timeout arms an expired timer and sleeps until
+        // it fires whenever no completion is ready, so a deadline that already
+        // passed runs only the task work.
+        let mut timeout = None;
+        if let Enter::Wait {
+            deadline: Some(deadline),
+            ..
+        } = mode
+        {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                mode = Enter::TaskWork;
+            } else {
+                timeout = Some(remaining);
+            }
         }
 
         let result = match mode {
@@ -436,22 +454,12 @@ impl Driver {
             // `io_uring_submit_and_get_events` does. Newer kernels bound the
             // batch and leave the rest for a later enter.
             Enter::TaskWork => Self::submit_and_enter(ring, 0, EnterFlags::GETEVENTS, None),
-            Enter::Wait { deadline, iowait } => {
+            Enter::Wait { iowait, .. } => {
                 let mut flags = EnterFlags::GETEVENTS;
                 if !iowait {
                     flags |= EnterFlags::NO_IOWAIT;
                 }
-
-                // Read the clock once, right before the syscall. A wait for one
-                // completion with a zero timeout arms an expired timer and
-                // sleeps until it fires whenever no completion is ready, so a
-                // deadline that already passed runs only the task work.
-                match deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())) {
-                    Some(timeout) if timeout.is_zero() => {
-                        Self::submit_and_enter(ring, 0, flags, None)
-                    }
-                    timeout => Self::submit_and_enter(ring, 1, flags, timeout),
-                }
+                Self::submit_and_enter(ring, 1, flags, timeout)
             }
         };
 
