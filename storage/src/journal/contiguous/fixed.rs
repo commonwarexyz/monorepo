@@ -1833,9 +1833,12 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         core::iter::from_fn(move || {
             let &first_pos = positions.get(start)?;
             let blob = super::position_to_blob(first_pos, items_per_blob);
-            let end = start
-                + positions[start..]
-                    .partition_point(|&pos| super::position_to_blob(pos, items_per_blob) == blob);
+            // The first position bounds the product. The final blob can extend past u64::MAX.
+            let last = (blob * items_per_blob).saturating_add(items_per_blob - 1);
+            let mut end = start + 1;
+            while positions.get(end).is_some_and(|&pos| pos <= last) {
+                end += 1;
+            }
             let run = start..end;
             start = end;
             Some(
