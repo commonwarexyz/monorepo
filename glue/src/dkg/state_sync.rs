@@ -31,8 +31,11 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Epochable as _,
-    marshal::core::{Processed, Variant as MarshalVariant},
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{
+        marshal::core::{Processed, Variant as MarshalVariant},
+        scheme::Scheme,
+        types::Finalization,
+    },
     types::{Epoch, Epocher, FixedEpocher, Height},
 };
 #[cfg(feature = "arbitrary")]
@@ -892,7 +895,7 @@ mod tests {
     use crate::dkg::{network::Addresses, tests::mocks, types::EpochOutcome};
 
     /// Marshal variant whose blocks carry addressed directories.
-    type AddressedVariant = commonware_consensus::marshal::standard::Standard<
+    type AddressedVariant = commonware_consensus::simplex::marshal::standard::Standard<
         mocks::MockBlock<mocks::TestDigest, mocks::TestContext, Addresses<mocks::TestPublicKey>>,
     >;
     use commonware_consensus::{

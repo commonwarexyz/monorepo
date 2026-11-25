@@ -12,11 +12,14 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     Block, Heightable as _,
-    marshal::{
-        Identifier,
-        core::{CommitmentFallback, Processed, Variant as MarshalVariant},
+    simplex::{
+        marshal::{
+            Identifier,
+            core::{CommitmentFallback, Processed, Variant as MarshalVariant},
+        },
+        scheme::Scheme as SimplexScheme,
+        types::Finalization,
     },
-    simplex::{scheme::Scheme as SimplexScheme, types::Finalization},
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
@@ -469,7 +472,7 @@ mod tests {
         types::{EpochInfo, EpochOutcome, SchemeInfo},
     };
     use commonware_consensus::{
-        marshal::core::Processed,
+        simplex::marshal::core::Processed,
         types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height},
     };
     use commonware_cryptography::{

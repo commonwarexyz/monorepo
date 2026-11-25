@@ -177,7 +177,7 @@
 //! marshal or from the plan's checkpoints. Compute [`max_payload_size`] with the committee size and
 //! block codec configuration given to marshal's [`max_payload_size`][marshal].
 //!
-//! [marshal]: commonware_consensus::marshal::max_payload_size
+//! [marshal]: commonware_consensus::simplex::marshal::max_payload_size
 
 use crate::dkg::{
     ReshareBlock,
@@ -185,8 +185,7 @@ use crate::dkg::{
     types::{EpochInfo, Participants},
 };
 use commonware_consensus::{
-    marshal::core::Variant as MarshalVariant,
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{marshal::core::Variant as MarshalVariant, scheme::Scheme, types::Finalization},
     types::Epoch,
 };
 use commonware_cryptography::{
@@ -272,8 +271,10 @@ mod tests {
     use commonware_codec::Encode as _;
     use commonware_consensus::{
         Epochable as _, Heightable as _, Reporter as _,
-        marshal::{self, Start, resolver::p2p as marshal_resolver},
-        simplex::types::{Activity, Finalization, Finalize, Proposal},
+        simplex::{
+            marshal::{self, Start, resolver::p2p as marshal_resolver},
+            types::{Activity, Finalization, Finalize, Proposal},
+        },
         types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use commonware_cryptography::{
