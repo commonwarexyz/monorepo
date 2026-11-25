@@ -40,6 +40,9 @@
 //! ```bash
 //! RUSTFLAGS="--cfg generate_conformance_tests" cargo test
 //! ```
+//!
+//! Setting `RUSTFLAGS` replaces rustflags from Cargo configuration, so also pass any `--cfg`
+//! flags the build otherwise relies on (such as a `commonware_stability_*` level).
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -58,6 +61,15 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 /// Default number of test cases when not explicitly specified.
 pub const DEFAULT_CASES: usize = 65536;
+
+/// Command that regenerates conformance fixtures, keeping the `WIP` stability cfg when this
+/// build enabled it (setting `RUSTFLAGS` replaces rustflags from Cargo configuration).
+#[cfg(not(generate_conformance_tests))]
+const REGENERATE_COMMAND: &str = if cfg!(commonware_stability_WIP) {
+    "RUSTFLAGS=\"--cfg generate_conformance_tests --cfg commonware_stability_WIP\" cargo test"
+} else {
+    "RUSTFLAGS=\"--cfg generate_conformance_tests\" cargo test"
+};
 
 /// Trait for types that can produce deterministic bytes for conformance testing.
 ///
@@ -252,7 +264,7 @@ async fn verify_and_update_conformance<C: Conformance>(
                      - expected: \"{}\"\n\
                      - actual:   \"{actual_hash}\"\n\n\
                      If this change is intentional, regenerate with:\n\
-                     RUSTFLAGS=\"--cfg generate_conformance_tests\" cargo test",
+                     {REGENERATE_COMMAND}",
                     entry.hash
                 );
             }
@@ -262,7 +274,7 @@ async fn verify_and_update_conformance<C: Conformance>(
                     "Conformance test failed for '{type_name}'.\n\n\
                      n_cases mismatch: expected {}, got {n_cases}\n\n\
                      If this change is intentional, regenerate with:\n\
-                     RUSTFLAGS=\"--cfg generate_conformance_tests\" cargo test",
+                     {REGENERATE_COMMAND}",
                     entry.n_cases
                 );
             }

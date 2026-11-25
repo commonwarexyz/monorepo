@@ -14,63 +14,53 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Error, Expr, Ident, Item, ItemFn, LitInt, LitStr, Pat, Token, Visibility, braced,
+    Error, Expr, Ident, Item, ItemFn, LitStr, Pat, Token, Visibility, braced,
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
 };
 
 mod nextest;
 
-/// Stability level input that accepts either a literal integer (0-4) or a named constant
-/// (ALPHA, BETA, GAMMA, DELTA, EPSILON).
+/// Highest stability level index (`EPSILON`).
+const MAX_LEVEL: u8 = 5;
+
+/// Stability level input: one of the named levels (WIP, ALPHA, BETA, GAMMA, DELTA, EPSILON).
+///
+/// Integer levels are not accepted, so inserting a level can never silently change what an
+/// existing annotation means.
 struct StabilityLevel {
     value: u8,
 }
 
+const LEVEL_NAME_ERROR: &str =
+    "expected stability level: WIP, ALPHA, BETA, GAMMA, DELTA, or EPSILON";
+
 impl Parse for StabilityLevel {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let lookahead = input.lookahead1();
-        if lookahead.peek(LitInt) {
-            let lit: LitInt = input.parse()?;
-            let value: u8 = lit
-                .base10_parse()
-                .map_err(|_| Error::new(lit.span(), "stability level must be 0, 1, 2, 3, or 4"))?;
-            if value > 4 {
-                return Err(Error::new(
-                    lit.span(),
-                    "stability level must be 0, 1, 2, 3, or 4",
-                ));
-            }
-            Ok(Self { value })
-        } else if lookahead.peek(Ident) {
-            let ident: Ident = input.parse()?;
-            let value = match ident.to_string().as_str() {
-                "ALPHA" => 0,
-                "BETA" => 1,
-                "GAMMA" => 2,
-                "DELTA" => 3,
-                "EPSILON" => 4,
-                _ => {
-                    return Err(Error::new(
-                        ident.span(),
-                        "expected stability level: ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-4",
-                    ));
-                }
-            };
-            Ok(Self { value })
-        } else {
-            Err(lookahead.error())
-        }
+        let ident: Ident = input
+            .parse()
+            .map_err(|err| Error::new(err.span(), LEVEL_NAME_ERROR))?;
+        let value = match ident.to_string().as_str() {
+            "WIP" => 0,
+            "ALPHA" => 1,
+            "BETA" => 2,
+            "GAMMA" => 3,
+            "DELTA" => 4,
+            "EPSILON" => 5,
+            _ => return Err(Error::new(ident.span(), LEVEL_NAME_ERROR)),
+        };
+        Ok(Self { value })
     }
 }
 
 fn level_name(level: u8) -> &'static str {
     match level {
-        0 => "ALPHA",
-        1 => "BETA",
-        2 => "GAMMA",
-        3 => "DELTA",
-        4 => "EPSILON",
+        0 => "WIP",
+        1 => "ALPHA",
+        2 => "BETA",
+        3 => "GAMMA",
+        4 => "DELTA",
+        5 => "EPSILON",
         _ => unreachable!(),
     }
 }
@@ -78,25 +68,24 @@ fn level_name(level: u8) -> &'static str {
 /// Generates cfg identifiers that should exclude an item at the given stability level.
 ///
 /// The stability system works by excluding items when building at higher stability levels.
-/// For example, an item marked `#[stability(BETA)]` (level 1) should be excluded when
-/// building with `--cfg commonware_stability_GAMMA` (level 2) or higher.
+/// For example, an item marked `#[stability(BETA)]` (level 2) should be excluded when
+/// building with `--cfg commonware_stability_GAMMA` (level 3) or higher.
 ///
 /// This function returns identifiers for all levels above the given level, plus `RESERVED`.
-/// The generated `#[cfg(not(any(...)))]` attribute ensures the item is included only when
-/// none of the higher-level cfgs are set.
 ///
 /// ```text
-/// Level 0 (ALPHA)   -> excludes at: BETA, GAMMA, DELTA, EPSILON, RESERVED
-/// Level 1 (BETA)    -> excludes at: GAMMA, DELTA, EPSILON, RESERVED
-/// Level 2 (GAMMA)   -> excludes at: DELTA, EPSILON, RESERVED
-/// Level 3 (DELTA)   -> excludes at: EPSILON, RESERVED
-/// Level 4 (EPSILON) -> excludes at: RESERVED
+/// Level 0 (WIP)     -> excludes at: ALPHA, BETA, GAMMA, DELTA, EPSILON, RESERVED
+/// Level 1 (ALPHA)   -> excludes at: BETA, GAMMA, DELTA, EPSILON, RESERVED
+/// Level 2 (BETA)    -> excludes at: GAMMA, DELTA, EPSILON, RESERVED
+/// Level 3 (GAMMA)   -> excludes at: DELTA, EPSILON, RESERVED
+/// Level 4 (DELTA)   -> excludes at: EPSILON, RESERVED
+/// Level 5 (EPSILON) -> excludes at: RESERVED
 /// ```
 ///
 /// `RESERVED` is a special level used by `scripts/find_unstable_public.sh` to exclude ALL
 /// stability-marked items, leaving only unmarked public items visible in rustdoc output.
 fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
-    let mut names: Vec<_> = ((level + 1)..=4)
+    let mut names: Vec<_> = ((level + 1)..=MAX_LEVEL)
         .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
         .collect();
 
@@ -104,14 +93,32 @@ fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
     names
 }
 
+/// Generates the cfg predicate under which an item at the given stability level is compiled.
+///
+/// Levels at or above `ALPHA` are subtractive: they are compiled unless a higher level is
+/// selected, so a build that selects no level compiles them (ALPHA is the default).
+///
+/// `WIP` is additive: it is compiled only when `commonware_stability_WIP` is set (the
+/// monorepo does so in `.cargo/config.toml`) and no other level is selected. Consumers of the
+/// library select nothing and therefore never compile `WIP` items.
+fn inclusion_cfg(level: u8) -> proc_macro2::TokenStream {
+    let exclude_names = exclusion_cfg_names(level);
+    if level == 0 {
+        let wip = format_ident!("commonware_stability_{}", level_name(0));
+        quote! { all(#wip, not(any(#(#exclude_names),*))) }
+    } else {
+        quote! { not(any(#(#exclude_names),*)) }
+    }
+}
+
 #[proc_macro_attribute]
 pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as StabilityLevel);
-    let exclude_names = exclusion_cfg_names(level.value);
+    let cfg = inclusion_cfg(level.value);
 
     let item2: proc_macro2::TokenStream = item.into();
     let expanded = quote! {
-        #[cfg(not(any(#(#exclude_names),*)))]
+        #[cfg(#cfg)]
         #item2
     };
 
@@ -148,10 +155,10 @@ pub fn stability_mod(input: TokenStream) -> TokenStream {
         name,
     } = parse_macro_input!(input as StabilityModInput);
 
-    let exclude_names = exclusion_cfg_names(level.value);
+    let cfg = inclusion_cfg(level.value);
 
     let expanded = quote! {
-        #[cfg(not(any(#(#exclude_names),*)))]
+        #[cfg(#cfg)]
         #visibility mod #name;
     };
 
@@ -209,11 +216,11 @@ pub fn stability_scope(input: TokenStream) -> TokenStream {
         items,
     } = parse_macro_input!(input as StabilityScopeInput);
 
-    let exclude_names = exclusion_cfg_names(level.value);
+    let cfg = inclusion_cfg(level.value);
 
     let cfg_attr = predicate.map_or_else(
-        || quote! { #[cfg(not(any(#(#exclude_names),*)))] },
-        |pred| quote! { #[cfg(all(#pred, not(any(#(#exclude_names),*))))] },
+        || quote! { #[cfg(#cfg)] },
+        |pred| quote! { #[cfg(all(#pred, #cfg))] },
     );
 
     let expanded_items: Vec<_> = items
@@ -777,4 +784,95 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
         }
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::{Meta, punctuated::Punctuated};
+
+    const LEVELS: [&str; 6] = ["WIP", "ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON"];
+
+    /// Evaluates a cfg predicate against the set of stability cfgs that are enabled.
+    fn eval(meta: &Meta, enabled: &[&str]) -> bool {
+        match meta {
+            Meta::Path(path) => {
+                let ident = path.get_ident().expect("cfg name").to_string();
+                enabled
+                    .iter()
+                    .any(|level| ident == format!("commonware_stability_{level}"))
+            }
+            Meta::List(list) => {
+                let args = list
+                    .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                    .expect("cfg arguments");
+                match list
+                    .path
+                    .get_ident()
+                    .expect("cfg operator")
+                    .to_string()
+                    .as_str()
+                {
+                    "all" => args.iter().all(|arg| eval(arg, enabled)),
+                    "any" => args.iter().any(|arg| eval(arg, enabled)),
+                    "not" => {
+                        assert_eq!(args.len(), 1);
+                        !eval(&args[0], enabled)
+                    }
+                    other => panic!("unexpected cfg operator: {other}"),
+                }
+            }
+            Meta::NameValue(_) => panic!("unexpected name-value cfg"),
+        }
+    }
+
+    /// Returns whether an item marked `level` compiles with the `enabled` stability cfgs.
+    fn compiled(level: &str, enabled: &[&str]) -> bool {
+        let level: StabilityLevel = syn::parse_str(level).expect("valid level");
+        let cfg: Meta = syn::parse2(inclusion_cfg(level.value)).expect("valid cfg");
+        eval(&cfg, enabled)
+    }
+
+    #[test]
+    fn test_inclusion_cfg() {
+        for (rank, level) in LEVELS.iter().enumerate() {
+            // Consumers set no stability cfg: every level but WIP compiles.
+            assert_eq!(compiled(level, &[]), rank > 0, "{level} with no cfg");
+
+            // The monorepo sets only WIP: every level compiles.
+            assert!(compiled(level, &["WIP"]), "{level} with WIP");
+
+            // An explicit level excludes lower levels, with or without WIP.
+            for (selected_rank, selected) in LEVELS.iter().enumerate().skip(1) {
+                let expected = rank >= selected_rank;
+                assert_eq!(
+                    compiled(level, &[selected]),
+                    expected,
+                    "{level} with {selected}"
+                );
+                assert_eq!(
+                    compiled(level, &["WIP", selected]),
+                    expected,
+                    "{level} with WIP and {selected}"
+                );
+            }
+
+            // RESERVED excludes every marked item.
+            assert!(!compiled(level, &["RESERVED"]), "{level} with RESERVED");
+            assert!(
+                !compiled(level, &["WIP", "RESERVED"]),
+                "{level} with WIP and RESERVED"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rejects_unnamed_levels() {
+        for input in ["0", "1", "5", "alpha", "RESERVED", "UNKNOWN", ""] {
+            assert!(
+                syn::parse_str::<StabilityLevel>(input).is_err(),
+                "accepted {input:?}"
+            );
+        }
+    }
 }

@@ -2,14 +2,13 @@
 name = "commonware-bridge"
 edition.workspace = true
 rust-version.workspace = true
-publish = true
+publish = false
 version.workspace = true
 license.workspace = true
 description = "Send succinct consensus certificates between two networks."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/bridge"
-documentation = "https://docs.rs/commonware-bridge"
 
 [lints]
 workspace = true

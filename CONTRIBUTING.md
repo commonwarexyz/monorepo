@@ -11,6 +11,8 @@ The Commonware Library provides robust, high-performance primitives and contribu
 - Trivial changes from accounts farming contribution metrics (especially when aided by an LLM)
 - New primitives and/or dialects that are ecosystem-specific
 
+We also tend not to merge pull requests from external contributors that introduce code at the [`WIP` stability level](./README.md#stability). The `WIP` tier assumes that someone will return to the code to polish it and promote it to `ALPHA`, and we cannot reliably establish that trust with most external contributors. The bar for external contributions therefore remains `ALPHA`.
+
 # Development workflow
 
 > [!NOTE]

@@ -24,6 +24,10 @@ $ cargo +nightly fuzz run roundtrip --help
 > If using the [`justfile`](./justfile), all fuzz tests for a given directory can be ran using 
 > `just fuzz <dir> <max_time>`.
 
+> [!NOTE]
+> `cargo-fuzz` sets `RUSTFLAGS` itself, which overrides [`.cargo/config.toml`](./.cargo/config.toml). To fuzz
+> `WIP` code, run `cargo-fuzz` with `RUSTFLAGS="--cfg commonware_stability_WIP"` (the `justfile` does this).
+
 ### Coverage
 
 To explore coverage information, the following tools are required:

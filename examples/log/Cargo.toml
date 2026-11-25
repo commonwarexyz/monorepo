@@ -2,14 +2,13 @@
 name = "commonware-log"
 edition.workspace = true
 rust-version.workspace = true
-publish = true
+publish = false
 version.workspace = true
 license.workspace = true
 description = "Commit to a secret log and agree to its hash."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/log"
-documentation = "https://docs.rs/commonware-log"
 
 [lints]
 workspace = true

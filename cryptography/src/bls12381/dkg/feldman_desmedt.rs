@@ -354,7 +354,7 @@
 //! # }
 //! ```
 //!
-//! For a complete example with resharing, see [commonware-dkg](https://docs.rs/commonware-dkg).
+//! For a complete example with resharing, see [commonware-dkg](https://github.com/commonwarexyz/monorepo/tree/main/examples/dkg).
 
 use crate::{
     BatchEntry, BatchVerifier, PublicKey, Secret, Signer,

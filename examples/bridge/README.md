@@ -1,7 +1,5 @@
 # commonware-bridge
 
-[![Crates.io](https://img.shields.io/crates/v/commonware-bridge.svg)](https://crates.io/crates/commonware-bridge)
-
 Send succinct consensus certificates between two networks.
 
 # Usage

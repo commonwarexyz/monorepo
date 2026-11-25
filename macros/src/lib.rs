@@ -226,6 +226,10 @@ pub use commonware_macros_impl::select_loop;
 /// When building with `RUSTFLAGS="--cfg commonware_stability_X"`, items with stability
 /// less than X are excluded. Unmarked items are always included.
 ///
+/// `ALPHA` is the default level: a build that sets no stability cfg compiles every item
+/// marked `ALPHA` or higher. `WIP` items are the exception. They are compiled only when
+/// `commonware_stability_WIP` is set (and no other level is).
+///
 /// See [commonware README](https://github.com/commonwarexyz/monorepo#stability) for stability level definitions.
 ///
 /// # Example
@@ -234,6 +238,9 @@ pub use commonware_macros_impl::select_loop;
 ///
 /// #[stability(BETA)]  // excluded at GAMMA, DELTA, EPSILON
 /// pub struct StableApi { }
+///
+/// #[stability(WIP)]  // excluded unless commonware_stability_WIP is set
+/// pub struct UnreleasedApi { }
 /// ```
 ///
 /// # Limitation: `#[macro_export]` macros
@@ -253,11 +260,31 @@ pub use commonware_macros_impl::select_loop;
 /// #[macro_export]
 /// macro_rules! my_macro { ... }
 /// ```
+///
+/// `WIP` is additive, so its manual form also requires the `WIP` cfg:
+/// ```rust,ignore
+/// #[cfg(all(
+///     commonware_stability_WIP,
+///     not(any(
+///         commonware_stability_ALPHA,
+///         commonware_stability_BETA,
+///         commonware_stability_GAMMA,
+///         commonware_stability_DELTA,
+///         commonware_stability_EPSILON,
+///         commonware_stability_RESERVED
+///     ))
+/// ))] // WIP
+/// #[macro_export]
+/// macro_rules! my_wip_macro { ... }
+/// ```
 pub use commonware_macros_impl::stability;
 /// Marks a module with a stability level.
 ///
 /// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, modules with stability
 /// less than N are excluded.
+///
+/// `WIP` modules are compiled only when `commonware_stability_WIP` is set (and no other level
+/// is). See [macro@stability].
 ///
 /// # Example
 /// ```rust,ignore
@@ -270,6 +297,9 @@ pub use commonware_macros_impl::stability_mod;
 ///
 /// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, items with stability
 /// less than N are excluded.
+///
+/// `WIP` items are compiled only when `commonware_stability_WIP` is set (and no other level
+/// is). See [macro@stability].
 ///
 /// # Example
 /// ```rust,ignore

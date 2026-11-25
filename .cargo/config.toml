@@ -1,0 +1,13 @@
+# Compile the `WIP` stability tier throughout the monorepo (tests, benches, examples, docs).
+#
+# Cargo reads this file only for builds run inside this repository, so consumers of the
+# published crates keep the default (`ALPHA`) and never compile `WIP` code.
+#
+# Cargo uses the first rustflags source it finds: `CARGO_ENCODED_RUSTFLAGS`, then `RUSTFLAGS`,
+# then all matching `target.<triple>.rustflags` and `target.<cfg>.rustflags` entries (including
+# `CARGO_TARGET_<triple>_RUSTFLAGS`), then `build.rustflags`. Rustdocflags follow the same order,
+# without `target.<cfg>` entries. Anything that sets an earlier source must also pass
+# `--cfg commonware_stability_WIP`.
+[build]
+rustflags = ["--cfg", "commonware_stability_WIP"]
+rustdocflags = ["--cfg", "commonware_stability_WIP"]
