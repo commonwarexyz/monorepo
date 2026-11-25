@@ -823,8 +823,7 @@ impl State {
 
         // Only the target operation's CQE can retire its resource owners.
         // SKIP_SUCCESS suppresses a successful cancellation's CQE, so this
-        // token arrives only with a failure, which still has to be recognized
-        // so it is not taken for a request.
+        // token arrives only with a failure.
         if user_data == CANCEL_USER_DATA {
             if result == -libc::EALREADY {
                 // Cancellation is no longer possible at this stage. The target
@@ -1806,32 +1805,28 @@ pub mod tests {
         harness.drain();
     }
 
-    /// Drain the CQ through enters until `done` holds for the CQEs seen so
-    /// far, then once more, and return every CQE as (user_data, result).
-    /// Panics if `done` does not hold within a second.
-    fn reap_raw(
-        harness: &mut Harness,
-        done: impl Fn(&[(UserData, i32)]) -> bool,
-    ) -> Vec<(UserData, i32)> {
-        let mut cqes = Vec::new();
-        let mut last = false;
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            assert!(Instant::now() < deadline, "expected CQEs missing: {cqes:?}");
-            Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
-            let completion = harness.driver.ring.completion();
-            cqes.extend(completion.map(|cqe| (cqe.user_data(), cqe.result())));
-            if last {
-                return cqes;
-            }
-            last = done(&cqes);
-        }
-    }
-
     /// A successful cancellation posts only its target's CQE, while one that
     /// finds no target still posts its failure.
     #[test]
     fn test_only_failed_cancellations_post_cqes() {
+        // Enter until `count` CQEs arrived, then once more so an extra one
+        // would show, and return them as (user_data, result).
+        let reap = |harness: &mut Harness, count: usize| {
+            let mut cqes = Vec::new();
+            let mut last = false;
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                assert!(Instant::now() < deadline, "expected CQEs missing: {cqes:?}");
+                Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
+                let completion = harness.driver.ring.completion();
+                cqes.extend(completion.map(|cqe| (cqe.user_data(), cqe.result())));
+                if last {
+                    return cqes;
+                }
+                last = cqes.len() >= count;
+            }
+        };
+
         let mut harness = Harness::new(1);
 
         // A receive without data stays in the kernel until cancelled.
@@ -1846,10 +1841,7 @@ pub mod tests {
                 .state
                 .stage_cancellations(&mut harness.driver.ring.submission())
         );
-        let cqes = reap_raw(&mut harness, |cqes| {
-            cqes.iter()
-                .any(|&(user_data, _)| user_data == id.user_data())
-        });
+        let cqes = reap(&mut harness, 1);
         assert_eq!(cqes, [(id.user_data(), -libc::ECANCELED)]);
         for (user_data, result) in cqes {
             harness
@@ -1877,7 +1869,7 @@ pub mod tests {
                 .state
                 .stage_cancellations(&mut harness.driver.ring.submission())
         );
-        let cqes = reap_raw(&mut harness, |cqes| cqes.len() == 2);
+        let cqes = reap(&mut harness, 2);
         assert_eq!(
             cqes,
             [(id.user_data(), 1), (CANCEL_USER_DATA, -libc::ENOENT)]
