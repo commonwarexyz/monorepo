@@ -56,6 +56,8 @@ stability_scope!(BETA {
     use commonware_macros::select;
     use commonware_parallel::Rayon;
     use futures::FutureExt as _;
+    #[allow(dead_code, reason = "callers still use the governor aliases below")]
+    mod limiter;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
     use std::{
