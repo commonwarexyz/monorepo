@@ -1,12 +1,11 @@
 //! Rate limiting with the generic cell rate algorithm (GCRA).
 //!
-//! A [Quota] admits up to [Quota::burst_size] cells at once and replenishes one cell every
-//! [Quota::replenish_interval]. A new [RateLimiter], and each key first seen by a
-//! [KeyedRateLimiter], starts with a full burst.
+//! A new [RateLimiter] can admit up to [Quota::burst_size] cells immediately.
+//! In a [KeyedRateLimiter], each new key gets its own allowance of that size.
+//! The allowance refills by one cell every [Quota::replenish_interval], up to the burst size.
 //!
-//! Limiters measure time by accumulating the elapsed time between successive [Clock::current]
-//! reads. A backward wall-clock step counts as zero elapsed time rather than stalling admission
-//! for its length, and a forward jump refills at most one burst.
+//! The limiter counts only forward steps between [Clock::current] reads. A backward step adds
+//! no elapsed time. Even a large forward jump cannot increase the allowance above the burst size.
 
 use crate::Clock;
 use commonware_utils::{DurationExt as _, SystemTimeExt as _, time::NANOS_PER_SEC};
@@ -18,7 +17,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// The rate and burst size admitted by a rate limiter.
+/// The refill rate and maximum burst size for a rate limiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Quota {
     interval: Duration,
@@ -26,8 +25,8 @@ pub struct Quota {
 }
 
 impl Quota {
-    /// Admits `max_burst` cells per `seconds` with a burst of `max_burst`, replenishing at most
-    /// one cell per nanosecond.
+    /// Sets the refill interval to the period divided by `max_burst` and the burst size to
+    /// `max_burst`. Rounds the interval down to whole nanoseconds, with a minimum of one.
     const fn per_period(seconds: u64, max_burst: NonZeroU32) -> Self {
         let mut nanos = seconds as u128 * NANOS_PER_SEC / max_burst.get() as u128;
         if nanos == 0 {
@@ -88,9 +87,7 @@ impl Quota {
     }
 }
 
-/// Clock reads and GCRA parameters shared by direct and keyed limiters.
-///
-/// Times are nanoseconds of accumulated elapsed time since creation.
+/// Clock state and quota parameters for [RateLimiter] and [KeyedRateLimiter].
 struct Gcra<C: Clock> {
     clock: C,
     /// Nanoseconds to replenish one cell.
@@ -110,7 +107,8 @@ impl<C: Clock> Gcra<C> {
         Self {
             clock,
             interval,
-            // Cannot overflow: at most (2^64 * 10^9) * 2^32 < 2^128
+            // The interval is below 2^64 * 10^9 nanoseconds and the burst is below 2^32.
+            // Their product fits in u128.
             capacity: interval * quota.burst.get() as u128,
             last,
             elapsed: 0,
@@ -128,8 +126,8 @@ impl<C: Clock> Gcra<C> {
         self.elapsed
     }
 
-    /// Returns the theoretical arrival time after admitting one cell at `now`, or the time to
-    /// wait until one can be admitted.
+    /// Returns the next theoretical arrival time if the quota allows one cell at `now`.
+    /// Otherwise, returns the time to wait.
     fn admit(&self, tat: u128, now: u128) -> Result<u128, Duration> {
         let next = tat.max(now).saturating_add(self.interval);
         let allowed = now.saturating_add(self.capacity);
@@ -145,14 +143,15 @@ impl<C: Clock> Gcra<C> {
     }
 }
 
-/// A rate limiter for a single entity.
+/// A rate limiter with one shared allowance.
 pub struct RateLimiter<C: Clock> {
     gcra: Gcra<C>,
+    /// Theoretical arrival time (TAT), in elapsed nanoseconds since creation.
     tat: u128,
 }
 
 impl<C: Clock> RateLimiter<C> {
-    /// Creates a limiter that starts with a full burst.
+    /// Creates a limiter that can admit [Quota::burst_size] cells immediately.
     pub fn new(quota: Quota, clock: C) -> Self {
         Self {
             gcra: Gcra::new(quota, clock),
@@ -175,12 +174,13 @@ impl<C: Clock> RateLimiter<C> {
     /// Waits until one cell can be admitted and charges it.
     ///
     /// A backward clock step between checking admission and registering the sleep can delay
-    /// the wake. Admission is checked again after waking.
+    /// the wake. The limiter checks the quota again after waking.
     ///
-    /// If the clock reaches its maximum representable time before a cell is ready, this
-    /// future stays pending. Cancel it and retry to observe any subsequent clock correction.
+    /// If no cell is available at the clock limit, this future stays pending.
+    /// To check again after a clock correction, drop the future and call this method again.
     pub async fn until_ready(&mut self) {
         while let Err(deadline) = self.check() {
+            // At the clock limit, no later wake time exists.
             if deadline == self.gcra.last {
                 return pending().await;
             }
@@ -191,15 +191,17 @@ impl<C: Clock> RateLimiter<C> {
 
 /// A rate limiter that tracks each key independently.
 ///
-/// Keys are stored with a randomized hasher, to resist collisions from attacker-chosen keys.
-/// Call [KeyedRateLimiter::retain_recent] periodically to drop keys with a full burst available.
+/// The limiter uses a randomized hasher to resist collisions from attacker-chosen keys.
+/// Call [KeyedRateLimiter::retain_recent] periodically to remove keys whose allowance
+/// has fully refilled.
 pub struct KeyedRateLimiter<K, C: Clock> {
     gcra: Gcra<C>,
+    /// Theoretical arrival time for each tracked key. A key without an entry has its full allowance.
     tats: HashMap<K, u128>,
 }
 
 impl<K: Hash + Eq + Clone, C: Clock> KeyedRateLimiter<K, C> {
-    /// Creates a limiter in which every key starts with a full burst.
+    /// Creates a limiter that can admit [Quota::burst_size] cells immediately for each new key.
     pub fn new(quota: Quota, clock: C) -> Self {
         Self {
             gcra: Gcra::new(quota, clock),
@@ -233,7 +235,8 @@ impl<K: Hash + Eq + Clone, C: Clock> KeyedRateLimiter<K, C> {
         }
     }
 
-    /// Drops every key with a full burst available and releases excess capacity.
+    /// Removes keys whose allowance has fully refilled.
+    /// Shrinks the table if it has excess capacity.
     pub fn retain_recent(&mut self) {
         let now = self.gcra.now();
         self.tats.retain(|_, tat| *tat > now);
@@ -248,7 +251,7 @@ impl<K: Hash + Eq + Clone, C: Clock> KeyedRateLimiter<K, C> {
         self.tats.len()
     }
 
-    /// Returns whether no keys are tracked.
+    /// Returns true if the limiter tracks no keys.
     pub fn is_empty(&self) -> bool {
         self.tats.is_empty()
     }
@@ -368,7 +371,7 @@ mod tests {
         assert_eq!(limiter.check(), Err(earliest));
         assert_eq!(limiter.check(), Err(earliest));
 
-        // Rejections charged nothing, so one cell replenishes after one interval
+        // Rejected checks use no quota. One cell is available after one interval.
         clock.advance(Duration::from_millis(249));
         assert_eq!(limiter.check(), Err(earliest));
         clock.advance(Duration::from_millis(1));
@@ -402,7 +405,7 @@ mod tests {
         }
         limiter.check().unwrap_err();
 
-        // A backward step neither refills nor stalls for its length
+        // A backward step adds no quota. Refill resumes from the new clock reading.
         clock.rewind(Duration::from_secs(60));
         let stepped = START + Duration::from_secs(940);
         assert_eq!(limiter.check(), Err(stepped + Duration::from_millis(100)));
@@ -410,7 +413,7 @@ mod tests {
         limiter.check().unwrap();
         limiter.check().unwrap_err();
 
-        // A step back before the creation time behaves the same
+        // The same rule applies if the clock moves back before the limiter was created.
         clock.set(START);
         assert_eq!(limiter.check(), Err(START + Duration::from_millis(100)));
         clock.advance(Duration::from_millis(100));
@@ -438,7 +441,7 @@ mod tests {
         let mut limiter = RateLimiter::new(quota, clock.clone());
         limiter.check().unwrap();
 
-        // One interval fits in u64 nanoseconds, but two intervals do not.
+        // One interval fits in a u64 count of nanoseconds. Two do not.
         let period = Duration::from_nanos(1u64 << 63);
         let quota = Quota::with_period(period).unwrap().allow_burst(NZU32!(3));
         let mut keyed = KeyedRateLimiter::new(quota, clock.clone());
@@ -447,7 +450,7 @@ mod tests {
         }
         assert_eq!(keyed.check_key(&0u8), Err(START + period));
 
-        // The earliest time saturates when it is not representable
+        // A retry time beyond the clock limit returns the limit.
         let quota = Quota::with_period(Duration::MAX).unwrap();
         let mut limiter = RateLimiter::new(quota, clock);
         limiter.check().unwrap();
@@ -483,7 +486,7 @@ mod tests {
             Err(START + Duration::from_millis(500))
         );
 
-        // A new key starts with a full burst
+        // Key 2 can use its entire allowance even though key 1 has spent its own.
         limiter.check_key(&2).unwrap();
         limiter.check_key(&2).unwrap();
         limiter.check_key(&2).unwrap_err();
@@ -515,7 +518,7 @@ mod tests {
         limiter.check_key(&2).unwrap();
         limiter.check_key(&2).unwrap();
 
-        // Key 1 refills at 500ms and key 2 at 1250ms
+        // Key 1 fully refills at 500 ms and key 2 at 1250 ms.
         clock.advance(Duration::from_millis(249));
         limiter.retain_recent();
         assert_eq!(limiter.len(), 2);
@@ -613,8 +616,8 @@ mod tests {
         limiter.check().unwrap();
         assert_eq!(limiter.check(), Err(ceiling));
 
-        // A ready test sleeper takes the wait to the ceiling in the first poll. Its
-        // assertions fail if the limiter tries to sleep again without making progress.
+        // The test clock advances to the deadline on the first poll. It will panic if the
+        // limiter tries to sleep again at the same deadline.
         {
             let mut wait = pin!(limiter.until_ready());
             assert!(
