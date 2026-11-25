@@ -44,14 +44,12 @@
 //! until its CQE is reaped. See [`super::idle`] for how pool worker
 //! selection fits with this wait.
 //!
-//! By default the kernel counts a blocking enter as iowait once the thread has
-//! submitted to any ring, since its per-task in-flight count also holds cached
-//! request references, even with nothing pending. Blocking waits therefore
-//! pass NO_IOWAIT unless a staged storage SQE still awaits its operation CQE,
-//! so a worker waiting only on network I/O or its ring futex wait shows no
-//! iowait, while storage waits keep the kernel's iowait reporting and stay
-//! eligible for a governor's iowait boost on wake. The ring futex wait is a
-//! control SQE and never counts as storage.
+//! By default the kernel counts a blocking enter as iowait whenever the thread
+//! has io_uring requests in flight, and a parked worker always has one, its
+//! ring futex wait. Blocking waits therefore pass NO_IOWAIT unless a staged
+//! storage SQE still awaits its operation CQE, so only storage waits keep the
+//! kernel's iowait reporting and stay eligible for a governor's iowait boost on
+//! wake. The ring futex wait is a control SQE and never counts as storage.
 //!
 //! # Cleanup
 //!
