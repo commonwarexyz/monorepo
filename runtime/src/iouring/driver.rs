@@ -44,6 +44,11 @@
 //! until its CQE is reaped. See [`super::idle`] for how pool worker
 //! selection fits with this wait.
 //!
+//! A park counts as iowait while storage requests are in flight. Otherwise it
+//! passes NO_IOWAIT, so waiting only on network requests is not iowait. A
+//! request still waiting for its durability permit does not count, since the
+//! request holding the permit already counts on the worker that staged it.
+//!
 //! # Cleanup
 //!
 //! Observer callbacks and request-resource destruction go through [`Deferred`],
@@ -143,6 +148,8 @@ enum Enter {
         /// When to stop waiting, or `None` to wait without a bound. A
         /// deadline that already passed does not sleep.
         deadline: Option<Instant>,
+        /// Whether a blocking wait should count as waiting for storage I/O.
+        iowait: bool,
     },
 }
 
@@ -405,7 +412,8 @@ impl Driver {
             self.state.ring_wait_needed = false;
         }
 
-        Self::enter(&mut self.ring, Enter::Wait { deadline })?;
+        let iowait = self.state.waiters.storage_in_flight() != 0;
+        Self::enter(&mut self.ring, Enter::Wait { deadline, iowait })?;
         Ok(true)
     }
 
@@ -429,6 +437,7 @@ impl Driver {
         let mut timeout = Duration::ZERO;
         if let Enter::Wait {
             deadline: Some(deadline),
+            ..
         } = mode
         {
             timeout = deadline.saturating_duration_since(Instant::now());
@@ -448,6 +457,7 @@ impl Driver {
             Enter::TaskWork => {
                 let to_submit =
                     u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+
                 // SAFETY: `to_submit` counts only entries already published to
                 // the SQ, whose resources stay alive until their CQEs, and no
                 // argument pointer is passed.
@@ -460,14 +470,40 @@ impl Driver {
                     )
                 }
             }
-            Enter::Wait { deadline: None } => ring.submit_and_wait(1),
-            Enter::Wait { deadline: Some(_) } => {
+            Enter::Wait { deadline, iowait } => {
+                let to_submit =
+                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+                let mut flags = EnterFlags::GETEVENTS;
+
+                if !iowait {
+                    flags |= EnterFlags::NO_IOWAIT;
+                }
+
                 // EXT_ARG bounds the wait without reserving an SQE for a timeout.
-                let ts = Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos());
-                let args = SubmitArgs::new().timespec(&ts);
-                match ring.submitter().submit_with_args(1, &args) {
+                let ts = deadline.map(|_| {
+                    Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos())
+                });
+                let args = ts.as_ref().map(|ts| SubmitArgs::new().timespec(ts));
+
+                if args.is_some() {
+                    flags |= EnterFlags::EXT_ARG;
+                }
+
+                #[cfg(test)]
+                tests::record_wait(flags);
+
+                // SAFETY: `to_submit` counts only entries already published to
+                // the SQ, whose resources stay alive until their CQEs, and
+                // `args` outlives the call. Without EXT_ARG the kernel reads the
+                // null argument as an absent signal mask and ignores its size.
+                let result = unsafe {
+                    ring.submitter()
+                        .enter(to_submit, 1, flags.bits(), args.as_ref())
+                };
+
+                match result {
                     // This timeout bounds the enter. Request expiry belongs to
                     // the wheel.
                     Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
@@ -855,7 +891,7 @@ pub mod tests {
             park::tests::{handles, unpark_when_armed, wait_until_armed, wake},
             request::{
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
-                SyncRequest, WriteAtRequest, WriteAtState,
+                ResizeRequest, SyncRequest, WriteAtRequest, WriteAtState,
             },
             wheel::BUDGET,
         },
@@ -903,6 +939,9 @@ pub mod tests {
         /// Callback run once at the end of this thread's next service turn
         /// that leaves a durability request waiting for its permit.
         static WHILE_ACQUIRING: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+
+        /// Flags of this thread's latest wait enter.
+        static LAST_WAIT: Cell<Option<EnterFlags>> = const { Cell::new(None) };
     }
 
     /// Clear an unused injection when its test scope exits or unwinds.
@@ -945,6 +984,11 @@ pub mod tests {
     /// counter.
     pub fn drop_completion(ring: &IoUring) -> bool {
         take_fault(ring, Fault::DropCompletion)
+    }
+
+    /// Remember a wait's flags for assertions on the calling thread.
+    pub fn record_wait(flags: EnterFlags) {
+        LAST_WAIT.set(Some(flags));
     }
 
     /// Fail service when retired resources are awaiting deferred cleanup, and
@@ -3242,6 +3286,74 @@ pub mod tests {
         harness.drain();
     }
 
+    /// A blocking wait counts as iowait only while a storage operation is in
+    /// flight, including a cancelled one whose operation CQE has not arrived.
+    #[test]
+    fn test_blocking_wait_counts_as_iowait_only_with_storage_in_flight() {
+        let mut harness = Harness::new(4);
+        let (directory, file) = make_file("iowait");
+
+        // Return whether an unbounded park passed NO_IOWAIT. A NOP the park
+        // submits ends its wait, so the check depends on no deadline.
+        let no_iowait = |harness: &mut Harness| {
+            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+
+            // SAFETY: A NOP references no memory.
+            unsafe { harness.driver.ring.submission().push(&nop).unwrap() };
+            assert!(harness.park(0, None).unwrap());
+
+            LAST_WAIT.take().unwrap().contains(EnterFlags::NO_IOWAIT)
+        };
+
+        // A receive without data keeps only network I/O in flight.
+        let (left, _right) = UnixStream::pair().unwrap();
+        harness.admit(recv(left, 1, None), 0);
+        harness.service();
+        assert!(no_iowait(&mut harness));
+
+        // A read kept out of the kernel stands in for one in flight.
+        let read = harness.stage(
+            Request::ReadAt(ReadAtRequest::new(
+                file.clone(),
+                0,
+                IoBufMut::zeroed(1),
+                Cache::Enabled,
+            )),
+            None,
+            1,
+        );
+        assert!(!no_iowait(&mut harness));
+
+        // Cancellation leaves the read in flight until its operation CQE.
+        harness.orphan(read);
+        harness.service();
+        assert!(harness.driver.state.waiters.is_in_flight(read));
+        assert!(!no_iowait(&mut harness));
+
+        // A failed cancellation does not release it either.
+        harness
+            .driver
+            .state
+            .handle_cqe(CANCEL_USER_DATA, -libc::EALREADY, &mut harness.deferred);
+        assert_eq!(harness.driver.state.waiters.storage_in_flight(), 1);
+        assert!(!no_iowait(&mut harness));
+
+        // Its operation CQE does.
+        harness.simulated_completion(read, -libc::ECANCELED);
+        assert!(no_iowait(&mut harness));
+
+        // A resize counts as storage until its operation CQE.
+        file.tracker.write();
+        let resize = harness.stage(Request::Resize(ResizeRequest::new(file, 0)), None, 2);
+        assert!(!no_iowait(&mut harness));
+
+        harness.simulated_completion(resize, 0);
+        assert!(no_iowait(&mut harness));
+
+        harness.drain();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn test_enter_distinguishes_timeout_from_failure() {
         let mut harness = Harness::new(1);
@@ -3254,9 +3366,11 @@ pub mod tests {
             Enter::TaskWork,
             Enter::Wait {
                 deadline: Some(Instant::now() + TIMED_WAIT),
+                iowait: false,
             },
             Enter::Wait {
                 deadline: Some(Instant::now()),
+                iowait: false,
             },
         ] {
             Driver::enter(&mut harness.driver.ring, enter).unwrap();
@@ -3268,12 +3382,17 @@ pub mod tests {
         let results = [
             Enter::Flush,
             Enter::TaskWork,
-            Enter::Wait { deadline: None },
+            Enter::Wait {
+                deadline: None,
+                iowait: false,
+            },
             Enter::Wait {
                 deadline: Some(Instant::now() + Duration::from_secs(1)),
+                iowait: false,
             },
             Enter::Wait {
                 deadline: Some(Instant::now()),
+                iowait: false,
             },
         ]
         .map(|enter| Driver::enter(&mut harness.driver.ring, enter));
