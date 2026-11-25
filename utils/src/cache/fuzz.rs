@@ -81,6 +81,17 @@ fn exercise_cache(capacity: usize, keys: u8, prefill: bool, ops: Vec<Op>) {
     // reports as present must hold its last-written value (no stale or
     // conjured values). An evicted key is simply absent.
     let mut model = HashMap::new();
+    let main_reference = |cache: &Cache<u8, u16>, key: &u8| {
+        cache.find_slot(key).is_some_and(|slot| {
+            cache.topology[slot].location() == Location::Main
+                && cache.slots[slot].state.is_referenced()
+        })
+    };
+    let check_expected = |cache: &Cache<u8, u16>, key: &u8, referenced| {
+        let slot = cache.find_slot(key).expect("expected entry is resident");
+        assert_eq!(cache.topology[slot].location(), Location::Main);
+        assert_eq!(cache.slots[slot].state.is_referenced(), referenced);
+    };
     for op in ops {
         match op {
             Op::Get(key) => {
@@ -125,12 +136,18 @@ fn exercise_cache(capacity: usize, keys: u8, prefill: bool, ops: Vec<Op>) {
             Op::Expect(key) => {
                 let (present, len) = (cache.contains(&key), cache.len());
                 let value = cache.peek(&key).copied();
+                let referenced = main_reference(&cache, &key);
                 assert_eq!(cache.expect(&key), present);
                 assert!(cache.len() <= len);
                 assert_eq!(cache.peek(&key).copied(), value);
+                if present {
+                    check_expected(&cache, &key, referenced);
+                }
             }
             Op::GetOrInsertMutExpected(key, value) => {
+                let referenced = main_reference(&cache, &key);
                 *cache.get_or_insert_mut_expected(key, || value).1 = value;
+                check_expected(&cache, &key, referenced);
                 model.insert(key, value);
                 assert_eq!(cache.peek(&key).copied(), Some(value));
             }
