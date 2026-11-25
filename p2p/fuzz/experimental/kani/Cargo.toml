@@ -1,0 +1,35 @@
+[package]
+name = "commonware-p2p-fuzz-kani"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# Marks this package as a set of Kani proof harnesses, so that a script can find every such
+# package. `version` is the Kani release the harnesses are written for and checked with.
+# `harnesses` is the number of harnesses whose name starts with `kani_`: a run that finds
+# another number is incomplete. Kani keeps its own settings in the tables `flags` and
+# `unstable` under this one. This package sets neither, and Kani 0.68.0 ignores the two keys
+# here.
+[package.metadata.kani]
+version = "0.68.0"
+harnesses = 2
+
+# This package is its own workspace, with its own Cargo.lock. It is not a member of the
+# repository workspace, so workspace-wide commands do not build or run it.
+[workspace]
+
+[features]
+# Adds the implementation-consistency assertions, which are stronger than the quoted
+# contracts. The default build asserts the quoted contracts only.
+consistency = []
+
+# `cargo kani` sets `cfg(kani)`. Every module and every dependency is behind it, so a plain
+# `cargo build` of this package compiles nothing of the repository.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[target.'cfg(kani)'.dependencies]
+commonware-codec = { path = "../../../../codec" }
+commonware-p2p = { path = "../../.." }
+commonware-runtime = { path = "../../../../runtime" }
