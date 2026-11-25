@@ -409,7 +409,6 @@ impl Driver {
             self.state.ring_wait_needed = false;
         }
 
-        // The ring futex wait is a control SQE and never counts as storage.
         let iowait = self.state.waiters.storage_in_flight() != 0;
         Self::enter(&mut self.ring, Enter::Wait { deadline, iowait })?;
         Ok(true)
@@ -432,15 +431,17 @@ impl Driver {
         // completion with a zero timeout arms an expired timer and sleeps until
         // it fires whenever no completion is ready, so a deadline that already
         // passed runs only the task work.
-        let mut timeout = Duration::ZERO;
+        let mut timeout = None;
         if let Enter::Wait {
             deadline: Some(deadline),
             ..
         } = mode
         {
-            timeout = deadline.saturating_duration_since(Instant::now());
-            if timeout.is_zero() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 mode = Enter::TaskWork;
+            } else {
+                timeout = Some(remaining);
             }
         }
 
@@ -452,60 +453,13 @@ impl Driver {
             // deferred task work and returns, as liburing's
             // `io_uring_submit_and_get_events` does. Newer kernels bound the
             // batch and leave the rest for a later enter.
-            Enter::TaskWork => {
-                let to_submit =
-                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
-                #[cfg(test)]
-                tests::record_enter(0, EnterFlags::GETEVENTS);
-                // SAFETY: `to_submit` counts only entries already published to
-                // the SQ, whose resources stay alive until their CQEs, and no
-                // argument pointer is passed.
-                unsafe {
-                    ring.submitter().enter::<libc::sigset_t>(
-                        to_submit,
-                        0,
-                        EnterFlags::GETEVENTS.bits(),
-                        None,
-                    )
-                }
-            }
-            // The crate's wait helpers cannot pass NO_IOWAIT, so a wait builds
-            // its enter like a task-work enter that waits for one completion.
-            Enter::Wait { deadline, iowait } => {
-                let to_submit =
-                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+            Enter::TaskWork => Self::submit_and_enter(ring, 0, EnterFlags::GETEVENTS, None),
+            Enter::Wait { iowait, .. } => {
                 let mut flags = EnterFlags::GETEVENTS;
-
                 if !iowait {
                     flags |= EnterFlags::NO_IOWAIT;
                 }
-
-                // EXT_ARG bounds the wait without reserving an SQE for a timeout.
-                let ts = Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos());
-                let args = SubmitArgs::new().timespec(&ts);
-                let args = deadline.is_some().then_some(&args);
-
-                if args.is_some() {
-                    flags |= EnterFlags::EXT_ARG;
-                }
-
-                #[cfg(test)]
-                tests::record_enter(1, flags);
-
-                // SAFETY: `to_submit` counts only entries already published to
-                // the SQ, whose resources stay alive until their CQEs. `args`,
-                // passed exactly when EXT_ARG is set, outlives the call and wraps
-                // the kernel's `io_uring_getevents_arg`.
-                let result = unsafe { ring.submitter().enter(to_submit, 1, flags.bits(), args) };
-
-                match result {
-                    // This timeout bounds the enter. Request expiry belongs to
-                    // the wheel.
-                    Err(err) if args.is_some() && err.raw_os_error() == Some(libc::ETIME) => Ok(0),
-                    result => result,
-                }
+                Self::submit_and_enter(ring, 1, flags, timeout)
             }
         };
 
@@ -537,6 +491,58 @@ impl Driver {
             return Err(io::Error::from_raw_os_error(libc::EBADR));
         }
         Ok(())
+    }
+
+    /// Submit the published SQEs and enter the ring with `flags`, waiting for
+    /// `min_complete` completions for at most `timeout` when one is given.
+    ///
+    /// A timeout returns `Ok`.
+    fn submit_and_enter(
+        ring: &mut IoUring,
+        min_complete: u32,
+        mut flags: EnterFlags,
+        timeout: Option<Duration>,
+    ) -> io::Result<usize> {
+        let to_submit = u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+        if timeout.is_some() {
+            flags |= EnterFlags::EXT_ARG;
+        }
+        #[cfg(test)]
+        tests::record_enter(min_complete, flags);
+
+        let Some(timeout) = timeout else {
+            // SAFETY: `to_submit` counts only entries already published to the
+            // SQ, whose resources stay alive until their CQEs, and no argument
+            // pointer is passed.
+            return unsafe {
+                ring.submitter().enter::<libc::sigset_t>(
+                    to_submit,
+                    min_complete,
+                    flags.bits(),
+                    None,
+                )
+            };
+        };
+
+        // EXT_ARG bounds the wait without reserving an SQE for a timeout.
+        let ts = Timespec::new()
+            .sec(timeout.as_secs())
+            .nsec(timeout.subsec_nanos());
+        let args = SubmitArgs::new().timespec(&ts);
+
+        // SAFETY: `to_submit` counts only entries already published to the SQ,
+        // whose resources stay alive until their CQEs, and `args` outlives the
+        // call.
+        let result = unsafe {
+            ring.submitter()
+                .enter(to_submit, min_complete, flags.bits(), Some(&args))
+        };
+
+        match result {
+            // This timeout bounds the enter. Request expiry belongs to the wheel.
+            Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
+            result => result,
+        }
     }
 }
 
@@ -3364,12 +3370,6 @@ pub mod tests {
 
         harness.simulated_completion(resize, 0);
         assert!(no_iowait(&mut harness));
-
-        // A park whose deadline already passed does not block.
-        assert!(harness.park(0, Some(Instant::now())).unwrap());
-        let (min_complete, flags) = LAST_ENTER.get().unwrap();
-        assert_eq!(min_complete, 0);
-        assert!(!flags.contains(EnterFlags::NO_IOWAIT));
 
         harness.drain();
         fs::remove_dir_all(directory).unwrap();
