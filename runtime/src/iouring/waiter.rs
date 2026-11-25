@@ -33,7 +33,7 @@ pub type UserData = u64;
 /// the low 32 bits and the low 32 generation bits in the high 32 bits.
 /// An operation CQE cannot be stale because its slot cannot recycle before it
 /// arrives, so completion lookup recovers the full identity from the live slot.
-/// Cancellation acknowledgements use a separate token handled by the driver.
+/// Cancellation CQEs use a separate token handled by the driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WaiterId(pub Id);
 

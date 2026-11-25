@@ -1761,7 +1761,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_cancel_acknowledgements_leave_requests_and_results_untouched() {
+    fn test_failed_cancellations_leave_requests_and_results_untouched() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
         let id = harness.stage(recv(left, 5, None), None, 0);
@@ -1805,28 +1805,9 @@ pub mod tests {
         harness.drain();
     }
 
-    /// A successful cancellation posts only its target's CQE, while one that
-    /// finds no target still posts its failure.
+    /// A successful cancellation posts only its target's CQE.
     #[test]
-    fn test_only_failed_cancellations_post_cqes() {
-        // Enter until `count` CQEs arrived, then once more so an extra one
-        // would show, and return them as (user_data, result).
-        let reap = |harness: &mut Harness, count: usize| {
-            let mut cqes = Vec::new();
-            let mut last = false;
-            let deadline = Instant::now() + Duration::from_secs(1);
-            loop {
-                assert!(Instant::now() < deadline, "expected CQEs missing: {cqes:?}");
-                Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
-                let completion = harness.driver.ring.completion();
-                cqes.extend(completion.map(|cqe| (cqe.user_data(), cqe.result())));
-                if last {
-                    return cqes;
-                }
-                last = cqes.len() >= count;
-            }
-        };
-
+    fn test_successful_cancellation_posts_only_its_target_cqe() {
         let mut harness = Harness::new(1);
 
         // A receive without data stays in the kernel until cancelled.
@@ -1841,8 +1822,21 @@ pub mod tests {
                 .state
                 .stage_cancellations(&mut harness.driver.ring.submission())
         );
-        let cqes = reap(&mut harness, 1);
+
+        // Enter until the target's CQE arrives, then once more so a
+        // cancellation CQE would show.
+        let mut cqes = Vec::new();
+        let mut last = false;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !last {
+            assert!(Instant::now() < deadline, "target CQE missing");
+            last = !cqes.is_empty();
+            Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
+            let completion = harness.driver.ring.completion();
+            cqes.extend(completion.map(|cqe| (cqe.user_data(), cqe.result())));
+        }
         assert_eq!(cqes, [(id.user_data(), -libc::ECANCELED)]);
+
         for (user_data, result) in cqes {
             harness
                 .driver
@@ -1851,41 +1845,11 @@ pub mod tests {
         }
         assert!(!harness.driver.state.waiters.is_in_flight(id));
 
-        // A receive whose CQE is posted but not yet reaped is still in flight,
-        // so its cancellation stages and finds no target.
-        let (left, mut right) = UnixStream::pair().unwrap();
-        right.write_all(b"x").unwrap();
-        let id = harness.admit(recv(left, 1, None), 1);
-        assert!(!harness.driver.state.stage_ready_requests(
-            &mut harness.driver.ring.submission(),
-            None,
-            &mut harness.deferred,
-        ));
-        harness.driver.ring.submit_and_wait(1).unwrap();
-        harness.driver.orphan(id, &mut harness.deferred);
-        assert!(
-            !harness
-                .driver
-                .state
-                .stage_cancellations(&mut harness.driver.ring.submission())
-        );
-        let cqes = reap(&mut harness, 2);
-        assert_eq!(
-            cqes,
-            [(id.user_data(), 1), (CANCEL_USER_DATA, -libc::ENOENT)]
-        );
-        for (user_data, result) in cqes {
-            harness
-                .driver
-                .state
-                .handle_cqe(user_data, result, &mut harness.deferred);
-        }
-        harness.collect();
         harness.drain();
     }
 
     #[test]
-    fn test_cancel_acknowledgement_invariants() {
+    fn test_cancellation_cqe_invariants() {
         // Both control tokens use the index that Waiters refuses to allocate.
         assert_ne!(CANCEL_USER_DATA, RING_WAIT_USER_DATA);
         for token in [CANCEL_USER_DATA, RING_WAIT_USER_DATA] {
@@ -1908,7 +1872,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_request_retirement_releases_hold_before_cancel_acknowledgement() {
+    fn test_request_retirement_releases_hold_before_cancellation_cqe() {
         for consume_cancel in [false, true] {
             for reuse in [false, true] {
                 let mut harness = Harness::new(1);
@@ -1977,10 +1941,17 @@ pub mod tests {
                 probe.unlock().unwrap();
 
                 if consume_cancel {
-                    // Leave the real cancellation acknowledgement unobserved.
+                    // The cancellation finds no target, and its failure CQE is
+                    // consumed without the driver seeing it.
                     harness.driver.ring.submit_and_wait(1).unwrap();
                     assert!(harness.driver.ring.submission().is_empty());
-                    assert!(!harness.driver.ring.completion().is_empty());
+                    let cqes: Vec<_> = harness
+                        .driver
+                        .ring
+                        .completion()
+                        .map(|cqe| (cqe.user_data(), cqe.result()))
+                        .collect();
+                    assert_eq!(cqes, [(CANCEL_USER_DATA, -libc::ENOENT)]);
                 } else {
                     assert_eq!(harness.driver.ring.submission().len(), 1);
                 }
@@ -2145,7 +2116,7 @@ pub mod tests {
         };
 
         for close in [false, true] {
-            for acknowledged in [false, true] {
+            for cancel_failed in [false, true] {
                 for (result, outcome) in [
                     (-libc::EAGAIN, Err(Error::Timeout)),
                     (DIRECT_ALIGN as i32, Err(Error::Timeout)),
@@ -2168,7 +2139,7 @@ pub mod tests {
                     } else {
                         harness.orphan(id);
                     }
-                    if acknowledged {
+                    if cancel_failed {
                         harness.driver.state.handle_cqe(
                             CANCEL_USER_DATA,
                             -libc::EALREADY,
