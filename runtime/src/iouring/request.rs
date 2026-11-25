@@ -12,12 +12,12 @@
 
 use super::{
     sockaddr::SockAddr,
+    sqe::Sqe,
     waiter::{WaiterId, WaiterState},
 };
 use crate::{BLOB_PAGE_SIZE, Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
 use bytes::Buf as _;
 use commonware_utils::{NZUsize, sync::AsyncMutex};
-use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
     net::TcpListener,
@@ -249,7 +249,7 @@ impl Request {
     }
 
     /// Build the next SQE for this request, tagged with `waiter_id`.
-    pub fn build_sqe(&mut self, waiter_id: WaiterId) -> SqueueEntry {
+    pub fn build_sqe(&mut self, waiter_id: WaiterId) -> Sqe {
         let sqe = match self {
             Self::Send(s) => s.build_sqe(),
             Self::Recv(r) => r.build_sqe(),
@@ -260,7 +260,7 @@ impl Request {
             Self::Connect(r) => r.build_sqe(),
             Self::Poll(r) => r.build_sqe(),
         };
-        sqe.user_data(waiter_id.user_data())
+        sqe.with_user_data(waiter_id.user_data())
     }
 
     /// Evaluate a CQE result against this request's progress and state.
@@ -531,14 +531,14 @@ pub struct SendRequest {
 
 impl SendRequest {
     /// Build the next socket send SQE for the remaining bytes.
-    fn build_sqe(&mut self) -> SqueueEntry {
-        let fd = Fd(self.fd.as_raw_fd());
+    fn build_sqe(&mut self) -> Sqe {
+        let fd = self.fd.as_raw_fd();
         match &mut self.write {
             WriteBuffers::Single { buf, offset } => {
                 let bytes = &buf.as_ref()[*offset..];
                 let ptr = bytes.as_ptr();
                 let remaining = bytes.len();
-                opcode::Send::new(fd, ptr, scalar_len(remaining)).build()
+                Sqe::send(fd, ptr, scalar_len(remaining))
             }
             WriteBuffers::Vectored {
                 bufs,
@@ -552,7 +552,7 @@ impl SendRequest {
                 // `Writev` is sufficient here because network sends only need
                 // ordered byte delivery. This layer does not need sendmsg
                 // ancillary data or zerocopy completion management.
-                opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len).build()
+                Sqe::writev(fd, iovecs.as_ptr(), iovecs_len, 0, 0)
             }
         }
     }
@@ -594,8 +594,8 @@ pub struct RecvRequest {
 
 impl RecvRequest {
     /// Build the next socket recv SQE for the unread suffix of the target.
-    fn build_sqe(&mut self) -> SqueueEntry {
-        let fd = Fd(self.fd.as_raw_fd());
+    fn build_sqe(&mut self) -> Sqe {
+        let fd = self.fd.as_raw_fd();
         assert!(
             self.offset <= self.len && self.len <= self.buf.capacity(),
             "recv invariant violated: need offset <= len <= capacity"
@@ -604,7 +604,7 @@ impl RecvRequest {
         // offset <= len <= capacity.
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.offset) };
         let remaining = self.len - self.offset;
-        opcode::Recv::new(fd, ptr, scalar_len(remaining)).build()
+        Sqe::recv(fd, ptr, scalar_len(remaining))
     }
 
     /// Classify one recv CQE and decide whether the logical request completes
@@ -717,8 +717,8 @@ impl ReadAtRequest {
     }
 
     /// Build the next positioned read SQE for the unread suffix of the target.
-    fn build_sqe(&mut self) -> SqueueEntry {
-        let fd = Fd(self.file.as_raw_fd());
+    fn build_sqe(&mut self) -> Sqe {
+        let fd = self.file.as_raw_fd();
         let len = self.buf.len();
         assert!(
             self.read <= len,
@@ -740,17 +740,12 @@ impl ReadAtRequest {
                     && offset.is_multiple_of(DIRECT_ALIGN as u64),
                 "a direct read must be nonempty and aligned"
             );
-            return opcode::Read::new(Fd(direct.fd), ptr, scalar_len(len))
-                .offset(offset)
-                .build();
+            return Sqe::read(direct.fd, ptr, scalar_len(len), offset, 0);
         }
 
         // A buffered read submits its unread suffix with the request's cache policy.
         let rw_flags = self.cache.rw_flag(&self.file.dont_cache_supported);
-        opcode::Read::new(fd, ptr, scalar_len(remaining))
-            .offset(offset)
-            .rw_flags(rw_flags)
-            .build()
+        Sqe::read(fd, ptr, scalar_len(remaining), offset, rw_flags)
     }
 
     /// Classify one read CQE and decide whether the logical request completes
@@ -881,10 +876,8 @@ pub enum WriteAtState {
 }
 
 /// Build a data-only fsync SQE.
-fn build_datasync_sqe(file: &File) -> SqueueEntry {
-    opcode::Fsync::new(Fd(file.as_raw_fd()))
-        .flags(io_uring::types::FsyncFlags::DATASYNC)
-        .build()
+fn build_datasync_sqe(file: &File) -> Sqe {
+    Sqe::fdatasync(file.as_raw_fd())
 }
 
 /// Return the terminal status of an operation that completes with zero or an errno, or
@@ -941,22 +934,19 @@ impl WriteAtRequest {
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
-    fn build_sqe(&mut self) -> SqueueEntry {
+    fn build_sqe(&mut self) -> Sqe {
         if self.state == WriteAtState::Syncing {
             return build_datasync_sqe(&self.file);
         }
 
         // Durability comes from the data sync, so writes carry only the cache hint.
-        let fd = Fd(self.file.as_raw_fd());
+        let fd = self.file.as_raw_fd();
         let rw_flags = self.cache.rw_flag(&self.file.dont_cache_supported);
         match &mut self.write {
             WriteBuffers::Single { buf, offset } => {
                 let bytes = &buf.as_ref()[*offset..];
                 let ptr = bytes.as_ptr();
-                opcode::Write::new(fd, ptr, scalar_len(bytes.len()))
-                    .offset(self.offset)
-                    .rw_flags(rw_flags)
-                    .build()
+                Sqe::write(fd, ptr, scalar_len(bytes.len()), self.offset, rw_flags)
             }
             WriteBuffers::Vectored {
                 bufs,
@@ -967,10 +957,7 @@ impl WriteAtRequest {
             } => {
                 let iovecs_len = fill_iovecs(bufs, *chunk, *offset, iovecs);
 
-                opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len)
-                    .offset(self.offset)
-                    .rw_flags(rw_flags)
-                    .build()
+                Sqe::writev(fd, iovecs.as_ptr(), iovecs_len, self.offset, rw_flags)
             }
         }
     }
@@ -1031,7 +1018,7 @@ impl SyncRequest {
     }
 
     /// Build the fsync SQE for this request.
-    fn build_sqe(&self) -> SqueueEntry {
+    fn build_sqe(&self) -> Sqe {
         build_datasync_sqe(&self.file)
     }
 
@@ -1057,8 +1044,8 @@ impl ResizeRequest {
     }
 
     /// Build the ftruncate SQE for this request.
-    fn build_sqe(&self) -> SqueueEntry {
-        opcode::Ftruncate::new(Fd(self.file.as_raw_fd()), self.len).build()
+    fn build_sqe(&self) -> Sqe {
+        Sqe::ftruncate(self.file.as_raw_fd(), self.len)
     }
 
     /// Classify one ftruncate CQE and decide whether the logical request completes
@@ -1080,9 +1067,9 @@ pub struct ConnectRequest {
 
 impl ConnectRequest {
     /// Build a connection SQE pointing into the boxed native address.
-    fn build_sqe(&self) -> SqueueEntry {
+    fn build_sqe(&self) -> Sqe {
         let (address, len) = self.address.as_raw();
-        opcode::Connect::new(Fd(self.fd.as_raw_fd()), address, len).build()
+        Sqe::connect(self.fd.as_raw_fd(), address, len)
     }
 
     /// Preserve connection success when it races a cancellation request.
@@ -1119,8 +1106,8 @@ pub struct PollRequest {
 
 impl PollRequest {
     /// Build one readiness SQE, leaving multishot mode disabled.
-    fn build_sqe(&self) -> SqueueEntry {
-        opcode::PollAdd::new(Fd(self.fd.as_raw_fd()), libc::POLLIN as u32).build()
+    fn build_sqe(&self) -> Sqe {
+        Sqe::poll_add(self.fd.as_raw_fd(), libc::POLLIN as u32)
     }
 
     /// Treat readiness as a hint, allowing the caller to retry the actual syscall.
@@ -1252,22 +1239,14 @@ mod tests {
 
     /// Positioned read fields of an SQE: opcode, descriptor, offset, address, length and RWF
     /// flags.
-    fn read_fields(sqe: &SqueueEntry) -> (u8, i32, u64, u64, u32, i32) {
-        const _: () = assert!(size_of::<SqueueEntry>() == 64);
-
-        // SAFETY: SqueueEntry is a repr(C) wrapper of the kernel's 64-byte io_uring_sqe. Its fields
-        // are integers without padding, and opcode builders zero it before setting them, so every
-        // byte is initialized.
-        let bytes: [u8; 64] = unsafe { std::mem::transmute_copy(sqe) };
-        let u32_at = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
-        let u64_at = |at: usize| u64::from_ne_bytes(bytes[at..at + 8].try_into().unwrap());
+    fn read_fields(sqe: &Sqe) -> (u8, i32, u64, u64, u32, i32) {
         (
-            bytes[0],
-            u32_at(4) as i32,
-            u64_at(8),
-            u64_at(16),
-            u32_at(24),
-            u32_at(28) as i32,
+            sqe.opcode(),
+            sqe.fd(),
+            sqe.off(),
+            sqe.addr(),
+            sqe.len(),
+            sqe.op_flags().cast_signed(),
         )
     }
 
@@ -1528,46 +1507,41 @@ mod tests {
             // Every request tags its SQE. Only network requests have deadlines,
             // and only storage mutations continue after their observer disappears.
             let requests = [
-                (Request::Send(send), opcode::Send::CODE, deadline, false),
-                (Request::Recv(recv), opcode::Recv::CODE, deadline, false),
+                (Request::Send(send), Sqe::SEND, deadline, false),
+                (Request::Recv(recv), Sqe::RECV, deadline, false),
                 (
                     Request::ReadAt(make_read_request(make_file(), Cache::Enabled)),
-                    opcode::Read::CODE,
+                    Sqe::READ,
                     None,
                     false,
                 ),
                 (
                     Request::WriteAt(make_write_request(make_file(), Cache::Enabled)),
-                    opcode::Write::CODE,
+                    Sqe::WRITE,
                     None,
                     true,
                 ),
                 (
                     Request::Sync(SyncRequest::new(make_file())),
-                    opcode::Fsync::CODE,
+                    Sqe::FSYNC,
                     None,
                     true,
                 ),
                 (
                     Request::Resize(ResizeRequest::new(make_file(), 4096)),
-                    opcode::Ftruncate::CODE,
+                    Sqe::FTRUNCATE,
                     None,
                     true,
                 ),
-                (
-                    Request::Connect(connect),
-                    opcode::Connect::CODE,
-                    deadline,
-                    false,
-                ),
-                (Request::Poll(poll), opcode::PollAdd::CODE, deadline, false),
+                (Request::Connect(connect), Sqe::CONNECT, deadline, false),
+                (Request::Poll(poll), Sqe::POLL_ADD, deadline, false),
             ];
             for (mut request, opcode, deadline, retained) in requests {
                 assert_eq!(request.deadline(), deadline);
                 assert_eq!(request.retains_on_orphan(), retained);
                 let sqe = request.build_sqe(id);
-                assert_eq!(sqe.get_opcode(), opcode as u32);
-                assert_eq!(sqe.get_user_data(), id.user_data());
+                assert_eq!(sqe.opcode(), opcode);
+                assert_eq!(sqe.user_data(), id.user_data());
             }
         }
     }
@@ -1620,9 +1594,9 @@ mod tests {
 
         // Real buffers remain valid while each builder advances to its suffix.
         for progress in [2, 3] {
-            assert_eq!(send.build_sqe().get_opcode(), opcode::Send::CODE as u32);
-            assert_eq!(recv.build_sqe().get_opcode(), opcode::Recv::CODE as u32);
-            assert_eq!(read.build_sqe().get_opcode(), opcode::Read::CODE as u32);
+            assert_eq!(send.build_sqe().opcode(), Sqe::SEND);
+            assert_eq!(recv.build_sqe().opcode(), Sqe::RECV);
+            assert_eq!(read.build_sqe().opcode(), Sqe::READ);
             assert_eq!(send.on_cqe(ACTIVE, progress).is_some(), progress == 3);
             assert_eq!(recv.on_cqe(ACTIVE, progress).is_some(), progress == 3);
             assert_eq!(read.on_cqe(ACTIVE, progress).is_some(), progress == 3);
@@ -1849,14 +1823,7 @@ mod tests {
             // flags even though the open supports RWF_DONTCACHE.
             assert_eq!(
                 read_fields(&read.build_sqe()),
-                (
-                    opcode::Read::CODE,
-                    fd,
-                    aligned_offset,
-                    base,
-                    aligned_len as u32,
-                    0
-                )
+                (Sqe::READ, fd, aligned_offset, base, aligned_len as u32, 0)
             );
         }
 
@@ -2161,7 +2128,7 @@ mod tests {
         assert_eq!(
             read_fields(&read.build_sqe()),
             (
-                opcode::Read::CODE,
+                Sqe::READ,
                 buffered_fd,
                 4196,
                 base + 100,
@@ -2179,7 +2146,7 @@ mod tests {
         assert_eq!(read.read, 3);
         assert_eq!(
             read_fields(&read.build_sqe()),
-            (opcode::Read::CODE, buffered_fd, 4199, base + 103, 4093, 0)
+            (Sqe::READ, buffered_fd, 4199, base + 103, 4093, 0)
         );
 
         // The rest of the range completes the read in the narrowed buffer.
@@ -2205,19 +2172,19 @@ mod tests {
 
             // A signed CQE cannot report the entire u32-sized prefix at once.
             for _ in 0..2 {
-                assert_eq!(write.build_sqe().get_opcode(), opcode::Write::CODE as u32);
+                assert_eq!(write.build_sqe().opcode(), Sqe::WRITE);
                 assert!(write.on_cqe(ACTIVE, i32::MAX).is_none());
             }
 
             assert_eq!(write.write.remaining_len(), 2);
-            assert_eq!(write.build_sqe().get_opcode(), opcode::Write::CODE as u32);
+            assert_eq!(write.build_sqe().opcode(), Sqe::WRITE);
             let mut result = write.on_cqe(ACTIVE, 2);
             assert_eq!(write.offset, 17 + len as u64);
             assert!(write.write.is_complete());
 
             if durable {
                 assert!(result.is_none());
-                assert_eq!(write.build_sqe().get_opcode(), opcode::Fsync::CODE as u32);
+                assert_eq!(write.build_sqe().opcode(), Sqe::FSYNC);
                 result = write.on_cqe(ACTIVE, 0);
             }
 

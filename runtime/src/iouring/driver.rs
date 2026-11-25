@@ -66,12 +66,12 @@ use super::{
     request::{Request, RequestOutput},
     ring::{CompletionQueue, EnterFlags, Ring, SubmissionQueue, Timespec},
     runtime::{Deferred, RingConfig},
+    sqe::{Sqe, SqeFlags},
     waiter::{CompletionOutcome, Observer, UserData, WaiterId, Waiters},
 };
 use crate::Error;
 use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
 use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
-use io_uring::{opcode::AsyncCancel, squeue::Flags as SqeFlags};
 use std::{
     collections::VecDeque,
     io, mem,
@@ -814,10 +814,9 @@ impl State {
 
             // Only the target's CQE can retire it, so a successful
             // cancellation posts no CQE. The kernel still posts a failure.
-            let cancel = AsyncCancel::new(id.user_data())
-                .build()
-                .flags(SqeFlags::SKIP_SUCCESS)
-                .user_data(CANCEL_USER_DATA);
+            let cancel = Sqe::async_cancel(id.user_data())
+                .with_flags(SqeFlags::SKIP_SUCCESS)
+                .with_user_data(CANCEL_USER_DATA);
 
             // SAFETY: AsyncCancel carries only the stable user_data identity.
             // Its target's waiter retains every kernel-visible owner, and the
@@ -925,7 +924,6 @@ pub mod tests {
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
     };
     use commonware_utils::{TestRng, channel::oneshot};
-    use io_uring::opcode::Nop;
     use off_owner::OffOwner;
     use rand::RngExt as _;
     use std::{
@@ -1288,7 +1286,7 @@ pub mod tests {
 
         /// Fill the one-slot SQ with a control SQE that uses no operation slot.
         fn fill_with_control(&mut self) {
-            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+            let nop = Sqe::nop().with_user_data(CANCEL_USER_DATA);
 
             // SAFETY: Nop references no memory that the kernel could access.
             unsafe {
@@ -3431,7 +3429,7 @@ pub mod tests {
         // Return whether an unbounded park passed NO_IOWAIT. A NOP the park
         // submits ends its wait, so the check depends on no deadline.
         let no_iowait = |harness: &mut Harness| {
-            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+            let nop = Sqe::nop().with_user_data(CANCEL_USER_DATA);
 
             // SAFETY: A NOP references no memory.
             unsafe { harness.driver.ring.submission().push(&nop) };
@@ -3538,7 +3536,7 @@ pub mod tests {
             // A wait that submits a NOP returns with its CQE, unbounded and
             // timed.
             for deadline in [None, Some(Instant::now() + Duration::from_secs(10))] {
-                let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+                let nop = Sqe::nop().with_user_data(CANCEL_USER_DATA);
                 // SAFETY: A NOP references no memory.
                 unsafe { harness.driver.ring.submission().push(&nop) };
                 let wait = Enter::Wait {
@@ -3652,7 +3650,7 @@ pub mod tests {
         // holds leaves a completion in the kernel's overflow list. Until then,
         // a flush only submits.
         for _ in 0..=cq_entries {
-            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+            let nop = Sqe::nop().with_user_data(CANCEL_USER_DATA);
             // SAFETY: A NOP references no memory.
             unsafe { harness.driver.ring.submission().push(&nop) };
             drop(Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap());

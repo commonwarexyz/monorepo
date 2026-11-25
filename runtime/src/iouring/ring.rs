@@ -36,7 +36,7 @@
 //! and the mappings are inherited across `fork`, but a forked child must not
 //! drive or modify the inherited ring.
 
-use io_uring::squeue::Entry as Sqe;
+use super::sqe::Sqe;
 use std::{
     ffi::{c_long, c_void},
     io,
@@ -79,9 +79,6 @@ const IORING_REGISTER_RING_FDS: c_long = 20;
 const IORING_UNREGISTER_RING_FDS: c_long = 21;
 /// Register opcode that cancels requests and waits for them to finish.
 const IORING_REGISTER_SYNC_CANCEL: c_long = 24;
-
-// SQE slots hold the kernel's 64-byte SQEs.
-const _: () = assert!(mem::size_of::<Sqe>() == 64 && mem::align_of::<Sqe>() == 8);
 
 /// Flags of `io_uring_enter`.
 ///
@@ -596,7 +593,7 @@ impl SubmissionQueue<'_> {
         // SAFETY: `index` is below the slot count. The slot is outside the
         // published, unconsumed range, so the kernel does not read it until
         // the next tail publication.
-        unsafe { sq.sqes.add(index).write(sqe.clone()) };
+        unsafe { sq.sqes.add(index).write(*sqe) };
         sq.tail = sq.tail.wrapping_add(1);
     }
 }
@@ -1081,7 +1078,6 @@ const _: () = {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use io_uring::opcode::{FutexWait, Nop};
     use std::{
         cell::{Cell, RefCell},
         panic::{AssertUnwindSafe, catch_unwind},
@@ -1323,7 +1319,7 @@ pub mod tests {
                     let slot = (fetched.wrapping_add(index) & (SQ_ENTRIES - 1)) as usize;
                     // SAFETY: The slot is within the SQE slots, and the queue
                     // does not write it while the kernel may read it.
-                    unsafe { self.sqes.add(slot).as_ref() }.get_user_data()
+                    unsafe { self.sqes.add(slot).read() }.user_data()
                 })
                 .collect()
         }
@@ -1404,7 +1400,7 @@ pub mod tests {
 
     /// A NOP SQE carrying `user_data`.
     fn nop(user_data: u64) -> Sqe {
-        Nop::new().build().user_data(user_data)
+        Sqe::nop().with_user_data(user_data)
     }
 
     /// The writer over `sq`, as `Ring::submission` creates it.
@@ -1649,9 +1645,7 @@ pub mod tests {
         // Invalid futex2 flags fail the wait's preparation, which ends the
         // submission after it.
         let word = AtomicU32::new(0);
-        let invalid = FutexWait::new(word.as_ptr(), 0, u64::MAX, u32::MAX)
-            .build()
-            .user_data(2);
+        let invalid = Sqe::futex_wait(word.as_ptr(), 0, u64::MAX, u32::MAX).with_user_data(2);
         let mut sq = ring.submission();
         // SAFETY: NOPs refer to no resources, and the kernel rejects the wait
         // before it reads the word.

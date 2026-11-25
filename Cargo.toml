@@ -184,7 +184,6 @@ glob = "0.3.3"
 governor = "0.10.4"
 gungraun = "0.19.4"
 hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
-io-uring = "0.7.13"
 libc = "0.2.186"
 libfuzzer-sys = "0.4.13"
 loom = "0.7.2"

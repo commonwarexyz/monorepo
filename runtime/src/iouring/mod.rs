@@ -107,6 +107,7 @@ mod slab;
 mod sleep;
 pub(crate) mod sockaddr;
 mod spinner;
+mod sqe;
 mod task;
 mod tasks;
 mod waiter;

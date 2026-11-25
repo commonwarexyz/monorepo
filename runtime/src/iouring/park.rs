@@ -155,7 +155,7 @@ cfg_if::cfg_if! {
         };
         use std::{collections::VecDeque, ops::Deref};
     } else {
-        use io_uring::opcode::FutexWait;
+        use super::sqe::Sqe;
         use std::sync::{
             Arc,
             atomic::{AtomicU32, Ordering},
@@ -252,14 +252,13 @@ impl ArmGuard<'_> {
             RING,
             "a ring wait needs a ring arm"
         );
-        let wait = FutexWait::new(
+        let wait = Sqe::futex_wait(
             self.parker.word.as_ptr(),
             self.snapshot.into(),
             RING.into(),
             FUTEX2_PRIVATE_U32,
         )
-        .build()
-        .user_data(RING_WAIT_USER_DATA);
+        .with_user_data(RING_WAIT_USER_DATA);
 
         // SAFETY: The SQE carries only the word's address, and the kernel
         // reads the word only while the enter that submits it queues the
