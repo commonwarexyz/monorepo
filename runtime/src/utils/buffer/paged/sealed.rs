@@ -182,6 +182,10 @@ impl<B: Blob> Sealed<B> {
     /// cache ahead of their first read. Returns how many pages were read from the blob. The count
     /// excludes pages already cached and pages joined from another reader's read of them.
     ///
+    /// Each call considers at most half of the page cache's Main capacity (at least one page),
+    /// starting at the lowest offsets. This limit includes resident pages and pages already
+    /// being read. Use a smaller total budget when warming multiple blobs together.
+    ///
     /// Residency is best effort. Warmed pages are not pinned. They stay cached until their first
     /// read only while the page cache's Main section, not the whole cache, has room for them
     /// alongside the pages it admits in the meantime.

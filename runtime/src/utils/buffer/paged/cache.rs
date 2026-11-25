@@ -3594,6 +3594,24 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_warm_caps_oversized_ranges() {
+        deterministic::Runner::default().start(|context| async move {
+            let blob = checksummed_blob(&context, 20).await;
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+            let view = full_view(&blob, &cache_ref, 0, 20);
+
+            // Main holds 15 pages, so only the first seven covered pages are considered.
+            let ranges = [(PAGE_SIZE_U64, 1), (3 * PAGE_SIZE_U64, u64::MAX)];
+            assert_eq!(view.warm(&ranges).await.unwrap(), 7);
+            assert!(is_cached(&cache_ref, 0, 1));
+            assert!(!is_cached(&cache_ref, 0, 2));
+            assert!(is_cached(&cache_ref, 0, 8));
+            assert!(!is_cached(&cache_ref, 0, 9));
+            assert_eq!(view.warm(&ranges).await.unwrap(), 0);
+        });
+    }
+
+    #[test_traced]
     fn test_warm_survives_full_cache() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

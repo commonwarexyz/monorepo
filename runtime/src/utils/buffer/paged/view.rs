@@ -310,17 +310,23 @@ impl<B: Blob> View<'_, B> {
     /// page cache ahead of their first request, returning how many pages were read from the
     /// blob. Ranges are clipped to `tail_offset`, since later bytes are already in memory. Ranges
     /// may overlap, and a page covered by several is read once. A range out of offset order is
-    /// warmed only past the last page an earlier range covers. See [CacheRef::warm].
+    /// warmed only past the last page an earlier range covers. The warm stops after selecting
+    /// half of Main (at least one page). See [CacheRef::warm].
     pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, Error> {
         let page_size: u64 = self.cache_ref.page_size().widen();
-        let mut pages: Vec<u64> = Vec::with_capacity(ranges.len());
+        let limit = (self.cache_ref.main_capacity() / 2).max(1);
+        let mut pages: Vec<u64> = Vec::with_capacity(ranges.len().min(limit));
         for &(offset, len) in ranges {
             let end = offset.saturating_add(len).min(self.tail_offset);
             if offset >= end {
                 continue;
             }
             let next = pages.last().map_or(0, |&last| last + 1);
-            pages.extend((offset / page_size).max(next)..=(end - 1) / page_size);
+            let range = (offset / page_size).max(next)..=(end - 1) / page_size;
+            pages.extend(range.take(limit - pages.len()));
+            if pages.len() == limit {
+                break;
+            }
         }
         self.cache_ref.warm(self.blob, self.id, &pages).await
     }
