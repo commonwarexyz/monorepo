@@ -414,6 +414,8 @@ where
     ///
     /// The future does not borrow the database, so it can run alongside any database operation,
     /// and it can be dropped at any point. Prefetching is best effort. Failures are logged.
+    /// A prefetch may hold backing blobs open before it is first polled. Finish or drop
+    /// outstanding prefetches before reopening the same database.
     ///
     /// With the built-in [fixed](crate::journal::contiguous::fixed) and
     /// [variable](crate::journal::contiguous::variable) journals, each call to `prefetch`,

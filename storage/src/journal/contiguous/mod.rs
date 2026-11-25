@@ -245,7 +245,8 @@ pub trait Contiguous: Send + Sync {
     ///
     /// The future does not borrow the journal, so it can run alongside any journal operation, and
     /// it can be dropped at any point. Prefetching is best effort. Positions outside `bounds()`
-    /// are skipped, and failures are logged.
+    /// are skipped, and failures are logged. A prefetch may hold backing blobs open before it
+    /// is first polled. Finish or drop outstanding prefetches before reopening the same journal.
     fn prefetch(
         &self,
         _positions: &[u64],

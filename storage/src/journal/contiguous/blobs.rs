@@ -484,9 +484,10 @@ impl<E: Context> Writable<E> {
 ///
 /// Holds its own immutable blob views (see [Blobs::immutable]), so warming borrows nothing from
 /// the journal. A warm can run concurrently with any journal operation and be dropped at any
-/// point. A view's pages never change under its cache id, since writers only append and a
-/// reopened blob gets a fresh id. A view also stays readable after the journal prunes or clears
-/// its blob, since a removed blob's open handles remain readable (see
+/// point. Its views hold blobs open even before the warm is first polled. Finish or drop the warm
+/// before reopening the journal. A view's pages never change under its cache id, since writers
+/// only append and a reopened blob gets a fresh id. A view stays readable after the journal prunes
+/// or clears its blob, since a removed blob's open handles remain readable (see
 /// [commonware_runtime::Storage::remove]).
 pub(super) struct Warm<B: RBlob> {
     /// Each blob with its byte ranges.
