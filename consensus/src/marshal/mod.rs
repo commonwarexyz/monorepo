@@ -159,6 +159,10 @@
 //!
 //! [`prefixed`]: commonware_p2p::utils::mux::prefixed
 //!
+//! The finalized block and certificate storage sit behind a fair read/write lock shared with a
+//! queued backfill server. The server is polled concurrently with the actor loop, so slow peer
+//! reads do not stall unrelated mailbox work. Both futures share the actor's cancellation lifetime.
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`],

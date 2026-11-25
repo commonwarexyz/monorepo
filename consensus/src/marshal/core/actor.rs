@@ -5,6 +5,7 @@ use super::{
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
+    finalized,
     floor::{Cutoff, Floor, Processed, State as FloorState, closed_epoch, retained_from},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
@@ -32,7 +33,7 @@ use commonware_cryptography::{
     Digested, Digestible,
     certificate::{Provider, Scoped, Verifier},
 };
-use commonware_macros::{boxed, select_loop};
+use commonware_macros::{boxed, select, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Outcome, Resolution, Resolver, TargetedResolver};
@@ -45,15 +46,14 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
-    Acknowledgement, BoxedError,
+    Acknowledgement,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Pool},
 };
 use futures::{
-    FutureExt as _, TryFutureExt as _,
+    TryFutureExt as _,
     future::{self, join, join_all},
-    try_join,
 };
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
@@ -92,17 +92,17 @@ enum PooledSync {
 /// The actor also provides a backfill mechanism for missing blocks. If the actor receives a
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This lets the actor catch up to the rest of the network if it falls behind.
-pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
+pub struct Actor<E, V, P, C, B, ES, T, A = Exact>
 where
     E: CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
-    FC: Certificates<
+    C: Certificates<
             BlockDigest = <V::Block as Digestible>::Digest,
             Commitment = V::Commitment,
             Scheme = P::Scheme,
         >,
-    FB: Blocks<Block = V::StoredBlock>,
+    B: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
     A: Acknowledgement,
@@ -146,10 +146,8 @@ where
 
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
-    // Finalizations stored by height
-    finalizations_by_height: FC,
-    // Finalized blocks stored by height
-    finalized_blocks: FB,
+    // Finalized certificates and blocks, shared with the backfill server
+    storage: finalized::Storage<C, B>,
 
     // Height of the highest stored finalization
     finalized_height: Gauge,
@@ -157,17 +155,17 @@ where
     processed_height: Gauge,
 }
 
-impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
+impl<E, V, P, C, B, ES, T, A> Actor<E, V, P, C, B, ES, T, A>
 where
     E: CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
-    FC: Certificates<
+    C: Certificates<
             BlockDigest = <V::Block as Digestible>::Digest,
             Commitment = V::Commitment,
             Scheme = P::Scheme,
         >,
-    FB: Blocks<Block = V::StoredBlock>,
+    B: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
     A: Acknowledgement,
@@ -176,8 +174,8 @@ where
     #[boxed]
     pub async fn init(
         context: E,
-        finalizations_by_height: FC,
-        mut finalized_blocks: FB,
+        finalizations_by_height: C,
+        mut finalized_blocks: B,
         config: Config<P, ES, T, V::ApplicationBlock, V::Block, V::Commitment>,
     ) -> (Self, Mailbox<P::Scheme, V>, Floor) {
         // Initialize cache
@@ -249,6 +247,15 @@ where
         let last_processed =
             last_processed_height.map(|height| Self::processed(&finalized_blocks, height));
 
+        // Put both stores behind the lock and prepare the backfill server. A resolver
+        // batch forwards at most `max_repair` requests, so one batch always fits the channel.
+        let storage = finalized::new::<_, V, _, _>(
+            context.child("storage"),
+            finalizations_by_height,
+            finalized_blocks,
+            config.max_repair,
+        );
+
         // Create metrics
         let finalized_height = context.gauge(
             "finalized_height",
@@ -286,8 +293,7 @@ where
                 dispatch_gate: DispatchGate::default(),
                 staged: Staged::new(config.max_pending_acks.get().saturating_mul(2)),
                 cache,
-                finalizations_by_height,
-                finalized_blocks,
+                storage,
                 finalized_height,
                 processed_height,
             },
@@ -297,11 +303,11 @@ where
     }
 
     async fn ensure_genesis_anchor(
-        mut finalized_blocks: FB,
+        mut finalized_blocks: B,
         anchor: V::Block,
         last_processed_height: Option<Height>,
         strategy: &T,
-    ) -> FB {
+    ) -> B {
         let anchor_height = anchor.height();
         let anchor_commitment = V::commitment(&anchor);
         match finalized_blocks
@@ -348,7 +354,7 @@ where
 
     /// Start the actor.
     pub fn start<R, Buf>(
-        self,
+        mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
         resolver: (handler::Receiver<V::Commitment>, R),
@@ -361,8 +367,14 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
+        let server = self.storage.take_server();
         let mut actor = Box::new(self);
-        spawn_cell!(actor.context, actor.run(application, buffer, resolver))
+        spawn_cell!(actor.context, async move {
+            select! {
+                _ = actor.run(application, buffer, resolver) => {},
+                _ = finalized::run::<V, _, _>(server) => {},
+            }
+        })
     }
 
     /// Start the actor without a broadcast buffer.
@@ -645,12 +657,11 @@ where
                     // TODO: Instead of pulling out the entire block, determine the
                     // height directly from the archive by mapping the digest to
                     // the index, which is the same as the height.
-                    BlockID::Digest(digest) => {
-                        match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-                            Ok(stored) => stored.map(|b| (b.height(), digest)),
-                            Err(e) => panic!("failed to get block: {e}"),
-                        }
-                    }
+                    BlockID::Digest(digest) => self
+                        .storage
+                        .get_block_by_digest(digest)
+                        .await
+                        .map(|b| (b.height(), digest)),
                     BlockID::Height(height) => self.get_info_by_height(height).await,
                     BlockID::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
                 };
@@ -1105,19 +1116,8 @@ where
                 response.send_lossy(block.encode());
             }
             Key::Finalized { height } => {
-                let Some(finalization) = self.get_finalization_by_height(height).await else {
-                    debug!(%height, "finalization missing on request");
-                    return;
-                };
-                let Some(stored) = self.get_finalized_block(height).await else {
-                    debug!(%height, "finalized block missing on request");
-                    return;
-                };
-
-                // The block at a height is stored under the digest its finalization commits to.
-                let digest = V::commitment_to_inner(finalization.proposal.payload);
-                let block = V::restore(stored, digest);
-                response.send_lossy((finalization, V::into_shared(block)).encode());
+                // Hand off to the backfill server.
+                self.storage.serve(height, response);
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
@@ -1422,16 +1422,9 @@ where
 
         let digest = block.digest();
         let round = finalization.round();
-        let stored: V::StoredBlock = block.into();
-        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
-            self.finalized_blocks
-                .put(digest, &stored)
-                .map_err(BoxedError::from),
-            self.finalizations_by_height
-                .put(height, digest, &finalization)
-                .map_err(BoxedError::from),
-        )
-        .expect("failed to store floor anchor");
+        self.storage
+            .put(height, digest, block.into(), Some(finalization))
+            .await;
         self = self.sync_finalized().await;
         self.advance_tip(round, height, digest, application);
 
@@ -1440,7 +1433,7 @@ where
         let dispatch_floor = height
             .previous()
             .expect("floor anchor above processed height must have predecessor");
-        let processed = Self::processed(&self.finalized_blocks, dispatch_floor);
+        let processed = Self::processed(&*self.storage.blocks().await, dispatch_floor);
         self.update_processed(processed, resolver);
 
         // Release staged blocks skipped by the floor transition
@@ -1984,13 +1977,7 @@ where
     /// arm requires the writes to already be durable.
     #[tracing::instrument(name = "marshal.actor.sync_finalized", level = "info", skip_all)]
     async fn sync_finalized(mut self: Box<Self>) -> Box<Self> {
-        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
-            self.finalized_blocks.sync().map_err(BoxedError::from),
-            self.finalizations_by_height
-                .sync()
-                .map_err(BoxedError::from),
-        )
-        .unwrap_or_else(|e| panic!("failed to sync finalization archives: {e}"));
+        self.storage.sync().await;
 
         // Everything accepted before this sync is now durable, so nothing
         // remains to gate dispatch.
@@ -2025,24 +2012,14 @@ where
             return self;
         };
 
-        let (blocks, finalizations);
-        (
-            (self.finalized_blocks, blocks),
-            (self.finalizations_by_height, finalizations),
-        ) = try_join!(
-            self.finalized_blocks.start_sync().map_err(BoxedError::from),
-            self.finalizations_by_height
-                .start_sync()
-                .map_err(BoxedError::from),
-        )
-        .unwrap_or_else(|e| panic!("failed to start finalization archive sync: {e}"));
+        let (finalizations, blocks) = self.storage.start_sync().await;
         syncs.push(async move {
-            let (blocks, finalizations) = join(
-                blocks.durable(round, "finalized blocks"),
+            let (finalizations, blocks) = join(
                 finalizations.durable(round, "finalizations"),
+                blocks.durable(round, "finalized blocks"),
             )
             .await;
-            if blocks && finalizations {
+            if finalizations && blocks {
                 PooledSync::Finalized(seq)
             } else {
                 // Runtime shutdown before the sync completed: nothing may be
@@ -2053,46 +2030,27 @@ where
         self
     }
 
-    /// Get a finalized block from the immutable archive in its stored form.
+    /// Get a finalized block by height in its stored form.
     async fn get_finalized_block(&self, height: Height) -> Option<V::StoredBlock> {
-        match self
-            .finalized_blocks
-            .get(ArchiveID::Index(height.get()))
-            .await
-        {
-            Ok(stored) => stored,
-            Err(e) => panic!("failed to get block: {e}"),
-        }
+        self.storage.get_block(height).await
     }
 
-    /// Check whether a finalized block exists in the archive at `height` without
-    /// fetching it.
-    fn has_finalized_block(&self, height: Height) -> bool {
-        self.finalized_blocks.next_gap(height).0.is_some()
+    /// Check whether a finalized block is stored at `height` without fetching it.
+    async fn has_finalized_block(&self, height: Height) -> bool {
+        self.storage.has_block(height).await
     }
 
-    /// Get a finalization from the archive by height.
+    /// Get a finalization by height.
     async fn get_finalization_by_height(
         &self,
         height: Height,
     ) -> Option<Finalization<P::Scheme, V::Commitment>> {
-        match self
-            .finalizations_by_height
-            .get(ArchiveID::Index(height.get()))
-            .await
-        {
-            Ok(finalization) => finalization,
-            Err(e) => panic!("failed to get finalization: {e}"),
-        }
+        self.storage.get_finalization(height).await
     }
 
-    /// Check whether a finalization exists in the archive at `height` without
-    /// fetching it.
+    /// Check whether a finalization is stored at `height` without fetching it.
     async fn has_finalization_by_height(&self, height: Height) -> bool {
-        match self.finalizations_by_height.has(height).await {
-            Ok(has) => has,
-            Err(e) => panic!("failed to check finalization: {e}"),
-        }
+        self.storage.has_finalization(height).await
     }
 
     /// Finds the finalization for `height` in the height archive or the digest cache.
@@ -2168,7 +2126,7 @@ where
             // Both existence checks read archive indices rather than stored values, so a
             // finalization replayed after restart or reported again adds no archive read here.
             let kept = if let Some(finalization) = finalization
-                && self.has_finalized_block(height)
+                && self.has_finalized_block(height).await
                 && !self.has_finalization_by_height(height).await
             {
                 Some(finalization)
@@ -2191,14 +2149,9 @@ where
             // writes in the dispatch gate, so the caller's sync still covers them and their
             // dispatch resumes when it completes.
             let round = finalization.round();
-            self.finalizations_by_height = self
-                .finalizations_by_height
-                .put(height, digest, &finalization)
-                .await
-                .unwrap_or_else(|e| panic!("failed to store finalization: {e}"))
-                .sync()
-                .await
-                .unwrap_or_else(|e| panic!("failed to sync finalization: {e}"));
+            self.storage
+                .put_finalization(height, digest, finalization)
+                .await;
             self.advance_tip(round, height, digest, application);
             debug!(%height, ?digest, "stored finalization for processed block");
             return (self, false);
@@ -2208,27 +2161,7 @@ where
         let stored: V::StoredBlock = block.clone().into();
         let round = finalization.as_ref().map(|f| f.round());
 
-        // In parallel, update the finalized blocks and finalizations archives
-        let finalizations_by_height = self.finalizations_by_height;
-        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
-            // Update the finalized blocks archive
-            self.finalized_blocks
-                .put(digest, &stored)
-                .map_err(BoxedError::from),
-            // Update the finalizations archive (if provided)
-            async {
-                let store = if let Some(finalization) = finalization {
-                    finalizations_by_height
-                        .put(height, digest, &finalization)
-                        .await
-                        .map_err(BoxedError::from)?
-                } else {
-                    finalizations_by_height
-                };
-                Ok::<_, BoxedError>(store)
-            }
-        )
-        .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
+        self.storage.put(height, digest, stored, finalization).await;
 
         // The write above is buffered and readable before it is durable, so
         // hold dispatch at or above it until a sync covers it.
@@ -2260,14 +2193,13 @@ where
         let _ = self.finalized_height.try_set(height.get());
     }
 
-    /// Returns the height, digest, and round of the highest finalization in
-    /// `finalizations_by_height`.
+    /// Returns the height, digest, and round of the highest stored finalization.
     ///
-    /// The `finalized_blocks` archive may lack the block this finalization names and may hold
+    /// The finalized blocks store may lack the block this finalization names and may hold
     /// blocks above its height. The Durability section of the [module docs](crate::marshal)
     /// describes both states.
     async fn get_latest(&self) -> Option<(Height, <V::Block as Digestible>::Digest, Round)> {
-        let height = self.finalizations_by_height.last_index()?;
+        let height = self.storage.last_finalization().await?;
         let finalization = self
             .get_finalization_by_height(height)
             .await
@@ -2289,10 +2221,10 @@ where
             return Some(block);
         }
         // Check finalized blocks.
-        match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-            Ok(stored) => stored.map(|stored| V::restore(stored, digest)),
-            Err(e) => panic!("failed to get block: {e}"),
-        }
+        self.storage
+            .get_block_by_digest(digest)
+            .await
+            .map(|stored| V::restore(stored, digest))
     }
 
     /// Looks for a block in cache and finalized storage by full consensus commitment.
@@ -2309,14 +2241,8 @@ where
             return Some(block);
         }
 
-        match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-            Ok(Some(stored)) => {
-                let block = V::restore(stored, digest);
-                (V::commitment(&block) == commitment).then_some(block)
-            }
-            Ok(None) => None,
-            Err(e) => panic!("failed to get block: {e}"),
-        }
+        let block = V::restore(self.storage.get_block_by_digest(digest).await?, digest);
+        (V::commitment(&block) == commitment).then_some(block)
     }
 
     /// Looks for a block anywhere in local storage using only the digest.
@@ -2380,10 +2306,11 @@ where
 
         // If finalizations extend beyond the last stored block, anchor the
         // trailing block so the gap repair loop below can walk backward from it.
-        if let Some(last_finalized) = self.finalizations_by_height.last_index() {
+        if let Some(last_finalized) = self.storage.last_finalization().await {
             let have_block = self
-                .finalized_blocks
-                .last_index()
+                .storage
+                .last_block()
+                .await
                 .is_some_and(|last| last >= last_finalized);
             if last_finalized > self.floor.processed_height() && !have_block {
                 // Get the finalization for the last finalized block.
@@ -2413,7 +2340,7 @@ where
 
         // Fill internal gaps by walking backward from each gap's end block.
         'cache_repair: loop {
-            let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
+            let (gap_start, Some(gap_end)) = self.storage.next_gap(start).await else {
                 // No gaps detected
                 return (self, wrote);
             };
@@ -2476,8 +2403,9 @@ where
         // for the requests' heights exist. If not, we rely on the recursive
         // digest fetches above.
         let missing_items = self
-            .finalized_blocks
-            .missing_items(start, self.max_repair.get());
+            .storage
+            .missing_items(start, self.max_repair.get())
+            .await;
         self.floor
             .fetch_finalizations_if_permitted(resolver, missing_items)
             .ignore();
@@ -2506,7 +2434,7 @@ where
     ///
     /// A floor installed above a missing predecessor records that predecessor as processed. The
     /// floor block is stored before the processed height is recorded.
-    fn processed(finalized_blocks: &FB, height: Height) -> Processed {
+    fn processed(finalized_blocks: &B, height: Height) -> Processed {
         if finalized_blocks.next_gap(height).0.is_some() {
             Processed::Block(height)
         } else {
@@ -2515,7 +2443,7 @@ where
     }
 
     /// Returns the height of the newest stored finalization at or below `height`.
-    fn latest_finalization_height(finalizations_by_height: &FC, height: Height) -> Option<Height> {
+    fn latest_finalization_height(finalizations_by_height: &C, height: Height) -> Option<Height> {
         finalizations_by_height
             .ranges_from(Height::zero())
             .filter_map(|(start, end)| (start <= height).then_some(end.min(height)))
@@ -2530,8 +2458,8 @@ where
     /// A certificate-only successor is not durable progress, so it neither raises the floor nor
     /// closes an epoch, and recovery never suppresses the fetch of its block.
     async fn derive_cutoff(
-        finalizations_by_height: &FC,
-        finalized_blocks: &FB,
+        finalizations_by_height: &C,
+        finalized_blocks: &B,
         processed_height: Option<Height>,
         epocher: &ES,
         strategy: &T,
@@ -2578,8 +2506,8 @@ where
     /// height zero when nothing is processed, if that block and a matching finalization are both
     /// archived.
     async fn durable_successor(
-        finalizations_by_height: &FC,
-        finalized_blocks: &FB,
+        finalizations_by_height: &C,
+        finalized_blocks: &B,
         processed_height: Option<Height>,
         strategy: &T,
     ) -> Option<(Height, Round)> {
@@ -2715,28 +2643,18 @@ where
 
     /// Prunes finalized blocks below `height` and finalization certificates below the lower of
     /// `height` and the newest finalization at or below the processed height.
-    async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
+    async fn prune_finalized_archives(self: Box<Self>, height: Height) -> Box<Self> {
         // The newest finalization at or below the processed height stays queryable by height after
         // its block is pruned. Restart reads its round through [`Self::derive_cutoff`] to seed the
         // witnessed round and to raise the persisted round floor when it is missing or lower.
         // Blocks repaired by walking back from a later finalization may be stored without
         // certificates, so the retained finalization can sit far below the processed height.
         let certificate_height = Self::latest_finalization_height(
-            &self.finalizations_by_height,
+            &*self.storage.finalizations().await,
             self.floor.processed_height(),
         )
         .map_or(height, |retained| retained.min(height));
-
-        // Prune the finalized block and finalization certificate archives in parallel.
-        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
-            self.finalized_blocks
-                .prune(height)
-                .map_err(BoxedError::from),
-            self.finalizations_by_height
-                .prune(certificate_height)
-                .map_err(BoxedError::from),
-        )
-        .unwrap_or_else(|e| panic!("failed to prune finalized archives: {e}"));
+        self.storage.prune(certificate_height, height).await;
         self
     }
 
@@ -2747,20 +2665,11 @@ where
     /// processed height onto the floor block, after which that finalization is the newest one
     /// at or below the processed height (see [`Self::prune_finalized_archives`]).
     async fn prune_after_floor(mut self: Box<Self>, height: Height) -> Box<Self> {
-        (
-            self.cache,
-            self.finalized_blocks,
-            self.finalizations_by_height,
-        ) = try_join!(
-            self.cache.prune_by_height(height).map(Ok::<_, BoxedError>),
-            self.finalized_blocks
-                .prune(height)
-                .map_err(BoxedError::from),
-            self.finalizations_by_height
-                .prune(height)
-                .map_err(BoxedError::from),
+        (self.cache, ()) = join(
+            self.cache.prune_by_height(height),
+            self.storage.prune(height, height),
         )
-        .unwrap_or_else(|e| panic!("failed to prune data below floor: {e}"));
+        .await;
         self
     }
 }
