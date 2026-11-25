@@ -168,8 +168,6 @@ pub struct Config<P: PublicKey> {
     pub fetch_timeout: NonZeroDuration,
 
     /// Delay before retrying an unresolved fetch or failed submission.
-    /// After a failed submission, retry uses the earlier of this delay and any rate-limit
-    /// deadline. A zero delay uses a 1ms fallback because rejected submissions spend no quota.
     pub retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages.
@@ -388,10 +386,10 @@ where
     /// eligible peers in selection order. On success, the key moves from pending
     /// to active. On failure, the key remains pending for retry.
     ///
-    /// If no send succeeds, waits for the earliest peer rate-limit expiry and, after a failed
-    /// submission, `retry_delay`. A zero `retry_delay` waits 1ms after a failed submission, since
-    /// rejected submissions spend no quota. An earlier pending deadline wakes the queue sooner.
-    /// With no eligible peers or future deadlines, waits for an external change.
+    /// If no send succeeds, schedules the next scan for the earliest future key deadline,
+    /// peer quota refill, or retry after a failed submission. A zero `retry_delay` uses 1ms
+    /// because rejected submissions spend no quota. Without a future wakeup, the queue
+    /// waits for an external change.
     pub fn fetch<NetS: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,

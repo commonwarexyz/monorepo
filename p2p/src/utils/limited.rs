@@ -359,9 +359,9 @@ impl<S: UnlimitedSender, E: Clock> CheckedSender<'_, S, E> {
         let message = message.into();
 
         // Reserve the recipients so no other send can spend their quota until this submission
-        // returns. The wrapped sender then runs without the lock shared by all clones, as it may
-        // drop messages whose release runs arbitrary code. The reservation exists before the
-        // first mark, so an unwind while reserving releases every mark already taken.
+        // returns. The wrapped sender runs outside the lock shared by all clones because dropping
+        // a message can run arbitrary code. The reservation exists before the first mark, so an
+        // unwind while reserving releases every mark already taken.
         let single = matches!(recipients, Recipients::One(_));
         let mut reservation = Reservation {
             state: self.state,
