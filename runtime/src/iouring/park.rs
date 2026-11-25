@@ -139,7 +139,7 @@
 //! timeouts, signals, or syscall errors, which the tests with a real ring and
 //! real futex calls cover.
 
-use super::{ring::SubmissionQueue, waiter::UserData};
+use super::{sys::SubmissionQueue, waiter::UserData};
 use crossbeam_utils::CachePadded;
 use std::{
     cell::Cell,
@@ -155,7 +155,7 @@ cfg_if::cfg_if! {
         };
         use std::{collections::VecDeque, ops::Deref};
     } else {
-        use super::sqe::Sqe;
+        use super::sys::SqueueEntry;
         use std::sync::{
             Arc,
             atomic::{AtomicU32, Ordering},
@@ -252,7 +252,7 @@ impl ArmGuard<'_> {
             RING,
             "a ring wait needs a ring arm"
         );
-        let wait = Sqe::futex_wait(
+        let wait = SqueueEntry::futex_wait(
             self.parker.word.as_ptr(),
             self.snapshot.into(),
             RING.into(),
@@ -1064,20 +1064,20 @@ pub mod tests {
     #[cfg(not(feature = "loom"))]
     pub mod native {
         use super::*;
-        use crate::iouring::ring::{Cqe, EnterFlags, Ring, Timespec};
+        use crate::iouring::sys::{CqueueEntry, EnterFlags, IoUring, Timespec};
 
         /// Build a ring with the driver's flags. With deferred task work, a ring
         /// wait's completion waits until the owner next runs the ring's task
         /// work instead of interrupting the owner's thread futex wait, as in
         /// production.
-        fn ring() -> Ring {
-            Ring::new(8).unwrap()
+        fn ring() -> IoUring {
+            IoUring::new(8).unwrap()
         }
 
         /// Queue a ring wait against the armed snapshot of a fresh observation,
         /// then disarm, leaving the wait queued as a park that ends without its
         /// completion does.
-        fn queue_ring_wait(parker: &Parker, ring: &mut Ring) {
+        fn queue_ring_wait(parker: &Parker, ring: &mut IoUring) {
             let arm = parker.arm_ring(parker.observe());
             assert!(arm.still_idle());
             arm.install(&mut ring.submission());
@@ -1090,13 +1090,13 @@ pub mod tests {
 
         /// Run deferred task work without waiting, which posts the completion
         /// of a ring wait that a wake released.
-        fn run_task_work(ring: &mut Ring) {
+        fn run_task_work(ring: &mut IoUring) {
             assert_eq!(ring.enter(0, EnterFlags::GETEVENTS, None).unwrap(), 0);
         }
 
         /// Submit queued SQEs and wait for the ring wait's completion, failing
         /// by the test timeout instead of blocking forever.
-        fn ring_wait_completion(ring: &mut Ring) -> Cqe {
+        fn ring_wait_completion(ring: &mut IoUring) -> CqueueEntry {
             let timeout = Timespec::from(TEST_TIMEOUT);
             if let Err(error) = ring.enter(1, EnterFlags::GETEVENTS, Some(&timeout)) {
                 assert_eq!(error.raw_os_error(), Some(libc::ETIME), "{error}");

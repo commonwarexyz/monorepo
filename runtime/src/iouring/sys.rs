@@ -1,10 +1,23 @@
-//! Runtime-owned io_uring instance.
+//! The io_uring kernel interface.
 //!
-//! [`Ring`] creates a ring with SINGLE_ISSUER, DEFER_TASKRUN, NO_SQARRAY, and
+//! [`IoUring`] creates a ring with SINGLE_ISSUER, DEFER_TASKRUN, NO_SQARRAY, and
 //! SQ_REWIND, maps its shared rings and SQE array, and owns the submission
 //! queue writer, the completion queue reader, and the `io_uring_enter` and
-//! `io_uring_register` calls. It also defines the kernel ABI those need, other
-//! than SQEs.
+//! `io_uring_register` calls. This module also defines the kernel ABI they
+//! use, including [`SqueueEntry`] and its encoders. Type names follow the
+//! `io-uring` crate.
+//!
+//! # Entries
+//!
+//! [`SqueueEntry`] mirrors `struct io_uring_sqe` from
+//! `include/uapi/linux/io_uring.h`. Each encoder starts from an all-zero entry
+//! and sets only the fields its opcode reads, so every other field stays zero.
+//! That includes `ioprio`, `buf_index`, `personality`, the union at offset
+//! 44, `addr3` outside [`SqueueEntry::futex_wait`], and the trailing word.
+//! The flags stay zero unless [`SqueueEntry::with_flags`] sets them.
+//! Pointers are stored as their addresses. Encoding performs no I/O and
+//! dereferences nothing, so the caller must keep every referenced buffer alive
+//! until the kernel posts the entry's completion.
 //!
 //! # Memory Access
 //!
@@ -32,18 +45,17 @@
 //! # Ownership
 //!
 //! A ring and its registered slot belong to the thread that creates them, so
-//! [`Ring`] is neither `Send` nor `Sync`. The ring descriptor is `O_CLOEXEC`
+//! [`IoUring`] is neither `Send` nor `Sync`. The ring descriptor is `O_CLOEXEC`
 //! and the mappings are inherited across `fork`, but a forked child must not
 //! drive or modify the inherited ring.
 
-use super::sqe::Sqe;
 use std::{
     ffi::{c_long, c_void},
     io,
     marker::PhantomData,
     mem,
     ops::{BitOr, BitOrAssign},
-    os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd as _, OwnedFd, RawFd},
     ptr::{self, NonNull},
     sync::atomic::{AtomicU32, Ordering},
     time::Duration,
@@ -71,6 +83,9 @@ const IORING_OFF_SQES: libc::off_t = 0x1000_0000;
 /// SQ flag set while the kernel holds completions that did not fit in the CQ.
 const IORING_SQ_CQ_OVERFLOW: u32 = 1 << 1;
 
+/// Fsync flag that syncs data and only the metadata needed to read it back.
+const IORING_FSYNC_DATASYNC: u32 = 1;
+
 /// CQE flag of a completion that more completions of the same request follow.
 #[cfg(all(test, not(feature = "loom")))]
 const IORING_CQE_F_MORE: u32 = 1 << 1;
@@ -85,7 +100,7 @@ const IORING_REGISTER_SYNC_CANCEL: c_long = 24;
 
 /// Flags of `io_uring_enter`.
 ///
-/// [`Ring::enter`] derives EXT_ARG and REGISTERED_RING itself, so only it
+/// [`IoUring::enter`] derives EXT_ARG and REGISTERED_RING itself, so only it
 /// can name them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnterFlags(u32);
@@ -259,7 +274,7 @@ const _: () = {
 /// The kernel's `io_uring_params`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct Params {
+struct Parameters {
     /// SQ size, rounded up by the kernel.
     sq_entries: u32,
     /// CQ size, chosen by the kernel without CQSIZE.
@@ -283,23 +298,331 @@ struct Params {
 }
 
 const _: () = {
-    assert!(mem::size_of::<Params>() == 120);
-    assert!(mem::offset_of!(Params, sq_entries) == 0);
-    assert!(mem::offset_of!(Params, cq_entries) == 4);
-    assert!(mem::offset_of!(Params, flags) == 8);
-    assert!(mem::offset_of!(Params, sq_thread_cpu) == 12);
-    assert!(mem::offset_of!(Params, sq_thread_idle) == 16);
-    assert!(mem::offset_of!(Params, features) == 20);
-    assert!(mem::offset_of!(Params, wq_fd) == 24);
-    assert!(mem::offset_of!(Params, resv) == 28);
-    assert!(mem::offset_of!(Params, sq_off) == 40);
-    assert!(mem::offset_of!(Params, cq_off) == 80);
+    assert!(mem::size_of::<Parameters>() == 120);
+    assert!(mem::offset_of!(Parameters, sq_entries) == 0);
+    assert!(mem::offset_of!(Parameters, cq_entries) == 4);
+    assert!(mem::offset_of!(Parameters, flags) == 8);
+    assert!(mem::offset_of!(Parameters, sq_thread_cpu) == 12);
+    assert!(mem::offset_of!(Parameters, sq_thread_idle) == 16);
+    assert!(mem::offset_of!(Parameters, features) == 20);
+    assert!(mem::offset_of!(Parameters, wq_fd) == 24);
+    assert!(mem::offset_of!(Parameters, resv) == 28);
+    assert!(mem::offset_of!(Parameters, sq_off) == 40);
+    assert!(mem::offset_of!(Parameters, cq_off) == 80);
 };
+
+/// One submission queue entry, laid out exactly as the kernel's
+/// `io_uring_sqe`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SqueueEntry {
+    /// Operation code.
+    opcode: u8,
+    /// `IOSQE_*` flags.
+    flags: u8,
+    /// Request priority, always zero.
+    ioprio: u16,
+    /// File descriptor, or the futex2 flags of a futex wait.
+    fd: i32,
+    /// File offset, length, address length, or expected futex value.
+    off: u64,
+    /// Buffer, address, futex word, or cancellation target.
+    addr: u64,
+    /// Buffer length or iovec count.
+    len: u32,
+    /// Per-opcode flags (`rw_flags`, `fsync_flags`, `poll32_events`,
+    /// `msg_flags`, `futex_flags`, or `cancel_flags`).
+    op_flags: u32,
+    /// Value the kernel echoes in the completion.
+    user_data: u64,
+    /// Buffer index or group, always zero.
+    buf_index: u16,
+    /// Credentials personality, always zero.
+    personality: u16,
+    /// The `splice_fd_in`, `file_index`, or `addr_len` union, always zero.
+    file_index: u32,
+    /// Third address, the bitset of a futex wait.
+    addr3: u64,
+    /// Trailing word, always zero.
+    pad: u64,
+}
+
+const _: () = {
+    assert!(mem::size_of::<SqueueEntry>() == 64);
+    assert!(mem::align_of::<SqueueEntry>() == 8);
+    assert!(mem::offset_of!(SqueueEntry, opcode) == 0);
+    assert!(mem::offset_of!(SqueueEntry, flags) == 1);
+    assert!(mem::offset_of!(SqueueEntry, ioprio) == 2);
+    assert!(mem::offset_of!(SqueueEntry, fd) == 4);
+    assert!(mem::offset_of!(SqueueEntry, off) == 8);
+    assert!(mem::offset_of!(SqueueEntry, addr) == 16);
+    assert!(mem::offset_of!(SqueueEntry, len) == 24);
+    assert!(mem::offset_of!(SqueueEntry, op_flags) == 28);
+    assert!(mem::offset_of!(SqueueEntry, user_data) == 32);
+    assert!(mem::offset_of!(SqueueEntry, buf_index) == 40);
+    assert!(mem::offset_of!(SqueueEntry, personality) == 42);
+    assert!(mem::offset_of!(SqueueEntry, file_index) == 44);
+    assert!(mem::offset_of!(SqueueEntry, addr3) == 48);
+    assert!(mem::offset_of!(SqueueEntry, pad) == 56);
+};
+
+/// `IOSQE_*` flags of an entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SqueueFlags(u8);
+
+impl SqueueFlags {
+    /// `IOSQE_CQE_SKIP_SUCCESS`, which posts no completion when the request
+    /// succeeds.
+    pub const SKIP_SUCCESS: Self = Self(1 << 6);
+}
+
+/// Return `events` as the kernel reads `poll32_events`, with the two 16-bit
+/// halves swapped on big-endian targets as liburing does.
+#[inline]
+const fn poll32_events(events: u32, big_endian: bool) -> u32 {
+    if big_endian {
+        events.rotate_left(16)
+    } else {
+        events
+    }
+}
+
+impl SqueueEntry {
+    /// `IORING_OP_NOP`.
+    #[cfg(test)]
+    pub const NOP: u8 = 0;
+    /// `IORING_OP_WRITEV`.
+    pub const WRITEV: u8 = 2;
+    /// `IORING_OP_FSYNC`.
+    pub const FSYNC: u8 = 3;
+    /// `IORING_OP_POLL_ADD`.
+    pub const POLL_ADD: u8 = 6;
+    /// `IORING_OP_ASYNC_CANCEL`.
+    pub const ASYNC_CANCEL: u8 = 14;
+    /// `IORING_OP_CONNECT`.
+    pub const CONNECT: u8 = 16;
+    /// `IORING_OP_READ`.
+    pub const READ: u8 = 22;
+    /// `IORING_OP_WRITE`.
+    pub const WRITE: u8 = 23;
+    /// `IORING_OP_SEND`.
+    pub const SEND: u8 = 26;
+    /// `IORING_OP_RECV`.
+    pub const RECV: u8 = 27;
+    /// `IORING_OP_FUTEX_WAIT`.
+    #[cfg(any(test, not(feature = "loom")))]
+    pub const FUTEX_WAIT: u8 = 51;
+    /// `IORING_OP_FTRUNCATE`.
+    pub const FTRUNCATE: u8 = 55;
+
+    /// An all-zero entry of `opcode` on `fd`.
+    #[inline]
+    const fn zeroed(opcode: u8, fd: i32) -> Self {
+        Self {
+            opcode,
+            flags: 0,
+            ioprio: 0,
+            fd,
+            off: 0,
+            addr: 0,
+            len: 0,
+            op_flags: 0,
+            user_data: 0,
+            buf_index: 0,
+            personality: 0,
+            file_index: 0,
+            addr3: 0,
+            pad: 0,
+        }
+    }
+
+    /// Encode a no-op.
+    #[cfg(test)]
+    pub const fn nop() -> Self {
+        Self::zeroed(Self::NOP, -1)
+    }
+
+    /// Encode a read of `len` bytes at `offset` of `fd` into `buf`, with
+    /// `RWF_*` flags.
+    #[inline]
+    pub fn read(fd: RawFd, buf: *mut u8, len: u32, offset: u64, rw_flags: i32) -> Self {
+        let mut sqe = Self::zeroed(Self::READ, fd);
+        sqe.off = offset;
+        sqe.addr = buf as usize as u64;
+        sqe.len = len;
+        sqe.op_flags = rw_flags.cast_unsigned();
+        sqe
+    }
+
+    /// Encode a write of `len` bytes from `buf` at `offset` of `fd`, with
+    /// `RWF_*` flags.
+    #[inline]
+    pub fn write(fd: RawFd, buf: *const u8, len: u32, offset: u64, rw_flags: i32) -> Self {
+        let mut sqe = Self::zeroed(Self::WRITE, fd);
+        sqe.off = offset;
+        sqe.addr = buf as usize as u64;
+        sqe.len = len;
+        sqe.op_flags = rw_flags.cast_unsigned();
+        sqe
+    }
+
+    /// Encode a vectored write of `count` iovecs at `offset` of `fd`, with
+    /// `RWF_*` flags.
+    ///
+    /// Sockets pass a zero offset and no flags.
+    #[inline]
+    pub fn writev(
+        fd: RawFd,
+        iovecs: *const libc::iovec,
+        count: u32,
+        offset: u64,
+        rw_flags: i32,
+    ) -> Self {
+        let mut sqe = Self::zeroed(Self::WRITEV, fd);
+        sqe.off = offset;
+        sqe.addr = iovecs as usize as u64;
+        sqe.len = count;
+        sqe.op_flags = rw_flags.cast_unsigned();
+        sqe
+    }
+
+    /// Encode a send of `len` bytes from `buf` on the connected socket `fd`.
+    #[inline]
+    pub fn send(fd: RawFd, buf: *const u8, len: u32) -> Self {
+        let mut sqe = Self::zeroed(Self::SEND, fd);
+        sqe.addr = buf as usize as u64;
+        sqe.len = len;
+        sqe
+    }
+
+    /// Encode a receive of at most `len` bytes into `buf` from the socket
+    /// `fd`.
+    #[inline]
+    pub fn recv(fd: RawFd, buf: *mut u8, len: u32) -> Self {
+        let mut sqe = Self::zeroed(Self::RECV, fd);
+        sqe.addr = buf as usize as u64;
+        sqe.len = len;
+        sqe
+    }
+
+    /// Encode a data sync of `fd`.
+    #[inline]
+    pub const fn fdatasync(fd: RawFd) -> Self {
+        let mut sqe = Self::zeroed(Self::FSYNC, fd);
+        sqe.op_flags = IORING_FSYNC_DATASYNC;
+        sqe
+    }
+
+    /// Encode a truncation or extension of `fd` to `len` bytes.
+    #[inline]
+    pub const fn ftruncate(fd: RawFd, len: u64) -> Self {
+        let mut sqe = Self::zeroed(Self::FTRUNCATE, fd);
+        sqe.off = len;
+        sqe
+    }
+
+    /// Encode a connect of the socket `fd` to the `addr_len`-byte address at
+    /// `addr`.
+    #[inline]
+    pub fn connect(fd: RawFd, addr: *const libc::sockaddr, addr_len: libc::socklen_t) -> Self {
+        let mut sqe = Self::zeroed(Self::CONNECT, fd);
+        sqe.off = u64::from(addr_len);
+        sqe.addr = addr as usize as u64;
+        sqe
+    }
+
+    /// Encode a one-shot poll of `fd` for the `POLL*` `events`.
+    #[inline]
+    pub const fn poll_add(fd: RawFd, events: u32) -> Self {
+        let mut sqe = Self::zeroed(Self::POLL_ADD, fd);
+        sqe.op_flags = poll32_events(events, cfg!(target_endian = "big"));
+        sqe
+    }
+
+    /// Encode a wait on the futex2 word at `futex` while it equals
+    /// `expected`. Only wakes whose bitset intersects `mask` end the wait.
+    #[cfg(any(test, not(feature = "loom")))]
+    #[inline]
+    pub fn futex_wait(futex: *const u32, expected: u64, mask: u64, futex2_flags: u32) -> Self {
+        let mut sqe = Self::zeroed(Self::FUTEX_WAIT, futex2_flags.cast_signed());
+        sqe.off = expected;
+        sqe.addr = futex as usize as u64;
+        sqe.addr3 = mask;
+        sqe
+    }
+
+    /// Encode a cancellation of the in-flight request whose `user_data` is
+    /// `target`.
+    #[inline]
+    pub const fn async_cancel(target: u64) -> Self {
+        let mut sqe = Self::zeroed(Self::ASYNC_CANCEL, -1);
+        sqe.addr = target;
+        sqe
+    }
+
+    /// Set the entry's `IOSQE_*` flags.
+    #[inline]
+    #[must_use]
+    pub const fn with_flags(mut self, flags: SqueueFlags) -> Self {
+        self.flags = flags.0;
+        self
+    }
+
+    /// Set the `user_data` the kernel echoes in the entry's completion.
+    #[inline]
+    #[must_use]
+    pub const fn with_user_data(mut self, user_data: u64) -> Self {
+        self.user_data = user_data;
+        self
+    }
+
+    /// Operation code.
+    #[cfg(test)]
+    pub const fn opcode(&self) -> u8 {
+        self.opcode
+    }
+
+    /// File descriptor field.
+    #[cfg(test)]
+    pub const fn fd(&self) -> i32 {
+        self.fd
+    }
+
+    /// The `off` field.
+    #[cfg(test)]
+    pub const fn off(&self) -> u64 {
+        self.off
+    }
+
+    /// The `addr` field.
+    #[cfg(test)]
+    pub const fn addr(&self) -> u64 {
+        self.addr
+    }
+
+    /// The `len` field.
+    #[cfg(test)]
+    pub const fn len(&self) -> u32 {
+        self.len
+    }
+
+    /// Per-opcode flags field.
+    #[cfg(test)]
+    pub const fn op_flags(&self) -> u32 {
+        self.op_flags
+    }
+
+    /// The `user_data` field.
+    #[cfg(test)]
+    pub const fn user_data(&self) -> u64 {
+        self.user_data
+    }
+}
 
 /// The kernel's `io_uring_cqe` without the 32-byte extension.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cqe {
+pub struct CqueueEntry {
     /// Value of the completed SQE's `user_data`.
     user_data: u64,
     /// Result, a negated errno on failure.
@@ -309,13 +632,13 @@ pub struct Cqe {
 }
 
 const _: () = {
-    assert!(mem::size_of::<Cqe>() == 16);
-    assert!(mem::offset_of!(Cqe, user_data) == 0);
-    assert!(mem::offset_of!(Cqe, res) == 8);
-    assert!(mem::offset_of!(Cqe, flags) == 12);
+    assert!(mem::size_of::<CqueueEntry>() == 16);
+    assert!(mem::offset_of!(CqueueEntry, user_data) == 0);
+    assert!(mem::offset_of!(CqueueEntry, res) == 8);
+    assert!(mem::offset_of!(CqueueEntry, flags) == 12);
 };
 
-impl Cqe {
+impl CqueueEntry {
     /// Value of the completed SQE's `user_data`.
     #[inline]
     pub const fn user_data(&self) -> u64 {
@@ -389,14 +712,14 @@ fn invalid(what: &str) -> io::Error {
 }
 
 /// A shared mapping of the ring descriptor, unmapped on drop.
-struct Mapping {
+struct Mmap {
     /// Start of the mapping.
     ptr: NonNull<u8>,
     /// Length of the mapping in bytes.
     len: usize,
 }
 
-impl Mapping {
+impl Mmap {
     /// Map `len` bytes of `fd` at the kernel-defined `offset`.
     fn new(fd: &OwnedFd, len: usize, offset: libc::off_t) -> io::Result<Self> {
         #[cfg(test)]
@@ -430,7 +753,7 @@ impl Mapping {
     }
 }
 
-impl Drop for Mapping {
+impl Drop for Mmap {
     fn drop(&mut self) {
         // SAFETY: The mapping was created with this address and length, and
         // nothing accesses it after the queues that point into it are gone.
@@ -500,9 +823,9 @@ fn check_ring_size(mask: Word, ring_entries: Word, entries: u32) -> io::Result<(
 }
 
 /// The submission queue writer's state.
-struct Sq {
+struct SubmissionQueueInner {
     /// First SQE slot.
-    sqes: NonNull<Sqe>,
+    sqes: NonNull<SqueueEntry>,
     /// The SQ flags the kernel sets.
     kflags: Word,
     /// Number of slots.
@@ -512,7 +835,7 @@ struct Sq {
     staged: u32,
 }
 
-impl Sq {
+impl SubmissionQueueInner {
     /// Drop the first `consumed` staged SQEs, which an enter consumed, and
     /// move the rest to the first slots in order.
     #[inline]
@@ -544,7 +867,7 @@ impl Sq {
 /// from the ring whose mappings it points into.
 pub struct SubmissionQueue<'a> {
     /// Writer state, borrowed for the view's lifetime.
-    sq: &'a mut Sq,
+    sq: &'a mut SubmissionQueueInner,
 }
 
 impl SubmissionQueue<'_> {
@@ -583,7 +906,7 @@ impl SubmissionQueue<'_> {
     ///
     /// Panics if the queue is full.
     #[inline]
-    pub unsafe fn push(&mut self, sqe: &Sqe) {
+    pub unsafe fn push(&mut self, sqe: &SqueueEntry) {
         assert!(!self.is_full(), "submission queue is full");
         let sq = &mut *self.sq;
 
@@ -595,9 +918,9 @@ impl SubmissionQueue<'_> {
 }
 
 /// The completion queue reader's state.
-struct Cq {
+struct CompletionQueueInner {
     /// First CQE slot.
-    cqes: NonNull<Cqe>,
+    cqes: NonNull<CqueueEntry>,
     /// The CQ head the kernel reads.
     khead: Word,
     /// The CQ tail the kernel writes.
@@ -610,7 +933,7 @@ struct Cq {
     head: u32,
 }
 
-impl Cq {
+impl CompletionQueueInner {
     /// A view of the CQEs posted so far.
     #[inline]
     fn completion(&mut self) -> CompletionQueue<'_> {
@@ -631,7 +954,7 @@ impl Cq {
 /// CQEs it yielded to the kernel.
 pub struct CompletionQueue<'a> {
     /// Reader state, borrowed for the view's lifetime.
-    cq: &'a mut Cq,
+    cq: &'a mut CompletionQueueInner,
     /// Count of the next CQE to yield.
     head: u32,
     /// Count past the last CQE posted when the view was created.
@@ -660,10 +983,10 @@ impl CompletionQueue<'_> {
 }
 
 impl Iterator for CompletionQueue<'_> {
-    type Item = Cqe;
+    type Item = CqueueEntry;
 
     #[inline]
-    fn next(&mut self) -> Option<Cqe> {
+    fn next(&mut self) -> Option<CqueueEntry> {
         if self.head == self.tail {
             return None;
         }
@@ -705,11 +1028,11 @@ impl Drop for CompletionQueue<'_> {
 /// and `sqes` for writes of `params.sq_entries` SQEs, as long as the queues
 /// are used. No other user-side writer may access the queues.
 unsafe fn queues(
-    params: &Params,
+    params: &Parameters,
     rings: NonNull<u8>,
     rings_len: usize,
-    sqes: NonNull<Sqe>,
-) -> io::Result<(Sq, Cq)> {
+    sqes: NonNull<SqueueEntry>,
+) -> io::Result<(SubmissionQueueInner, CompletionQueueInner)> {
     let (sq_off, cq_off) = (&params.sq_off, &params.cq_off);
 
     // SAFETY: The caller guarantees `rings_len` bytes at `rings`, and each
@@ -728,7 +1051,7 @@ unsafe fn queues(
 
     let cqes_offset = cq_off.cqes as usize;
     if (params.cq_entries as usize)
-        .checked_mul(mem::size_of::<Cqe>())
+        .checked_mul(mem::size_of::<CqueueEntry>())
         .and_then(|size| size.checked_add(cqes_offset))
         .is_none_or(|end| end > rings_len)
     {
@@ -736,18 +1059,18 @@ unsafe fn queues(
     }
 
     // SAFETY: The CQE array ends within the `rings_len` bytes at `rings`.
-    let cqes = unsafe { rings.add(cqes_offset) }.cast::<Cqe>();
+    let cqes = unsafe { rings.add(cqes_offset) }.cast::<CqueueEntry>();
     if !cqes.is_aligned() || !sqes.is_aligned() {
         return Err(invalid("entries misaligned"));
     }
 
-    let sq = Sq {
+    let sq = SubmissionQueueInner {
         sqes,
         kflags: word(sq_off.flags)?,
         entries: params.sq_entries,
         staged: 0,
     };
-    let cq = Cq {
+    let cq = CompletionQueueInner {
         cqes,
         khead: word(cq_off.head)?,
         ktail: word(cq_off.tail)?,
@@ -759,36 +1082,36 @@ unsafe fn queues(
 }
 
 /// An io_uring instance and its shared memory, owned by the creating thread.
-pub struct Ring {
+pub struct IoUring {
     /// SQ writer over the mappings.
-    sq: Sq,
+    sq: SubmissionQueueInner,
     /// CQ reader over the rings mapping.
-    cq: Cq,
+    cq: CompletionQueueInner,
     /// The ring's slot in the owner thread's ring table, which enters name
     /// the ring by when present.
     slot: Option<u32>,
     /// SQE array mapping, unmapped after the queues are gone.
-    _sqes: Mapping,
+    _sqes: Mmap,
     /// Shared rings mapping, unmapped after the queues are gone.
-    _rings: Mapping,
+    _rings: Mmap,
     /// The ring descriptor, closed after the mappings.
     fd: OwnedFd,
     /// Keeps the ring, and so its registered slot, on the owner thread.
     _owner: PhantomData<*const ()>,
 }
 
-impl Ring {
+impl IoUring {
     /// Create a ring of at least `entries` SQ slots and map its memory.
     ///
     /// The kernel rounds the SQ size up to a power of two and sizes the CQ at
     /// twice that.
     pub fn new(entries: u32) -> io::Result<Self> {
-        let mut params = Params {
+        let mut params = Parameters {
             flags: IORING_SETUP_SINGLE_ISSUER
                 | IORING_SETUP_DEFER_TASKRUN
                 | IORING_SETUP_NO_SQARRAY
                 | IORING_SETUP_SQ_REWIND,
-            ..Params::default()
+            ..Parameters::default()
         };
 
         // SAFETY: `params` is a writable `io_uring_params`, which the kernel
@@ -812,17 +1135,17 @@ impl Ring {
         // With NO_SQARRAY and 16-byte CQEs, the CQE array ends the shared
         // rings, so one mapping of this length covers both rings.
         let rings_len = (params.cq_entries as usize)
-            .checked_mul(mem::size_of::<Cqe>())
+            .checked_mul(mem::size_of::<CqueueEntry>())
             .and_then(|size| size.checked_add(params.cq_off.cqes as usize))
             .ok_or_else(|| invalid("rings size overflow"))?;
         let sqes_len = (params.sq_entries as usize)
-            .checked_mul(mem::size_of::<Sqe>())
+            .checked_mul(mem::size_of::<SqueueEntry>())
             .ok_or_else(|| invalid("SQE array size overflow"))?;
 
         // Each mapping owns itself at once, so a failure or an unwind unmaps
         // it before the descriptor closes.
-        let rings = Mapping::new(&fd, rings_len, IORING_OFF_SQ_RING)?;
-        let sqes = Mapping::new(&fd, sqes_len, IORING_OFF_SQES)?;
+        let rings = Mmap::new(&fd, rings_len, IORING_OFF_SQ_RING)?;
+        let sqes = Mmap::new(&fd, sqes_len, IORING_OFF_SQES)?;
 
         // SAFETY: Both mappings span the lengths passed and are unmapped only
         // after the queues, which the ring owns alongside them. The ring is
@@ -837,12 +1160,6 @@ impl Ring {
             fd,
             _owner: PhantomData,
         })
-    }
-
-    /// The ring descriptor.
-    #[inline]
-    pub fn raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
     }
 
     /// The ring's slot in the owner thread's ring table, if registered.
@@ -896,7 +1213,7 @@ impl Ring {
             flags |= EnterFlags::REGISTERED_RING;
         }
         let fd = self.slot.map_or_else(
-            || c_long::from(self.raw_fd()),
+            || c_long::from(self.as_raw_fd()),
             |slot| c_long::from(slot.cast_signed()),
         );
 
@@ -940,12 +1257,12 @@ impl Ring {
     /// # Panics
     ///
     /// Panics if the ring is already registered.
-    pub fn register(&mut self) -> io::Result<u32> {
+    pub fn register_ring_fd(&mut self) -> io::Result<u32> {
         assert!(self.slot.is_none(), "ring already registered");
         let mut update = RsrcUpdate {
             offset: u32::MAX,
             resv: 0,
-            data: u64::from(self.raw_fd().cast_unsigned()),
+            data: u64::from(self.as_raw_fd().cast_unsigned()),
         };
 
         // SAFETY: `update` is one writable `io_uring_rsrc_update`, which the
@@ -953,7 +1270,7 @@ impl Ring {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_io_uring_register,
-                c_long::from(self.raw_fd()),
+                c_long::from(self.as_raw_fd()),
                 IORING_REGISTER_RING_FDS,
                 &raw mut update,
                 1 as c_long,
@@ -975,7 +1292,7 @@ impl Ring {
     /// descriptor. Later enters use the raw descriptor.
     ///
     /// A failure leaves the slot registered until the owner thread exits.
-    pub fn unregister(&mut self) -> io::Result<()> {
+    pub fn unregister_ring_fd(&mut self) -> io::Result<()> {
         let Some(slot) = self.slot.take() else {
             return Ok(());
         };
@@ -990,7 +1307,7 @@ impl Ring {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_io_uring_register,
-                c_long::from(self.raw_fd()),
+                c_long::from(self.as_raw_fd()),
                 IORING_UNREGISTER_RING_FDS,
                 &raw const update,
                 1 as c_long,
@@ -1009,7 +1326,7 @@ impl Ring {
     ///
     /// Without cancel flags, the kernel cancels only the first match. Fails
     /// with `ENOENT` when no such request is live.
-    pub fn cancel_sync(&self, user_data: u64) -> io::Result<()> {
+    pub fn register_sync_cancel(&self, user_data: u64) -> io::Result<()> {
         let cancel = SyncCancelReg {
             addr: user_data,
             fd: -1,
@@ -1028,7 +1345,7 @@ impl Ring {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_io_uring_register,
-                c_long::from(self.raw_fd()),
+                c_long::from(self.as_raw_fd()),
                 IORING_REGISTER_SYNC_CANCEL,
                 &raw const cancel,
                 1 as c_long,
@@ -1041,12 +1358,19 @@ impl Ring {
     }
 }
 
-impl Drop for Ring {
+impl AsRawFd for IoUring {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl Drop for IoUring {
     fn drop(&mut self) {
         // A ring dropped while registered releases its slot before the
         // mappings and the descriptor go. An owner that reports failures
         // unregisters first.
-        let _ = self.unregister();
+        let _ = self.unregister_ring_fd();
     }
 }
 
@@ -1059,14 +1383,14 @@ const _: () = {
     }
     impl<T: ?Sized> AmbiguousIfSend<()> for T {}
     impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
-    let _ = <Ring as AmbiguousIfSend<_>>::check;
+    let _ = <IoUring as AmbiguousIfSend<_>>::check;
 
     trait AmbiguousIfSync<A> {
         fn check() {}
     }
     impl<T: ?Sized> AmbiguousIfSync<()> for T {}
     impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
-    let _ = <Ring as AmbiguousIfSync<_>>::check;
+    let _ = <IoUring as AmbiguousIfSync<_>>::check;
 };
 
 #[cfg(test)]
@@ -1103,10 +1427,10 @@ pub mod tests {
         LAST_ENTER.get()
     }
 
-    /// The flag [`Ring::enter`] sets for an enter bounded by a timeout.
+    /// The flag [`IoUring::enter`] sets for an enter bounded by a timeout.
     pub const EXT_ARG: EnterFlags = EnterFlags::EXT_ARG;
 
-    /// The flag [`Ring::enter`] sets for an enter through a registered slot.
+    /// The flag [`IoUring::enter`] sets for an enter through a registered slot.
     pub const REGISTERED_RING: EnterFlags = EnterFlags::REGISTERED_RING;
 
     /// Fail this thread's next enter with `errno`, as a kernel that rejects
@@ -1121,13 +1445,13 @@ pub mod tests {
     }
 
     /// Number of CQ slots of `ring`.
-    pub const fn cq_entries(ring: &Ring) -> u32 {
+    pub const fn cq_entries(ring: &IoUring) -> u32 {
         ring.cq.mask + 1
     }
 
     /// Release `ring`'s registered slot behind its back, so its enters name a
     /// slot the calling thread no longer holds.
-    pub fn release_slot(ring: &Ring) {
+    pub fn release_slot(ring: &IoUring) {
         let update = RsrcUpdate {
             offset: ring.slot.expect("registered ring"),
             resv: 0,
@@ -1139,7 +1463,7 @@ pub mod tests {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_io_uring_register,
-                c_long::from(ring.raw_fd()),
+                c_long::from(ring.as_raw_fd()),
                 IORING_UNREGISTER_RING_FDS,
                 &raw const update,
                 1 as c_long,
@@ -1183,11 +1507,11 @@ pub mod tests {
     /// Offset of the fake ring's CQEs.
     const CQES: u32 = 128;
     /// Length of the fake ring's shared rings.
-    const RINGS_LEN: usize = CQES as usize + CQ_ENTRIES as usize * mem::size_of::<Cqe>();
+    const RINGS_LEN: usize = CQES as usize + CQ_ENTRIES as usize * mem::size_of::<CqueueEntry>();
 
     /// Ring parameters describing the fake ring's layout.
-    fn fake_params() -> Params {
-        Params {
+    fn fake_params() -> Parameters {
+        Parameters {
             sq_entries: SQ_ENTRIES,
             cq_entries: CQ_ENTRIES,
             sq_off: SqringOffsets {
@@ -1208,7 +1532,7 @@ pub mod tests {
                 cqes: CQES,
                 ..CqringOffsets::default()
             },
-            ..Params::default()
+            ..Parameters::default()
         }
     }
 
@@ -1221,7 +1545,7 @@ pub mod tests {
         /// Shared rings.
         rings: NonNull<u8>,
         /// SQE slots.
-        sqes: NonNull<Sqe>,
+        sqes: NonNull<SqueueEntry>,
         /// Owner of the shared rings.
         rings_alloc: *mut [u64],
         /// Owner of the SQE slots.
@@ -1253,7 +1577,7 @@ pub mod tests {
         }
 
         /// Build the queues over the fake ring.
-        fn queues(&self) -> (Sq, Cq) {
+        fn queues(&self) -> (SubmissionQueueInner, CompletionQueueInner) {
             // SAFETY: The fake ring's memory outlives the queues in every
             // test, which declare it first.
             unsafe { queues(&fake_params(), self.rings, RINGS_LEN, self.sqes) }.unwrap()
@@ -1268,7 +1592,7 @@ pub mod tests {
 
         /// Move the CQ's counters to `start`, as if that many CQEs had
         /// passed through it.
-        fn wind_cq(&self, cq: &mut Cq, start: u32) {
+        fn wind_cq(&self, cq: &mut CompletionQueueInner, start: u32) {
             let params = fake_params();
             self.word(params.cq_off.head)
                 .store(start, Ordering::Relaxed);
@@ -1304,7 +1628,7 @@ pub mod tests {
             let tail_word = self.word(fake_params().cq_off.tail);
             let tail = tail_word.load(Ordering::Relaxed);
             let slot = (tail & (CQ_ENTRIES - 1)) as usize;
-            let cqe = Cqe {
+            let cqe = CqueueEntry {
                 user_data,
                 res,
                 flags: 0,
@@ -1314,7 +1638,7 @@ pub mod tests {
             unsafe {
                 self.rings
                     .add(CQES as usize)
-                    .cast::<Cqe>()
+                    .cast::<CqueueEntry>()
                     .add(slot)
                     .write(cqe)
             };
@@ -1339,17 +1663,17 @@ pub mod tests {
     }
 
     /// A NOP SQE carrying `user_data`.
-    fn nop(user_data: u64) -> Sqe {
-        Sqe::nop().with_user_data(user_data)
+    fn nop(user_data: u64) -> SqueueEntry {
+        SqueueEntry::nop().with_user_data(user_data)
     }
 
-    /// The writer over `sq`, as `Ring::submission` creates it.
-    const fn writer(sq: &mut Sq) -> SubmissionQueue<'_> {
+    /// The writer over `sq`, as `IoUring::submission` creates it.
+    const fn writer(sq: &mut SubmissionQueueInner) -> SubmissionQueue<'_> {
         SubmissionQueue { sq }
     }
 
     /// Push SQEs carrying each `user_data`.
-    fn push(sq: &mut Sq, user_data: impl IntoIterator<Item = u64>) {
+    fn push(sq: &mut SubmissionQueueInner, user_data: impl IntoIterator<Item = u64>) {
         let mut writer = writer(sq);
         for user_data in user_data {
             // SAFETY: A NOP refers to no resources.
@@ -1357,10 +1681,10 @@ pub mod tests {
         }
     }
 
-    /// Submit like `Ring::enter`, offering the kernel the staged SQEs, and
+    /// Submit like `IoUring::enter`, offering the kernel the staged SQEs, and
     /// with the fake kernel fetching `count` of them. Returns the number
     /// offered and the `user_data` fetched.
-    fn submit(sq: &mut Sq, ring: &FakeRing, count: u32) -> (u32, Vec<u64>) {
+    fn submit(sq: &mut SubmissionQueueInner, ring: &FakeRing, count: u32) -> (u32, Vec<u64>) {
         let to_submit = sq.staged;
         assert!(count <= to_submit, "fetched unstaged SQEs");
         let fetched = ring.fetch(count);
@@ -1491,7 +1815,7 @@ pub mod tests {
     #[test]
     fn test_queues_reject_invalid_layouts() {
         let ring = FakeRing::new();
-        let check = |params: Params| {
+        let check = |params: Parameters| {
             // SAFETY: The fake ring's memory outlives the call, and no queue
             // is returned.
             let result = unsafe { queues(&params, ring.rings, RINGS_LEN, ring.sqes) };
@@ -1518,20 +1842,20 @@ pub mod tests {
     #[test]
     fn test_failed_setup_unmaps_its_mappings() {
         fail_map(IORING_OFF_SQ_RING, false);
-        let error = Ring::new(8).err().unwrap();
+        let error = IoUring::new(8).err().unwrap();
         assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
         assert_eq!(LIVE_MAPPINGS.get(), 0);
 
         fail_map(IORING_OFF_SQES, false);
-        let error = Ring::new(8).err().unwrap();
+        let error = IoUring::new(8).err().unwrap();
         assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
         assert_eq!(LIVE_MAPPINGS.get(), 0);
 
         fail_map(IORING_OFF_SQES, true);
-        assert!(catch_unwind(AssertUnwindSafe(|| Ring::new(8))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| IoUring::new(8))).is_err());
         assert_eq!(LIVE_MAPPINGS.get(), 0);
 
-        let ring = Ring::new(8).unwrap();
+        let ring = IoUring::new(8).unwrap();
         assert_eq!(LIVE_MAPPINGS.get(), 2);
         drop(ring);
         assert_eq!(LIVE_MAPPINGS.get(), 0);
@@ -1541,10 +1865,10 @@ pub mod tests {
     /// slot, and its CQ yields each completion once.
     #[test]
     fn test_ring_submits_and_completes() {
-        let mut ring = Ring::new(4).unwrap();
+        let mut ring = IoUring::new(4).unwrap();
         for registered in [false, true] {
             if registered {
-                ring.register().unwrap();
+                ring.register_ring_fd().unwrap();
             }
             for user_data in 0..4 {
                 // SAFETY: A NOP refers to no resources.
@@ -1560,7 +1884,7 @@ pub mod tests {
             assert_eq!(completed, [0, 1, 2, 3]);
             assert!(ring.completion().is_empty());
         }
-        ring.unregister().unwrap();
+        ring.unregister_ring_fd().unwrap();
         assert_eq!(ring.slot(), None);
     }
 
@@ -1569,12 +1893,12 @@ pub mod tests {
     /// first, then a later push, and each completes once.
     #[test]
     fn test_ring_resubmits_the_unconsumed_suffix() {
-        let mut ring = Ring::new(4).unwrap();
+        let mut ring = IoUring::new(4).unwrap();
         let word = AtomicU32::new(0);
         for rejected in [0u32, 1] {
             // Invalid futex2 flags fail the wait's preparation, which ends the
             // submission after it.
-            let invalid = Sqe::futex_wait(word.as_ptr(), 0, u64::MAX, u32::MAX);
+            let invalid = SqueueEntry::futex_wait(word.as_ptr(), 0, u64::MAX, u32::MAX);
             let mut sq = ring.submission();
             for user_data in 1..=4 {
                 let sqe = if user_data == u64::from(rejected) + 1 {
@@ -1617,8 +1941,9 @@ pub mod tests {
         static WORD: AtomicU32 = AtomicU32::new(0);
         const FUTEX2_PRIVATE_U32: u32 = 0x02 | libc::FUTEX_PRIVATE_FLAG as u32;
 
-        let mut ring = Ring::new(4).unwrap();
-        let wait = Sqe::futex_wait(WORD.as_ptr(), 0, u64::from(u32::MAX), FUTEX2_PRIVATE_U32);
+        let mut ring = IoUring::new(4).unwrap();
+        let wait =
+            SqueueEntry::futex_wait(WORD.as_ptr(), 0, u64::from(u32::MAX), FUTEX2_PRIVATE_U32);
         // SAFETY: The word is static.
         unsafe { ring.submission().push(&wait.with_user_data(7)) };
         let timeout = Timespec::from(Duration::from_millis(1));
@@ -1634,7 +1959,7 @@ pub mod tests {
         // SAFETY: A cancel refers only to the target's user_data.
         unsafe {
             ring.submission()
-                .push(&Sqe::async_cancel(7).with_user_data(8))
+                .push(&SqueueEntry::async_cancel(7).with_user_data(8))
         };
         let timeout = Timespec::from(Duration::from_secs(10));
         assert_eq!(
@@ -1658,8 +1983,8 @@ pub mod tests {
     /// next enter submits each once.
     #[test]
     fn test_ring_keeps_staged_entries_when_enter_fails() {
-        let mut ring = Ring::new(4).unwrap();
-        ring.register().unwrap();
+        let mut ring = IoUring::new(4).unwrap();
+        ring.register_ring_fd().unwrap();
         // SAFETY: NOPs refer to no resources.
         unsafe {
             let mut sq = ring.submission();
@@ -1675,7 +2000,7 @@ pub mod tests {
         assert!(ring.completion().is_empty());
 
         // The raw descriptor submits both.
-        ring.unregister().unwrap();
+        ring.unregister_ring_fd().unwrap();
         assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), 2);
         let completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
         assert_eq!(completed, [1, 2]);
@@ -1684,7 +2009,7 @@ pub mod tests {
     /// A timed wait on an empty ring times out after its timeout.
     #[test]
     fn test_ring_timed_wait_times_out() {
-        let mut ring = Ring::new(4).unwrap();
+        let mut ring = IoUring::new(4).unwrap();
         let timeout = Duration::from_millis(20);
         let start = std::time::Instant::now();
         let error = ring
@@ -1694,5 +2019,223 @@ pub mod tests {
         assert!(start.elapsed() >= timeout);
         let (_, flags) = last_enter().unwrap();
         assert!(flags.contains(EXT_ARG));
+    }
+}
+
+#[cfg(test)]
+#[commonware_macros::test_group("miri")]
+mod squeue_entry_tests {
+    use super::*;
+
+    /// Distinctive descriptor.
+    const FD: RawFd = 0x0102_0304;
+    /// Distinctive `user_data`.
+    const USER_DATA: u64 = 0xA1A2_A3A4_A5A6_A7A8;
+    /// Distinctive length.
+    const LEN: u32 = 0x1112_1314;
+    /// Distinctive offset.
+    const OFFSET: u64 = 0x2122_2324_2526_2728;
+    /// Distinctive `RWF_*` flags.
+    const RW_FLAGS: i32 = 0x31;
+    /// Distinctive address, never dereferenced.
+    const ADDR: u64 = 0x4142_4344_4546_4748;
+
+    /// A pointer to `ADDR`, which no test dereferences.
+    const fn ptr<T>() -> *mut T {
+        std::ptr::without_provenance_mut(ADDR as usize)
+    }
+
+    /// The 64 bytes of `sqe`.
+    fn image(sqe: SqueueEntry) -> [u8; 64] {
+        // SAFETY: `SqueueEntry` is `repr(C)` and 64 bytes, made only of integer fields
+        // whose offsets leave no padding, so every byte is initialized.
+        unsafe { mem::transmute::<SqueueEntry, [u8; 64]>(sqe) }
+    }
+
+    /// The uapi image of an entry, built from the kernel's field offsets
+    /// independently of [`SqueueEntry`].
+    struct Expected([u8; 64]);
+
+    impl Expected {
+        /// An image with `opcode` at 0, `fd` at 4, `user_data` at 32, and every
+        /// other byte zero.
+        fn new(opcode: u8, fd: i32, user_data: u64) -> Self {
+            let mut expected = Self([0; 64]);
+            expected.0[0] = opcode;
+            expected
+                .put(4, &fd.to_ne_bytes())
+                .put(32, &user_data.to_ne_bytes())
+        }
+
+        /// Write `bytes` at `offset`.
+        fn put(mut self, offset: usize, bytes: &[u8]) -> Self {
+            self.0[offset..offset + bytes.len()].copy_from_slice(bytes);
+            self
+        }
+
+        /// Write `off` at 8.
+        fn off(self, off: u64) -> Self {
+            self.put(8, &off.to_ne_bytes())
+        }
+
+        /// Write `addr` at 16.
+        fn addr(self, addr: u64) -> Self {
+            self.put(16, &addr.to_ne_bytes())
+        }
+
+        /// Write `len` at 24.
+        fn len(self, len: u32) -> Self {
+            self.put(24, &len.to_ne_bytes())
+        }
+
+        /// Write the per-opcode flags at 28.
+        fn op_flags(self, flags: u32) -> Self {
+            self.put(28, &flags.to_ne_bytes())
+        }
+
+        /// Write `addr3` at 48.
+        fn addr3(self, addr3: u64) -> Self {
+            self.put(48, &addr3.to_ne_bytes())
+        }
+
+        /// Assert that `sqe` has exactly this image.
+        #[track_caller]
+        fn check(self, sqe: SqueueEntry) {
+            assert_eq!(image(sqe), self.0);
+        }
+    }
+
+    #[test]
+    fn test_nop() {
+        Expected::new(0, -1, USER_DATA).check(SqueueEntry::nop().with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_read() {
+        Expected::new(22, FD, USER_DATA)
+            .off(OFFSET)
+            .addr(ADDR)
+            .len(LEN)
+            .op_flags(0x31)
+            .check(SqueueEntry::read(FD, ptr(), LEN, OFFSET, RW_FLAGS).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_write() {
+        Expected::new(23, FD, USER_DATA)
+            .off(OFFSET)
+            .addr(ADDR)
+            .len(LEN)
+            .op_flags(0x31)
+            .check(SqueueEntry::write(FD, ptr(), LEN, OFFSET, RW_FLAGS).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_writev() {
+        Expected::new(2, FD, USER_DATA)
+            .off(OFFSET)
+            .addr(ADDR)
+            .len(7)
+            .op_flags(0x31)
+            .check(SqueueEntry::writev(FD, ptr(), 7, OFFSET, RW_FLAGS).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_send() {
+        Expected::new(26, FD, USER_DATA)
+            .addr(ADDR)
+            .len(LEN)
+            .check(SqueueEntry::send(FD, ptr(), LEN).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_recv() {
+        Expected::new(27, FD, USER_DATA)
+            .addr(ADDR)
+            .len(LEN)
+            .check(SqueueEntry::recv(FD, ptr(), LEN).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_fdatasync() {
+        Expected::new(3, FD, USER_DATA)
+            .op_flags(1)
+            .check(SqueueEntry::fdatasync(FD).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_ftruncate() {
+        Expected::new(55, FD, USER_DATA)
+            .off(OFFSET)
+            .check(SqueueEntry::ftruncate(FD, OFFSET).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_connect() {
+        Expected::new(16, FD, USER_DATA)
+            .off(28)
+            .addr(ADDR)
+            .check(SqueueEntry::connect(FD, ptr(), 28).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_poll_add() {
+        let events = if cfg!(target_endian = "big") {
+            0x0002_0001
+        } else {
+            0x0001_0002
+        };
+        Expected::new(6, FD, USER_DATA)
+            .op_flags(events)
+            .check(SqueueEntry::poll_add(FD, 0x0001_0002).with_user_data(USER_DATA));
+    }
+
+    #[test]
+    fn test_poll32_events_swaps_halves_only_on_big_endian() {
+        assert_eq!(poll32_events(0x0001_0002, false), 0x0001_0002);
+        assert_eq!(poll32_events(0x0001_0002, true), 0x0002_0001);
+        assert_eq!(poll32_events(libc::POLLIN as u32, true), 0x0001_0000);
+    }
+
+    #[test]
+    fn test_futex_wait() {
+        // A mask other than all ones reaches addr3 unchanged, and the futex2
+        // flags fill the descriptor field.
+        for mask in [0b10, u64::from(u32::MAX)] {
+            Expected::new(51, 0x82, USER_DATA)
+                .off(0x5152_5354)
+                .addr(ADDR)
+                .addr3(mask)
+                .check(
+                    SqueueEntry::futex_wait(ptr(), 0x5152_5354, mask, 0x82)
+                        .with_user_data(USER_DATA),
+                );
+        }
+    }
+
+    #[test]
+    fn test_async_cancel() {
+        Expected::new(14, -1, USER_DATA)
+            .addr(OFFSET)
+            .check(SqueueEntry::async_cancel(OFFSET).with_user_data(USER_DATA));
+
+        // CQE_SKIP_SUCCESS is bit 6 of the flags byte at offset 1.
+        Expected::new(14, -1, USER_DATA)
+            .put(1, &[1 << 6])
+            .addr(OFFSET)
+            .check(
+                SqueueEntry::async_cancel(OFFSET)
+                    .with_flags(SqueueFlags::SKIP_SUCCESS)
+                    .with_user_data(USER_DATA),
+            );
+    }
+
+    #[test]
+    fn test_reserved_user_data_round_trips() {
+        for user_data in [u64::MAX, u64::from(u32::MAX), 0] {
+            Expected::new(14, -1, user_data)
+                .addr(user_data)
+                .check(SqueueEntry::async_cancel(user_data).with_user_data(user_data));
+        }
     }
 }

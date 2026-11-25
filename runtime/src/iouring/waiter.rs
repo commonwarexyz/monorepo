@@ -19,7 +19,7 @@ use super::{
     request::{Request, RequestOutput},
     runtime::Deferred,
     slab::{Id, Slab},
-    sqe::Sqe,
+    sys::SqueueEntry,
 };
 use crate::Error;
 use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
@@ -452,7 +452,7 @@ impl Waiters {
     /// Marks the request in flight before returning the SQE. The driver retires
     /// cancelled requests before staging or at their operation CQE.
     /// Panics if the ID is not pending, is cancelled, or already has an SQE in flight.
-    pub fn stage(&mut self, id: WaiterId) -> Sqe {
+    pub fn stage(&mut self, id: WaiterId) -> SqueueEntry {
         let waiter = self.get_mut(id).expect("stage called for untracked waiter");
         assert!(
             !waiter.in_flight,
@@ -686,7 +686,7 @@ pub mod tests {
     }
 
     /// Supply the driver's permit step before staging a simulated request.
-    fn stage(waiters: &mut Waiters, id: WaiterId) -> Sqe {
+    fn stage(waiters: &mut Waiters, id: WaiterId) -> SqueueEntry {
         let waiter = waiters.get(id).unwrap();
         if waiter.durability.is_none()
             && let Some(mutex) = waiter.request.durability()
