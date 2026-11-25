@@ -17,6 +17,7 @@
 //!
 //! A warm ([CacheRef::warm]) joins and starts batches like a batched miss. It caches the pages
 //! its own batch reads as expected entries, and marks each page it joins expected as it arrives.
+//! Demand reads skip warm batches, so they do not wait on speculative I/O or inherit its errors.
 //!
 //! A reader joins everything it needs before driving any of it, examining its misses over a few
 //! holds of the cache's write lock and registering its own batch only at the end of the last
@@ -153,8 +154,12 @@ type BatchFuture = BoxFuture<'static, Result<(), Error>>;
 /// A handle to a [BatchFuture] that any of the batch's readers can drive.
 type BatchDriver = Shared<BatchFuture>;
 
-/// Caches a page a [Batch] read, as `(cache, blob id, page, page number)`.
-type Insert = fn(&mut Cache, u64, &[u8], u64);
+/// Determines page admission and whether demand reads can join a batch.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BatchKind {
+    Demand,
+    Warm,
+}
 
 /// A page delivered to a reader, as its tag and either its logical bytes or why it failed
 /// validation.
@@ -187,13 +192,12 @@ struct Batch {
     blob_id: u64,
     /// The page numbers, strictly increasing. A page's index in this list identifies it.
     pages: Box<[u64]>,
-    /// How each page is cached as it arrives.
-    insert: Insert,
+    kind: BatchKind,
     state: Mutex<BatchState>,
 }
 
 impl Batch {
-    fn new(blob_id: u64, pages: Vec<u64>, insert: Insert) -> Self {
+    fn new(blob_id: u64, pages: Vec<u64>, kind: BatchKind) -> Self {
         let state = BatchState {
             joiners: vec![Some(Vec::new()); pages.len()].into(),
             inboxes: vec![Some(VecDeque::new())],
@@ -202,7 +206,7 @@ impl Batch {
         Self {
             blob_id,
             pages: pages.into(),
-            insert,
+            kind,
             state: Mutex::new(state),
         }
     }
@@ -264,7 +268,11 @@ impl Batch {
             return Err(Error::ReadFailed);
         };
         if let Ok(page) = &result {
-            (self.insert)(&mut cache, self.blob_id, page.as_ref(), self.pages[index]);
+            let page_num = self.pages[index];
+            match self.kind {
+                BatchKind::Demand => cache.cache(self.blob_id, page.as_ref(), page_num),
+                BatchKind::Warm => cache.cache_expected(self.blob_id, page.as_ref(), page_num),
+            }
         }
         drop(cache);
         for (tag, reader) in joiners {
@@ -323,17 +331,21 @@ struct BatchRegistry {
 
 impl BatchRegistry {
     /// A batch of `blob_id` that has yet to publish page `page_num`, with the page's index in it
-    /// and a handle that drives it.
+    /// and a handle that drives it. Demand reads only join other demand reads.
     fn find_unpublished(
         &self,
         blob_id: u64,
         page_num: u64,
+        kind: BatchKind,
     ) -> Option<(Arc<Batch>, usize, BatchDriver)> {
         self.by_blob
             .get(&blob_id)?
             .iter()
             .find_map(|(batch, driver)| {
                 let batch = batch.upgrade()?;
+                if kind == BatchKind::Demand && batch.kind == BatchKind::Warm {
+                    return None;
+                }
                 let index = batch.pages.binary_search(&page_num).ok();
                 let index = index.filter(|&index| batch.state.lock().joiners[index].is_some())?;
                 // A batch whose driver was dropped since the last unregistration never publishes.
@@ -889,7 +901,7 @@ impl CacheRef {
                     let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());
                     fetches.push((fetch, pieces));
                 } else if let Some((batch, index, driver)) =
-                    cache.batches.find_unpublished(blob_id, page_num)
+                    cache.batches.find_unpublished(blob_id, page_num, BatchKind::Demand)
                 {
                     let joined = reads
                         .iter()
@@ -907,7 +919,7 @@ impl CacheRef {
                 let (physical, pieces): (Vec<_>, Vec<_>) = unread.into_iter().unzip();
                 let pages = pieces.iter().map(|pieces| pieces[0].0).collect();
                 let (batch, driver) =
-                    self.start_batch(&mut cache, blob, blob_id, pages, physical, Cache::cache);
+                    self.start_batch(&mut cache, blob, blob_id, pages, physical, BatchKind::Demand);
                 reads.push(BatchRead::starting(batch, driver, pieces));
             }
         }
@@ -948,7 +960,7 @@ impl CacheRef {
     /// after its source cached it, the warm caches it again from the bytes it received.
     ///
     /// The remaining pages are read with one batch of this call's own. The batch is registered so
-    /// other readers can join it, and it caches each valid page as an expected entry as it arrives
+    /// other warms can join it, and it caches each valid page as an expected entry as it arrives
     /// (see [cache::Cache::get_or_insert_mut_expected]). The warm waits for the batch to end, so a
     /// read error after its last page still fails the warm.
     ///
@@ -1003,7 +1015,7 @@ impl CacheRef {
                     let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());
                     fetches.push((page_num, fetch));
                 } else if let Some((batch, index, driver)) =
-                    cache.batches.find_unpublished(blob_id, page_num)
+                    cache.batches.find_unpublished(blob_id, page_num, BatchKind::Warm)
                 {
                     let subscription = joined
                         .iter()
@@ -1025,7 +1037,7 @@ impl CacheRef {
                     blob_id,
                     pages,
                     physical,
-                    Cache::cache_expected,
+                    BatchKind::Warm,
                 );
                 (Subscription::starting(batch, driver.clone()), driver)
             })
@@ -1077,8 +1089,7 @@ impl CacheRef {
     }
 
     /// Start a batch reading `pages` (non-empty, strictly increasing) of `blob`, whose physical
-    /// ranges are `physical`, and caching each valid page with `insert`. Registers the batch in
-    /// `cache`, so readers that miss one of its pages join it, and returns it with its driver,
+    /// ranges are `physical`. Registers the batch in `cache` and returns it with its driver,
     /// which reads nothing until polled.
     fn start_batch<B: Blob>(
         &self,
@@ -1087,9 +1098,9 @@ impl CacheRef {
         blob_id: u64,
         pages: Vec<u64>,
         physical: Vec<(u64, usize)>,
-        insert: Insert,
+        kind: BatchKind,
     ) -> (Arc<Batch>, BatchDriver) {
-        let batch = Arc::new(Batch::new(blob_id, pages, insert));
+        let batch = Arc::new(Batch::new(blob_id, pages, kind));
         let retire = cache.batches.retire_on_drop(&batch);
         let read = batch.clone().read(
             self.cache.clone(),
@@ -1147,7 +1158,7 @@ impl CacheRef {
                 Entry::Vacant(v) => {
                     batches.unregister_retired();
                     if let Some((batch, index, driver)) =
-                        batches.find_unpublished(blob_id, page_num)
+                        batches.find_unpublished(blob_id, page_num, BatchKind::Demand)
                     {
                         // Another reader's batch is reading this page, so join it.
                         let mut subscription = Subscription::joining(batch, driver);
@@ -2178,6 +2189,8 @@ mod tests {
         reads: Mutex<Vec<usize>>,
         /// A page whose next read returns corrupted bytes.
         corrupt: Mutex<Option<usize>>,
+        /// A page whose next read fails.
+        fail: Mutex<Option<usize>>,
         /// Polls of the streams [Blob::read_many] returns.
         polls: AtomicUsize,
     }
@@ -2195,6 +2208,7 @@ mod tests {
                 gates: Mutex::new(gates),
                 reads: Mutex::new(Vec::new()),
                 corrupt: Mutex::new(None),
+                fail: Mutex::new(None),
                 polls: AtomicUsize::new(0),
             };
             (Arc::new(blob), opens)
@@ -2236,9 +2250,13 @@ mod tests {
             } else {
                 full_page(page)
             };
+            let fails = self.fail.lock().take_if(|fail| *fail == page).is_some();
             let gate = self.gates.lock()[page].take();
             if let Some(gate) = gate {
                 let _ = gate.await;
+            }
+            if fails {
+                return Err(Error::ReadFailed);
             }
             Ok(IoBufsMut::from(bytes))
         }
@@ -3078,7 +3096,7 @@ mod tests {
                     .cache
                     .read()
                     .batches
-                    .find_unpublished(0, 2)
+                    .find_unpublished(0, 2, BatchKind::Demand)
                     .is_none()
             );
             assert!(matches!(two.await, Err(Error::ReadFailed)));
@@ -3258,7 +3276,7 @@ mod tests {
             assert!(poll!(first.as_mut()).is_pending());
             let batch = {
                 let cache = cache_ref.cache.write();
-                let (batch, index, driver) = cache.batches.find_unpublished(0, 0).unwrap();
+                let (batch, index, driver) = cache.batches.find_unpublished(0, 0, BatchKind::Demand).unwrap();
                 let mut subscription = Subscription::joining(batch.clone(), driver);
                 subscription.select(index, 0);
                 let reader = subscription.reader;
@@ -3394,7 +3412,7 @@ mod tests {
 
             // A batch of page 0 outlives its driver, as when a read holding it already has its
             // pages but every handle on the driver is dropped.
-            let batch = Arc::new(Batch::new(0, vec![0], Cache::cache));
+            let batch = Arc::new(Batch::new(0, vec![0], BatchKind::Demand));
             let driver: BatchDriver = Shared::new(pending::<Result<(), Error>>().boxed());
             cache_ref.cache.write().batches.register(&batch, &driver);
             drop(driver);
@@ -3694,7 +3712,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_overlapping_warms_and_reads_fetch_each_page_once() {
+    fn test_overlapping_warms_fetch_each_page_once() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const PAGES: usize = 6;
@@ -3708,15 +3726,11 @@ mod tests {
             let mut second = pin!(cache_ref.warm(&blob, 0, &[2, 3, 4, 5]));
             assert!(poll!(second.as_mut()).is_pending());
 
-            // A read of pages 1 and 5 joins both warms.
-            let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[1, 5]));
-            assert!(poll!(read.as_mut()).is_pending());
-            assert_eq!(selected(&cache_ref), 2 + 2);
+            assert_eq!(selected(&cache_ref), 2);
 
             open(&mut opens);
             assert_eq!(first.await.unwrap(), 4);
             assert_eq!(second.await.unwrap(), 2);
-            assert_eq!(read.await.unwrap(), [1, 5]);
             for page in 0..PAGES {
                 assert_eq!(blob.reads_of(page), 1);
             }
@@ -3911,58 +3925,29 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_joining_dropped_warm_completes_it() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let (blob, mut opens) = GatedBlob::new(2);
-            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+    fn test_demand_reads_do_not_depend_on_a_warm() {
+        deterministic::Runner::default().start(|_| async move {
+            for batched in [false, true] {
+                let (blob, mut opens) = GatedBlob::new(2);
+                *blob.fail.lock() = Some(0);
+                let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
-            // A warm of both pages blocks in its read, and a read of page 1 joins it.
-            let mut warm = Box::pin(cache_ref.warm(&blob, 0, &[0, 1]));
-            assert!(poll!(warm.as_mut()).is_pending());
-            let mut read = pin!(read_first_byte(&blob, &cache_ref, 1));
-            assert!(poll!(read.as_mut()).is_pending());
+                // Keep the failing speculative batch pending while demand reads page 1.
+                let mut warm = pin!(cache_ref.warm(&blob, 0, &[0, 1]));
+                assert!(poll!(warm.as_mut()).is_pending());
+                if batched {
+                    let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[1]));
+                    assert!(matches!(poll!(read.as_mut()), Poll::Ready(Ok(bytes)) if bytes == [1]));
+                } else {
+                    let mut read = pin!(read_first_byte(&blob, &cache_ref, 1));
+                    assert!(matches!(poll!(read.as_mut()), Poll::Ready(Ok(1))));
+                }
 
-            // The warm is dropped, and the read completes the warm's batch rather than reading
-            // page 1 again, leaving no stale registration.
-            drop(warm);
-            open(&mut opens);
-            assert_eq!(read.await.unwrap(), 1);
-            assert_eq!(blob.reads.lock().len(), 2);
-            assert!(is_cached(&cache_ref, 0, 0));
-            assert_idle(&cache_ref);
-        });
-    }
-
-    #[test_traced]
-    fn test_read_joining_unpolled_warm_completes() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (blob, mut opens) = GatedBlob::new(2);
-            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
-
-            // A warm of both pages starts its read, then is retained without being polled while
-            // its pages arrive.
-            let mut warm = pin!(cache_ref.warm(&blob, 0, &[0, 1]));
-            assert!(poll!(warm.as_mut()).is_pending());
-            assert_eq!(blob.reads.lock().len(), 2);
-            open(&mut opens);
-
-            // A read of page 1 joins the warm and completes without reading the page again.
-            select! {
-                result = read_first_byte(&blob, &cache_ref, 1) => {
-                    assert_eq!(result.unwrap(), 1);
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("read joining an unpolled warm did not complete");
-                },
+                open(&mut opens);
+                assert!(matches!(warm.await, Err(Error::ReadFailed)));
+                assert!(is_cached(&cache_ref, 0, 1));
+                assert_idle(&cache_ref);
             }
-            assert_eq!(blob.reads.lock().len(), 2);
-
-            // The warm completes from the pages already read.
-            assert_eq!(warm.await.unwrap(), 2);
-            assert_eq!(blob.reads.lock().len(), 2);
-            assert_idle(&cache_ref);
         });
     }
 
