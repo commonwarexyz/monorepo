@@ -5,6 +5,7 @@ mod aggregate_verify_same_message;
 mod aggregate_verify_same_signer;
 mod attestation_eq;
 mod batch_to_affine;
+mod batch_verify_claims;
 mod batch_verify_same_signer;
 mod combine_public_keys;
 mod combine_signatures;
@@ -41,6 +42,7 @@ criterion_main!(
     combine_signatures::benches,
     signature_generation::benches,
     signature_verification::benches,
+    batch_verify_claims::benches,
     batch_verify_same_signer::benches,
     aggregate_verify_same_message::benches,
     aggregate_verify_same_signer::benches,
