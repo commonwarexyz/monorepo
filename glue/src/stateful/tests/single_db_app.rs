@@ -545,6 +545,7 @@ impl EngineDefinition for SingleDbEngine {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
                     database: None,
+                    operation_codec_config: (),
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
                     fetch_timeout: NZDuration!(Duration::from_secs(2)),
