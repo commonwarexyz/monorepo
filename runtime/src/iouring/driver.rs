@@ -45,7 +45,9 @@
 //! selection fits with this wait.
 //!
 //! A park counts as iowait while storage requests are in flight. Otherwise it
-//! passes NO_IOWAIT, so waiting only on network requests is not iowait.
+//! passes NO_IOWAIT, so waiting only on network requests is not iowait. A
+//! request still waiting for its durability permit does not count, since the
+//! request holding the permit already counts on the worker that staged it.
 //!
 //! # Cleanup
 //!
@@ -476,43 +478,35 @@ impl Driver {
                     flags |= EnterFlags::NO_IOWAIT;
                 }
 
-                if deadline.is_some() {
+                // EXT_ARG bounds the wait without reserving an SQE for a timeout.
+                let ts = deadline.map(|_| {
+                    Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos())
+                });
+                let args = ts.as_ref().map(|ts| SubmitArgs::new().timespec(ts));
+
+                if args.is_some() {
                     flags |= EnterFlags::EXT_ARG;
                 }
 
                 #[cfg(test)]
                 tests::record_wait(flags);
 
-                if deadline.is_none() {
-                    // SAFETY: `to_submit` counts only entries already published
-                    // to the SQ, whose resources stay alive until their CQEs,
-                    // and no argument pointer is passed.
-                    unsafe {
-                        ring.submitter()
-                            .enter::<libc::sigset_t>(to_submit, 1, flags.bits(), None)
-                    }
-                } else {
-                    // EXT_ARG bounds the wait without reserving an SQE for a
-                    // timeout.
-                    let ts = Timespec::new()
-                        .sec(timeout.as_secs())
-                        .nsec(timeout.subsec_nanos());
-                    let args = SubmitArgs::new().timespec(&ts);
+                // SAFETY: `to_submit` counts only entries already published to
+                // the SQ, whose resources stay alive until their CQEs, and
+                // `args` outlives the call. Without EXT_ARG the kernel reads the
+                // null argument as an absent signal mask and ignores its size.
+                let result = unsafe {
+                    ring.submitter()
+                        .enter(to_submit, 1, flags.bits(), args.as_ref())
+                };
 
-                    // SAFETY: `to_submit` counts only entries already published
-                    // to the SQ, whose resources stay alive until their CQEs,
-                    // and `args` outlives the call.
-                    let result = unsafe {
-                        ring.submitter()
-                            .enter(to_submit, 1, flags.bits(), Some(&args))
-                    };
-
-                    match result {
-                        // This timeout bounds the enter. Request expiry belongs
-                        // to the wheel.
-                        Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
-                        result => result,
-                    }
+                match result {
+                    // This timeout bounds the enter. Request expiry belongs to
+                    // the wheel.
+                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
+                    result => result,
                 }
             }
         };

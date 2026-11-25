@@ -650,8 +650,9 @@ pub mod tests {
         ))
     }
 
-    /// Build a plain file write that needs five bytes of progress before
-    /// completing.
+    /// Build a plain file write backed by a socket fd that needs five bytes of
+    /// progress before completing. Waiter tests only stage it, so the fd never
+    /// reaches the kernel.
     fn make_write_request() -> Request {
         Request::WriteAt(WriteAtRequest::new(
             make_file(File::from(make_socket_fd())),
