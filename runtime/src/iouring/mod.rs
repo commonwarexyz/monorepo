@@ -101,6 +101,7 @@ mod park;
 mod pool;
 mod queue;
 pub(crate) mod request;
+mod ring;
 mod runtime;
 mod slab;
 mod sleep;

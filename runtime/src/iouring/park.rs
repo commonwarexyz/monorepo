@@ -139,9 +139,8 @@
 //! timeouts, signals, or syscall errors, which the tests with a real ring and
 //! real futex calls cover.
 
-use super::waiter::UserData;
+use super::{ring::SubmissionQueue, waiter::UserData};
 use crossbeam_utils::CachePadded;
-use io_uring::squeue::SubmissionQueue;
 use std::{
     cell::Cell,
     marker::PhantomData,
@@ -268,11 +267,7 @@ impl ArmGuard<'_> {
         // so the word outlives that enter. A queued wait never reads or writes
         // the word again, since wakes and cancellations find it through its
         // futex key and kernel-owned nodes.
-        unsafe {
-            submission_queue
-                .push(&wait)
-                .expect("reserved ring futex wait SQ slot");
-        }
+        unsafe { submission_queue.push(&wait) };
     }
 
     /// Model ring wait installation as a no-op.
@@ -1070,28 +1065,24 @@ pub mod tests {
     #[cfg(not(feature = "loom"))]
     pub mod native {
         use super::*;
-        use io_uring::IoUring;
+        use crate::iouring::ring::{Cqe, EnterFlags, Ring, Timespec};
 
         /// Build a ring with the driver's flags. With deferred task work, a ring
         /// wait's completion waits until the owner next runs the ring's task
         /// work instead of interrupting the owner's thread futex wait, as in
         /// production.
-        fn ring() -> IoUring {
-            IoUring::builder()
-                .setup_single_issuer()
-                .setup_defer_taskrun()
-                .build(8)
-                .unwrap()
+        fn ring() -> Ring {
+            Ring::new(8).unwrap()
         }
 
         /// Queue a ring wait against the armed snapshot of a fresh observation,
         /// then disarm, leaving the wait queued as a park that ends without its
         /// completion does.
-        fn queue_ring_wait(parker: &Parker, ring: &mut IoUring) {
+        fn queue_ring_wait(parker: &Parker, ring: &mut Ring) {
             let arm = parker.arm_ring(parker.observe());
             assert!(arm.still_idle());
             arm.install(&mut ring.submission());
-            ring.submit().unwrap();
+            assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), 1);
             drop(arm);
 
             // A wait whose compare failed would have completed during the submit.
@@ -1100,23 +1091,15 @@ pub mod tests {
 
         /// Run deferred task work without waiting, which posts the completion
         /// of a ring wait that a wake released.
-        fn run_task_work(ring: &mut IoUring) {
-            // SAFETY: No SQEs are submitted and no argument pointer is passed.
-            unsafe {
-                ring.submitter()
-                    .enter::<libc::sigset_t>(0, 0, io_uring::EnterFlags::GETEVENTS.bits(), None)
-                    .unwrap();
-            }
+        fn run_task_work(ring: &mut Ring) {
+            assert_eq!(ring.enter(0, EnterFlags::GETEVENTS, None).unwrap(), 0);
         }
 
         /// Submit queued SQEs and wait for the ring wait's completion, failing
         /// by the test timeout instead of blocking forever.
-        fn ring_wait_completion(ring: &mut IoUring) -> io_uring::cqueue::Entry {
-            let timeout = io_uring::types::Timespec::new()
-                .sec(TEST_TIMEOUT.as_secs())
-                .nsec(TEST_TIMEOUT.subsec_nanos());
-            let args = io_uring::types::SubmitArgs::new().timespec(&timeout);
-            if let Err(error) = ring.submitter().submit_with_args(1, &args) {
+        fn ring_wait_completion(ring: &mut Ring) -> Cqe {
+            let timeout = Timespec::from(TEST_TIMEOUT);
+            if let Err(error) = ring.enter(1, EnterFlags::GETEVENTS, Some(&timeout)) {
                 assert_eq!(error.raw_os_error(), Some(libc::ETIME), "{error}");
             }
 
@@ -1189,7 +1172,7 @@ pub mod tests {
             // The kernel's compare failed, so the wait completed with EAGAIN.
             let cqe = ring_wait_completion(&mut ring);
             assert_eq!(cqe.result(), -libc::EAGAIN);
-            assert!(!io_uring::cqueue::more(cqe.flags()));
+            assert!(!cqe.more());
             drop(arm);
             assert!(parker.moved(seen));
         }
