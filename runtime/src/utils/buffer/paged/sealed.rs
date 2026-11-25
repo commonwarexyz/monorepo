@@ -192,8 +192,9 @@ impl<B: Blob> Sealed<B> {
     ///
     /// A page that fails validation, or that a failed read never supplies, is not cached. A
     /// failed read does not stop the others. Once every read finishes, the error includes how
-    /// many valid pages the warm read and cached. Demand reads don't wait on a warm's reads. Dropping the future releases the reads
-    /// it joined. A read it started still completes if another warm joined it.
+    /// many valid pages the warm read and cached. Demand reads don't wait on a warm's reads.
+    /// Dropping the future releases the reads it joined. A read it started still completes if
+    /// another warm joined it.
     pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, WarmError> {
         self.view().warm(ranges).await
     }

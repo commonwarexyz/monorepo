@@ -68,7 +68,7 @@ pub use sealed::Sealed;
 
 /// A failed [Sealed::warm] and the progress it made before returning.
 #[derive(Debug, thiserror::Error)]
-#[error("page cache warm failed after reading {pages_read} pages: {source}")]
+#[error("page cache warm failed after reading {pages_read} pages")]
 pub struct WarmError {
     /// Valid pages read and cached by this warm's own batch, excluding joined reads.
     pub pages_read: usize,
