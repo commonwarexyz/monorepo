@@ -117,7 +117,8 @@ impl<C: Clock> Gcra<C> {
         }
     }
 
-    /// Reads the clock, treating a backward step as zero elapsed.
+    /// Samples the clock and returns elapsed nanoseconds since creation.
+    /// A backward step adds nothing.
     fn now(&mut self) -> u128 {
         let current = self.clock.current();
         if let Ok(step) = current.duration_since(self.last) {
@@ -159,17 +160,16 @@ impl<C: Clock> RateLimiter<C> {
         }
     }
 
-    fn admit(&mut self) -> Result<(), Duration> {
-        let now = self.gcra.now();
-        self.tat = self.gcra.admit(self.tat, now)?;
-        Ok(())
-    }
-
     /// Admits and charges one cell, or returns the earliest time one can be admitted.
     ///
     /// A rejected check charges nothing. The retry time saturates at the clock limit.
     pub fn check(&mut self) -> Result<(), SystemTime> {
-        self.admit().map_err(|wait| self.gcra.not_until(wait))
+        let now = self.gcra.now();
+        self.tat = self
+            .gcra
+            .admit(self.tat, now)
+            .map_err(|wait| self.gcra.not_until(wait))?;
+        Ok(())
     }
 
     /// Waits until one cell can be admitted and charges it.
@@ -180,10 +180,8 @@ impl<C: Clock> RateLimiter<C> {
     /// If the clock reaches its maximum representable time before a cell is ready, this
     /// future stays pending. Cancel it and retry to observe any subsequent clock correction.
     pub async fn until_ready(&mut self) {
-        while let Err(wait) = self.admit() {
-            let now = self.gcra.last;
-            let deadline = self.gcra.not_until(wait);
-            if deadline == now {
+        while let Err(deadline) = self.check() {
+            if deadline == self.gcra.last {
                 return pending().await;
             }
             self.gcra.clock.sleep_until(deadline).await;
