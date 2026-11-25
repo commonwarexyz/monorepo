@@ -32,13 +32,24 @@ libc.workspace = true
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-invariants.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
+criterion.workspace = true
 crossbeam-deque.workspace = true
 crossbeam-utils.workspace = true
 dashmap.workspace = true
 futures.workspace = true
 rand.workspace = true
+
+[lib]
+bench = false
+
+[[bench]]
+name = "parallel"
+harness = false
+path = "src/benches/bench.rs"
+required-features = [ "std" ]
 
 [features]
 default = [ "std" ]

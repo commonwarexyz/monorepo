@@ -2345,9 +2345,11 @@ version = "2026.11.0"
 dependencies = [
  "arbitrary",
  "cfg-if",
+ "commonware-allocator",
  "commonware-invariants",
  "commonware-macros",
  "commonware-utils",
+ "criterion",
  "crossbeam-deque",
  "crossbeam-utils",
  "dashmap",
