@@ -1276,6 +1276,15 @@ where
         items
     }
 
+    fn prefetch(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, H, S> {
+        let start = self.bounds().start;
+        let first = positions.partition_point(|&position| position < start);
+        self.journal.prefetch(&positions[first..])
+    }
+
     async fn replay(
         &self,
         range: Range<u64>,
@@ -3174,6 +3183,62 @@ mod tests {
     #[test]
     fn test_import_prunes_nothing_before_persist_mmb() {
         deterministic::Runner::default().start(import_prunes_nothing_before_persist::<mmb::Family>);
+    }
+
+    #[test]
+    fn test_prefetch_skips_positions_below_authenticated_bound() {
+        deterministic::Runner::default().start(|context| async move {
+            let suffix = "prefetch-bound";
+            let cfg = journal_config(suffix);
+            let cache = cfg.page_cache.clone();
+            let merkle = merkle_config(suffix);
+            let mut source = TestJournal::<mmr::Family>::new(
+                context.child("source"),
+                merkle.clone(),
+                cfg,
+                |op: &TestOp<mmr::Family>| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+            for i in 0..50 {
+                (source, _) = source.append(&create_operation(i)).await.unwrap();
+            }
+            let source = source.sync().await.unwrap();
+            let start = Location::new(20);
+            let pins = source.pinned_nodes_at(start).await.unwrap();
+            let Journal {
+                journal: ops,
+                frontier,
+                hasher,
+                ..
+            } = source;
+            drop(frontier);
+            let journal = TestJournal::<mmr::Family>::from_components(
+                context.child("import"),
+                &merkle,
+                ops,
+                hasher,
+                start,
+                pins,
+                NZU64!(7),
+            )
+            .await
+            .unwrap()
+            .persist_boundary()
+            .await
+            .unwrap();
+
+            assert_eq!(journal.journal.bounds().start, 14);
+            assert_eq!(journal.bounds().start, 20);
+            cache.clear();
+            assert!(journal.journal.try_read_sync(14).is_none());
+            journal.prefetch(&[14]).await;
+            assert!(journal.journal.try_read_sync(14).is_none());
+            journal.prefetch(&[21]).await;
+            assert!(journal.try_read_sync(21).is_some());
+            journal.destroy().await.unwrap();
+        });
     }
 
     /// An import outside the durable operation range leaves the existing frontier recoverable.

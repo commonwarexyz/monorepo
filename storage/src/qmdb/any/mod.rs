@@ -389,7 +389,7 @@ pub(crate) mod test {
             any::{Config, MerkleConfig, db::Db},
             chain::Bounds,
         },
-        translator::OneCap,
+        translator::{OneCap, TwoCap},
     };
     use commonware_codec::{Codec, CodecShared, Encode as _};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
@@ -2571,6 +2571,307 @@ pub(crate) mod test {
         let merkleized = hold_batch(&db, db.new_batch(), writes).await;
         db.apply_batch(merkleized).await.unwrap()
     }
+
+    /// Return `value`, checking at compile time that it is `Send` and `'static`.
+    fn assert_send_static<T: Send + 'static>(value: T) -> T {
+        value
+    }
+
+    /// Prefetching applied keys warms every page a later read of them needs, skips absent
+    /// keys, and borrows nothing from the database. A prefetch outlives the handle it came from
+    /// across a prune, and dropping one mid-flight leaves the database usable. `cache` is the
+    /// database's page cache.
+    pub(crate) async fn test_any_db_prefetch<F: Family, D>(
+        context: Context,
+        db: D,
+        cache: CacheRef,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
+    {
+        // Seed keys, then write fillers so the seeded operations span sealed blobs and the tail.
+        // Holding the floor keeps the operations in place.
+        let keys: Vec<Digest> = (0..8u64)
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .collect();
+        let values: Vec<Digest> = (0..8u64).map(|i| make_value(i + 1000)).collect();
+        let seed: Vec<_> = keys
+            .iter()
+            .zip(&values)
+            .map(|(k, v)| (*k, Some(*v)))
+            .collect();
+        let db = hold(db, &seed).await;
+        let fillers: Vec<_> = (100..116u64)
+            .map(|i| (Sha256::hash(&[&i.to_be_bytes()]), Some(make_value(i))))
+            .collect();
+        let db = hold(db, &fillers).await;
+        let db = db.sync().await.unwrap();
+
+        // Start from a cold page cache.
+        cache.clear();
+        let misses = || counter(&context, "log_journal_cache_misses_total");
+
+        // Prefetched keys, in sealed blobs and the tail, and an absent key are read without a
+        // cache miss.
+        let (tail_key, tail_value) = fillers[fillers.len() - 1];
+        let absent = Sha256::hash(&[b"absent"]);
+        let warm = [&keys[0], &tail_key, &absent];
+        db.prefetch(&warm).await;
+        let before = misses();
+        assert_eq!(
+            db.get_many(&warm).await.unwrap(),
+            [Some(values[0]), tail_value, None]
+        );
+        assert_eq!(misses(), before, "prefetched keys must not miss");
+
+        // Keys that were not prefetched still miss, so the cache started cold.
+        let before = misses();
+        assert_eq!(
+            db.get_many(&[&keys[2], &keys[3]]).await.unwrap(),
+            [Some(values[2]), Some(values[3])]
+        );
+        assert!(misses() > before, "unprefetched keys must miss");
+
+        // A prefetch outlives the database handle it came from across a floor raise and a prune,
+        // which may remove the blobs it reads, and completes harmlessly.
+        let pending = assert_send_static(db.prefetch(&[&keys[4], &keys[5]]));
+        let mut policy = Script::new(usize::MAX, u64::MAX, keep);
+        let merkleized = merkleize(&db, db.new_batch(), &mut policy).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        pending.await;
+        db.prefetch(&[&keys[4], &keys[5]]).await;
+        assert_eq!(
+            db.get_many(&[&keys[4], &keys[5]]).await.unwrap(),
+            [Some(values[4]), Some(values[5])]
+        );
+
+        // Dropping a prefetch after its first poll leaves the database usable.
+        let mut pending = Box::pin(db.prefetch(&[&keys[6], &keys[7]]));
+        let _ = poll!(pending.as_mut());
+        drop(pending);
+        assert_eq!(
+            db.get_many(&[&keys[6], &keys[7]]).await.unwrap(),
+            [Some(values[6]), Some(values[7])]
+        );
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Prefetching a batch's keys and the floor window its walk reads (its entries plus the keys it
+    /// updates, whose superseded operations the walk passes) leaves merkleizing it with
+    /// [Proportional] no log page to read from storage. `cache` is the database's page cache.
+    pub(crate) async fn test_any_db_prefetch_floor<F: Family, D>(
+        context: Context,
+        db: D,
+        cache: CacheRef,
+    ) where
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
+    {
+        // Seed keys with the floor held below them, so the walk reads the oldest seeded
+        // operations, none of which the batch updates.
+        let digest = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+        let seed: Vec<_> = (0..300)
+            .map(|i| (digest(i), Some(digest(i + 1000))))
+            .collect();
+        let db = hold(db, &seed).await;
+        let db = db.sync().await.unwrap();
+        let keys: Vec<Digest> = (200..240).map(digest).collect();
+        let batch = |db: &D| {
+            keys.iter().fold(db.new_batch(), |batch, key| {
+                batch.write(*key, Some(digest(5000)))
+            })
+        };
+        let entries = Policy::<F, Digest, Digest>::limits(&Proportional, keys.len()).entries;
+        let misses = || counter(&context, "log_journal_cache_misses_total");
+
+        // With only the keys prefetched, the walk reads its candidates from storage.
+        cache.clear();
+        db.prefetch(&keys).await;
+        let before = misses();
+        drop(merkleize(&db, batch(&db), &mut Proportional).await.unwrap());
+        assert!(misses() > before, "the walk must read cold candidates");
+
+        // With the floor window prefetched too, merkleizing reads nothing from storage.
+        cache.clear();
+        db.prefetch(&keys).await;
+        db.prefetch_floor(entries + keys.len()).await;
+        let before = misses();
+        drop(merkleize(&db, batch(&db), &mut Proportional).await.unwrap());
+        assert_eq!(misses(), before, "a prefetched batch must not miss");
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Prefetching an ordered batch's keys leaves the neighbors it relinks when it creates or
+    /// deletes keys to be read from storage. Prefetching those neighbors too leaves merkleizing
+    /// the batch with [Hold] no log page to read. `prefetch_neighbors` calls the database's
+    /// method of that name, and `cache` is the database's page cache.
+    pub(crate) async fn test_ordered_db_prefetch_neighbors<F: Family, D, W>(
+        context: Context,
+        db: D,
+        cache: CacheRef,
+        prefetch_neighbors: impl Fn(&D, &[Digest], &[Digest]) -> W,
+    ) where
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
+        W: Future<Output = ()>,
+    {
+        // Seed keys, then pick creates whose first two bytes no seeded key shares, so the index
+        // holds no candidates for them under a two-byte translator or partition prefix.
+        let digest = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+        let seed: Vec<_> = (0..300)
+            .map(|i| (digest(i), Some(digest(i + 1000))))
+            .collect();
+        let db = hold(db, &seed).await;
+        let db = db.sync().await.unwrap();
+        let used: BTreeSet<[u8; 2]> = seed.iter().map(|(key, _)| [key[0], key[1]]).collect();
+        let creates: Vec<Digest> = (5000..)
+            .map(digest)
+            .filter(|key| !used.contains(&[key[0], key[1]]))
+            .take(20)
+            .collect();
+        let updates: Vec<Digest> = seed[20..30].iter().map(|(key, _)| *key).collect();
+        let deletes: Vec<Digest> = seed[..20].iter().map(|(key, _)| *key).collect();
+        let changes: Vec<_> = creates
+            .iter()
+            .chain(&updates)
+            .map(|key| (*key, Some(digest(9000))))
+            .chain(deletes.iter().map(|key| (*key, None)))
+            .collect();
+        let keys: Vec<Digest> = changes.iter().map(|(key, _)| *key).collect();
+        let (writes, deletes) = keys.split_at(creates.len() + updates.len());
+        let misses = || counter(&context, "log_journal_cache_misses_total");
+
+        // With only the keys prefetched, relinking reads cold neighbors.
+        cache.clear();
+        db.prefetch(&keys).await;
+        let before = misses();
+        drop(hold_batch(&db, db.new_batch(), &changes).await);
+        assert!(misses() > before, "relinking must read cold neighbors");
+
+        // With the neighbors prefetched too, merkleizing reads nothing from storage.
+        cache.clear();
+        db.prefetch(&keys).await;
+        prefetch_neighbors(&db, writes, deletes).await;
+        let before = misses();
+        drop(hold_batch(&db, db.new_batch(), &changes).await);
+        assert_eq!(misses(), before, "a prefetched batch must not miss");
+
+        db.destroy().await.unwrap();
+    }
+
+    // Instantiate the prefetch tests for one variant over a page cache the tests can clear. The
+    // tests expect prefetched keys to be served from the cache, so each prefetch's page budget,
+    // half of the cache's Main section, must cover every page they warm.
+    macro_rules! prefetch_test {
+        ($name:ident, $db:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_traced("WARN")]
+                fn $name() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_test!(@open context, $db, $cfg);
+                        test_any_db_prefetch(context.child("test"), db, cache, to_digest).await;
+                    });
+                }
+
+                #[test_traced("WARN")]
+                fn [<$name _floor>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_test!(@open context, $db, $cfg);
+                        test_any_db_prefetch_floor(context.child("test"), db, cache).await;
+                    });
+                }
+            }
+        };
+        (@open $context:ident, $db:ty, $cfg:ident) => {
+            prefetch_test!(@open $context, $db, $cfg, OneCap)
+        };
+        (@open $context:ident, $db:ty, $cfg:ident, $translator:ty) => {{
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let mut cfg = $cfg::<$translator>("prefetch");
+            cfg.log.page_cache = cache.clone();
+            let db = <$db>::init($context.child("storage"), cfg, None)
+                .await
+                .unwrap();
+            (db, cache)
+        }};
+    }
+
+    prefetch_test!(test_any_db_prefetch_uf, UnorderedFixed, fixed_db_config);
+    prefetch_test!(
+        test_any_db_prefetch_uv,
+        UnorderedVariable,
+        variable_db_config
+    );
+    prefetch_test!(test_any_db_prefetch_of, OrderedFixed, fixed_db_config);
+    prefetch_test!(test_any_db_prefetch_ov, OrderedVariable, variable_db_config);
+    prefetch_test!(
+        test_any_db_prefetch_ufp1,
+        UnorderedFixedP1,
+        fixed_db_config_partitioned
+    );
+    prefetch_test!(
+        test_any_db_prefetch_ovp2,
+        OrderedVariableP2,
+        variable_db_config_partitioned
+    );
+    prefetch_test!(
+        test_any_db_prefetch_uf_mmb,
+        MmbUnorderedFixed,
+        fixed_db_config
+    );
+    prefetch_test!(
+        test_any_db_prefetch_ov_mmb,
+        MmbOrderedVariable,
+        variable_db_config
+    );
+
+    // Instantiate the neighbor prefetch test for one ordered variant. Its creates need an index
+    // with no candidates for keys whose first two bytes no seeded key shares, which a two-byte
+    // translator or partition prefix provides.
+    macro_rules! prefetch_neighbors_test {
+        ($name:ident, $db:ty, $cfg:ident, $translator:ty) => {
+            #[test_traced("WARN")]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    let (db, cache) = prefetch_test!(@open context, $db, $cfg, $translator);
+                    test_ordered_db_prefetch_neighbors(
+                        context.child("test"),
+                        db,
+                        cache,
+                        <$db>::prefetch_neighbors::<Digest, Digest>,
+                    )
+                    .await;
+                });
+            }
+        };
+    }
+
+    type OrderedFixedTwoCap =
+        OrderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+    type OrderedVariableTwoCap =
+        OrderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+
+    prefetch_neighbors_test!(
+        test_any_db_prefetch_neighbors_of,
+        OrderedFixedTwoCap,
+        fixed_db_config,
+        TwoCap
+    );
+    prefetch_neighbors_test!(
+        test_any_db_prefetch_neighbors_ov,
+        OrderedVariableTwoCap,
+        variable_db_config,
+        TwoCap
+    );
+    prefetch_neighbors_test!(
+        test_any_db_prefetch_neighbors_ovp2,
+        OrderedVariableP2,
+        variable_db_config_partitioned,
+        OneCap
+    );
 
     /// Merkleize `batch` with `policy` and without metadata through [`DbAny`], for callers whose
     /// generic database type implements the batch trait only through its [`DbAny::Batch`].

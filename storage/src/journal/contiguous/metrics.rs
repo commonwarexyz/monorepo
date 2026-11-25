@@ -2,12 +2,46 @@
 
 use commonware_runtime::{
     Clock, Metrics as RuntimeMetrics,
+    buffer::paged::WarmError,
     telemetry::metrics::{
         Counter, Gauge, GaugeExt as _, MetricsExt as _,
         histogram::{ScopedTimer, Timed},
     },
 };
 use std::sync::Arc;
+use tracing::warn;
+
+/// Pages read into the page cache by a journal's prefetches, and the prefetch reads that failed.
+#[derive(Clone)]
+pub(super) struct PrefetchMetrics {
+    pages: Counter,
+    failures: Counter,
+}
+
+impl PrefetchMetrics {
+    fn new<E: RuntimeMetrics>(context: &E) -> Self {
+        Self {
+            pages: context.counter(
+                "prefetched_pages",
+                "Number of pages read into the page cache by completed prefetch reads, including partial failures",
+            ),
+            failures: context.counter("prefetch_failures", "Number of prefetch reads that failed"),
+        }
+    }
+
+    /// Record pages read from storage, even on failure. Also count and log any failure.
+    pub(super) fn record(&self, result: Result<usize, WarmError>) {
+        let pages = match result {
+            Ok(pages) => pages,
+            Err(err) => {
+                self.failures.inc();
+                warn!(?err, "prefetch failed");
+                err.pages_read
+            }
+        };
+        self.pages.inc_by(pages as u64);
+    }
+}
 
 /// Metrics for a contiguous journal.
 ///
@@ -59,6 +93,8 @@ pub(super) struct Metrics<E: Clock> {
     pub sync_calls: Counter,
     /// Duration of full sync calls.
     sync_duration: Timed,
+    /// Prefetch reads.
+    pub prefetch: PrefetchMetrics,
     /// Clock used by the duration timers.
     clock: Arc<E>,
 }
@@ -127,6 +163,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "sync_duration",
                 "Duration of full sync calls",
             ),
+            prefetch: PrefetchMetrics::new(&context),
             clock: Arc::new(context),
         }
     }

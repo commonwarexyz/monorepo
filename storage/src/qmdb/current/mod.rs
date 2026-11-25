@@ -594,7 +594,8 @@ pub mod tests {
                 test::{
                     Changes, Choice, Inspect, Links, Neighbors, Script, assert_bits, assert_exact,
                     build, colliding_digest, counter, hold, hold_batch, live, replay,
-                    test_any_activity_depths, test_any_ordered_policy_eviction_matrix,
+                    test_any_activity_depths, test_any_db_prefetch, test_any_db_prefetch_floor,
+                    test_any_ordered_policy_eviction_matrix,
                     test_any_ordered_policy_repair_across_ancestors,
                     test_any_policy_ancestor_twins, test_any_policy_decisions_match_writes,
                     test_any_policy_evicts_parent_created_key, test_any_policy_hold,
@@ -602,7 +603,7 @@ pub mod tests {
                     test_any_policy_limits_after_colliding_writes,
                     test_any_policy_limits_with_writes, test_any_policy_matches_proportional,
                     test_any_policy_own_writes, test_any_proportional_bound,
-                    test_any_proportional_one_batch,
+                    test_any_proportional_one_batch, test_ordered_db_prefetch_neighbors,
                 },
                 traits::{BatchableDb, DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -2242,6 +2243,119 @@ pub mod tests {
         Fut: Future<Output = C>,
     {
         test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
+    }
+
+    /// Prefetching a key's operations lets merkleization change a graftable bitmap chunk
+    /// without reading storage. `cache` is the database's page cache.
+    async fn test_merkleize_prefetched_key_reads_no_storage<M, C>(
+        context: Context,
+        db: C,
+        cache: CacheRef,
+    ) where
+        M: merkle::Graftable,
+        C: DbAny<Family = M, Key = Digest, Value = Digest>,
+    {
+        let digest = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+
+        // Seed keys, then update the later half so every seeded key's chunk is graftable.
+        // Holding the floor keeps the seeded operations in place, and updates of existing keys
+        // leave other keys' operations in place in ordered variants too.
+        let seed: Vec<_> = (0..1200)
+            .map(|i| (digest(i), Some(digest(i + 10_000))))
+            .collect();
+        let updates: Vec<_> = (600..1200).map(|i| (digest(i), Some(digest(i)))).collect();
+        let db = hold(db, &seed).await;
+        let db = hold(db, &updates).await;
+        let db = db.sync().await.unwrap();
+
+        let key = digest(7);
+        let change = [(key, Some(digest(20_000)))];
+        let reads = || counter(&context, "runtime_storage_reads_total");
+
+        // The cold key requires storage reads before it is prefetched.
+        cache.clear();
+        let before = reads();
+        drop(hold_batch(&db, db.new_batch(), &change).await);
+        assert!(reads() > before, "the cold key must require a read");
+
+        // Warming the key is enough: the graft input is already in memory.
+        cache.clear();
+        db.prefetch(&[key]).await;
+        let before = reads();
+        drop(hold_batch(&db, db.new_batch(), &change).await);
+        assert_eq!(reads(), before, "merkleizing must not read storage");
+
+        db.destroy().await.unwrap();
+    }
+
+    // Instantiate the prefetch tests for one variant over a page cache the tests can clear. The
+    // tests expect prefetched keys to be served from the cache, so each prefetch's page budget,
+    // half of the cache's Main section, must cover every page they warm.
+    macro_rules! prefetch_tests {
+        ($label:ident, $db:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_traced("WARN")]
+                fn [<test_prefetch_ $label>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
+                        let make_value = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+                        test_any_db_prefetch(context.child("test"), db, cache, make_value).await;
+                    });
+                }
+
+                #[test_traced("WARN")]
+                fn [<test_prefetch_floor_ $label>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
+                        test_any_db_prefetch_floor(context.child("test"), db, cache).await;
+                    });
+                }
+
+                #[test_traced("WARN")]
+                fn [<test_merkleize_prefetched_key_reads_no_storage_ $label>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
+                        test_merkleize_prefetched_key_reads_no_storage(
+                            context.child("test"), db, cache
+                        ).await;
+                    });
+                }
+            }
+        };
+        (@open $context:ident, $db:ty, $cfg:ident) => {{
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(512));
+            let mut cfg = $cfg::<OneCap>("prefetch");
+            cfg.log.page_cache = cache.clone();
+            let db = <$db>::init($context.child("storage"), cfg, None)
+                .await
+                .unwrap();
+            (db, cache)
+        }};
+    }
+
+    prefetch_tests!(uf, UnorderedFixedDb, fixed_config);
+    prefetch_tests!(uv, UnorderedVariableDb, variable_config);
+    prefetch_tests!(of, OrderedFixedDb, fixed_config);
+    prefetch_tests!(ov, OrderedVariableDb, variable_config);
+    prefetch_tests!(ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
+    prefetch_tests!(ovp2, OrderedVariableP2Db, variable_config_partitioned);
+    prefetch_tests!(uf_mmb, UnorderedFixedMmbDb, fixed_config);
+    prefetch_tests!(ov_mmb, OrderedVariableMmbDb, variable_config);
+
+    // The partition prefix gives the test's creates no candidates in the index.
+    #[test_traced("WARN")]
+    fn test_prefetch_neighbors_ovp2() {
+        deterministic::Runner::default().start(|context| async move {
+            let (db, cache) =
+                prefetch_tests!(@open context, OrderedVariableP2Db, variable_config_partitioned);
+            test_ordered_db_prefetch_neighbors(
+                context.child("test"),
+                db,
+                cache,
+                OrderedVariableP2Db::prefetch_neighbors::<Digest, Digest>,
+            )
+            .await;
+        });
     }
 
     with_all_variants!(run_variant!(test_build_random_close_reopen, "WARN"));

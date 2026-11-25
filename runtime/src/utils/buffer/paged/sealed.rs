@@ -13,7 +13,7 @@
 //! and the page cache.
 
 use super::{
-    CHECKSUM_SIZE, CacheRef, Replay,
+    CHECKSUM_SIZE, CacheRef, Replay, WarmError,
     read::PageReader,
     view::{Tail, View},
 };
@@ -79,6 +79,11 @@ impl<B: Blob> Sealed<B> {
     /// Returns the size of the blob.
     pub fn size(&self) -> u64 {
         self.inner.size
+    }
+
+    /// Returns the page cache the view reads through.
+    pub fn page_cache(&self) -> &CacheRef {
+        &self.inner.cache_ref
     }
 
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no
@@ -171,6 +176,27 @@ impl<B: Blob> Sealed<B> {
         ranges: &[(u64, usize)],
     ) -> Result<usize, Error> {
         self.view().read_ranges_into(buf, ranges).await
+    }
+
+    /// Read the pages covering the `(offset, len)` byte ranges (ascending by offset) into the page
+    /// cache ahead of their first read. Returns how many pages were read from the blob. The count
+    /// excludes pages already cached and pages joined from another reader's read of them.
+    ///
+    /// Each call considers at most half of the page cache's Main capacity (at least one page),
+    /// starting at the lowest offsets. This limit includes resident pages and pages already
+    /// being read. Use a smaller total budget when warming multiple blobs together.
+    ///
+    /// Residency is best effort. Warmed pages are not pinned. They stay cached until their first
+    /// read only while the page cache's Main section, not the whole cache, has room for them
+    /// alongside the pages it admits in the meantime.
+    ///
+    /// A page that fails validation, or that a failed read never supplies, is not cached. A
+    /// failed read does not stop the others. Once every read finishes, the error includes how
+    /// many valid pages the warm read and cached. Demand reads don't wait on a warm's reads.
+    /// Dropping the future releases the reads it joined. A read it started still completes if
+    /// another warm joined it.
+    pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, WarmError> {
+        self.view().warm(ranges).await
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
