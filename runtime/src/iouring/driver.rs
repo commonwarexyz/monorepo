@@ -81,7 +81,7 @@ use std::{
 };
 use tracing::warn;
 
-/// Shared acknowledgement token for cancellation SQEs.
+/// Shared user data of cancellation SQEs, which post CQEs only on failure.
 ///
 /// Like the ring wait token, this uses the slot index reserved by
 /// [`Waiters::insert`].
@@ -822,11 +822,11 @@ impl State {
         }
 
         // Only the target operation's CQE can retire its resource owners.
+        // SKIP_SUCCESS suppresses a successful cancellation's CQE, so this
+        // token arrives only with a failure, which still has to be recognized
+        // so it is not taken for a request.
         if user_data == CANCEL_USER_DATA {
-            if result == 0 {
-                // Cancellation successful. SKIP_SUCCESS keeps the kernel from
-                // posting this result.
-            } else if result == -libc::EALREADY {
+            if result == -libc::EALREADY {
                 // Cancellation is no longer possible at this stage. The target
                 // operation CQE should follow shortly.
             } else if result == -libc::ENOENT {
@@ -1768,8 +1768,8 @@ pub mod tests {
         let id = harness.stage(recv(left, 5, None), None, 0);
         harness.driver.state.cancel(id, &mut harness.deferred);
 
-        // Acknowledgements cannot release the operation's kernel resources.
-        for result in [0, -libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
+        // Failed cancellations cannot release the operation's kernel resources.
+        for result in [-libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
             harness
                 .driver
                 .state
@@ -1794,14 +1794,11 @@ pub mod tests {
             .state
             .complete(id, result, &mut harness.deferred);
 
-        for result in [0, -libc::ENOENT] {
-            harness
-                .driver
-                .state
-                .handle_cqe(CANCEL_USER_DATA, result, &mut harness.deferred);
-
-            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
-        }
+        harness
+            .driver
+            .state
+            .handle_cqe(CANCEL_USER_DATA, -libc::ENOENT, &mut harness.deferred);
+        assert_eq!(harness.driver.state.waiters.in_flight(), 0);
 
         harness.collect();
         assert_eq!(harness.completed.len(), 1);
@@ -2124,7 +2121,7 @@ pub mod tests {
 
     /// Cancelling a direct read never stages a successor. When its observer is dropped or its
     /// worker closes, a read the kernel holds keeps its open and buffer until its operation CQE
-    /// decides its outcome, even when the cancellation acknowledgement arrives first. A read the
+    /// decides its outcome, even when a failed cancellation's CQE arrives first. A read the
     /// kernel does not hold releases them at once when its observer is dropped, whether it is
     /// queued for its first submission or requeued after aligned progress or a switch to a
     /// buffered read.
@@ -2168,8 +2165,9 @@ pub mod tests {
                     (3 * DIRECT_ALIGN as i32, Ok(())),
                 ] {
                     // Orphan a staged read or close its worker, with or without a simulated
-                    // cancellation acknowledgement. The kernel may write the buffer until the
-                    // operation CQE, so the request keeps its open and buffer.
+                    // failed cancellation, the only cancellation CQE the kernel posts. The
+                    // kernel may write the buffer until the operation CQE, so the request
+                    // keeps its open and buffer.
                     let mut harness = Harness::new(1);
                     let (request, target) = request();
                     let id = harness.stage(request, None, 0);
@@ -2179,10 +2177,11 @@ pub mod tests {
                         harness.orphan(id);
                     }
                     if acknowledged {
-                        harness
-                            .driver
-                            .state
-                            .handle_cqe(CANCEL_USER_DATA, 0, &mut harness.deferred);
+                        harness.driver.state.handle_cqe(
+                            CANCEL_USER_DATA,
+                            -libc::EALREADY,
+                            &mut harness.deferred,
+                        );
                         harness.collect();
                     }
                     assert_eq!(Arc::strong_count(&file), 2);
