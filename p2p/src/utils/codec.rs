@@ -93,14 +93,17 @@ pub struct CheckedWrappedSender<'a, S: Sender, V: Encode> {
 }
 
 impl<'a, S: Sender, V: Encode> CheckedWrappedSender<'a, S, V> {
+    /// Returns the recipients retained by the check.
     pub fn recipients(&self) -> Vec<S::PublicKey> {
         self.sender.recipients()
     }
 
+    /// Encodes and sends a message to the checked recipients.
     pub fn send(self, message: V, priority: bool) -> Unreliable<Feedback> {
         self.send_ref(&message, priority)
     }
 
+    /// Encodes and sends a borrowed message to the checked recipients.
     pub fn send_ref(self, message: &V, priority: bool) -> Unreliable<Feedback> {
         let encoded = message.encode_iobufs();
         self.sender.send(encoded, priority)

@@ -109,7 +109,7 @@ where
 {
     type PublicKey = P;
     type Checked<'a>
-        = CheckedSender<'a, UnlimitedSender<P>>
+        = CheckedSender<'a, UnlimitedSender<P>, C>
     where
         Self: 'a;
 

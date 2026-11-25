@@ -25,7 +25,9 @@
 //! largest payload through [prefixed] before sizing the network with
 //! [max_message_size](crate::max_message_size).
 
-use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
+use crate::{
+    Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, SendReceipt, Sender,
+};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
     Encode, Error as CodecError, ReadExt,
@@ -369,11 +371,15 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         self.inner.recipients()
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send_with_receipt(
+        self,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> SendReceipt<Self::PublicKey> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
-        self.inner.send(message, priority)
+        self.inner.send_with_receipt(message, priority)
     }
 }
 
@@ -723,7 +729,11 @@ mod tests {
             unreachable!("rate-limited sender should not produce a checked sender");
         }
 
-        fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
+        fn send_with_receipt(
+            self,
+            _: impl Into<IoBufs> + Send,
+            _: bool,
+        ) -> SendReceipt<Self::PublicKey> {
             unreachable!("rate-limited sender should not send");
         }
     }
