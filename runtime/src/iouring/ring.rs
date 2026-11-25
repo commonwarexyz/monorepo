@@ -1,8 +1,8 @@
 //! Runtime-owned io_uring instance.
 //!
-//! [`Ring`] creates a ring with SINGLE_ISSUER, DEFER_TASKRUN, and NO_SQARRAY,
-//! maps its shared rings and SQE array, and owns the submission queue writer,
-//! the completion queue reader, and the `io_uring_enter` and
+//! [`Ring`] creates a ring with SINGLE_ISSUER, DEFER_TASKRUN, NO_SQARRAY, and
+//! SQ_REWIND, maps its shared rings and SQE array, and owns the submission
+//! queue writer, the completion queue reader, and the `io_uring_enter` and
 //! `io_uring_register` calls. It also defines the kernel ABI those need, other
 //! than SQEs.
 //!
@@ -13,17 +13,17 @@
 //! to a kernel-owned entry is ever formed. Each mapping is unmapped only after
 //! the queues that point into it are gone.
 //!
-//! The SQ writer keeps its head and tail locally, starting at zero like the
-//! kernel's. Pushing writes a whole SQE into the slot at the tail and then
-//! advances the local tail. Each enter publishes the tail with one release
-//! store, so the kernel's acquire load of the tail observes every SQE before
-//! it, and asks the kernel to submit exactly the published, unconsumed SQEs.
-//! For this ring (NO_SQARRAY, no SQPOLL, no SQ resize, and one submitter), the
-//! kernel advances its SQ head once per SQE it fetches, publishes that head
-//! before the enter returns, and returns the number fetched when it is
-//! positive. A negative result consumes no SQE. The writer therefore advances
-//! its head by each nonnegative result, which makes a consumed slot reusable
-//! once the synchronous enter has returned, without reading the shared head.
+//! The SQ writer stages SQEs from the first slot. Pushing writes a whole SQE
+//! into the slot after the staged ones. With SQ_REWIND the kernel's submission
+//! path ignores the shared SQ head and tail, which stay zero: each enter asks
+//! it to submit exactly the staged SQEs, and it fetches them in slot order from
+//! the first slot during the call. For this ring (no SQPOLL, no SQ resize, and
+//! one submitter), the kernel reads SQEs only inside an enter, after the SQE
+//! writes that precede the call on the same thread, and returns the number it
+//! fetched when that is positive. A negative result consumes no SQE. After a
+//! short submission, the writer moves the unconsumed SQEs to the first slots,
+//! in order, so the next enter offers them first, ahead of later pushes. The
+//! writer never accesses a shared SQ word other than the flags.
 //!
 //! The CQ reader takes one acquire load of the kernel's CQ tail per view,
 //! copies each readable CQE out, and returns exactly the consumed prefix with
@@ -56,6 +56,9 @@ const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
 const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
 /// Indexes SQEs directly by the SQ head instead of through an index array.
 const IORING_SETUP_NO_SQARRAY: u32 = 1 << 16;
+/// Starts every submission at the first SQE slot, so submission neither reads
+/// the SQ tail nor writes the SQ head. Requires NO_SQARRAY and Linux 7.0.
+const IORING_SETUP_SQ_REWIND: u32 = 1 << 20;
 
 /// One mapping at the SQ ring offset covers both rings.
 const IORING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
@@ -481,9 +484,6 @@ impl Word {
         // SAFETY: `Word::new` checked that the word lies within memory that
         // stays valid while the word is used.
         unsafe { self.0.as_ref() }.store(value, order);
-
-        #[cfg(test)]
-        tests::stored(self.0);
     }
 }
 
@@ -503,40 +503,38 @@ fn check_ring_size(mask: Word, ring_entries: Word, entries: u32) -> io::Result<(
 struct Sq {
     /// First SQE slot.
     sqes: NonNull<Sqe>,
-    /// The kernel's SQ head, read only by debug assertions.
-    khead: Word,
-    /// The SQ tail the kernel reads.
-    ktail: Word,
     /// The SQ flags the kernel sets.
     kflags: Word,
-    /// Number of slots, a power of two.
+    /// Number of slots.
     entries: u32,
-    /// Count of SQEs the kernel has consumed.
-    head: u32,
-    /// Count of SQEs pushed.
-    tail: u32,
+    /// Number of SQEs staged from the first slot, which the next enter asks
+    /// the kernel to submit.
+    staged: u32,
 }
 
 impl Sq {
-    /// Publish the tail and return the number of unconsumed SQEs.
+    /// Drop the first `consumed` staged SQEs, which an enter consumed, and
+    /// move the rest to the first slots in order.
     #[inline]
-    fn publish(&mut self) -> u32 {
-        // The release store orders every SQE written before it ahead of the
-        // kernel's acquire load of the tail.
-        self.ktail.store(self.tail, Ordering::Release);
-        self.tail.wrapping_sub(self.head)
-    }
-
-    /// Advance the head past the `consumed` SQEs of an enter that asked the
-    /// kernel to submit `to_submit`.
-    #[inline]
-    fn consume(&mut self, consumed: u32, to_submit: u32) {
+    fn consume(&mut self, consumed: u32) {
         assert!(
-            consumed <= to_submit,
-            "kernel consumed {consumed} of {to_submit} SQEs"
+            consumed <= self.staged,
+            "kernel consumed {consumed} of {} SQEs",
+            self.staged
         );
-        self.head = self.head.wrapping_add(consumed);
-        debug_assert_eq!(self.khead.load(Ordering::Acquire), self.head);
+        let rest = self.staged - consumed;
+        if consumed != 0 && rest != 0 {
+            // SAFETY: Both ranges lie within the staged slots. The kernel
+            // reads SQEs only during an enter, so none of them is in use.
+            unsafe {
+                ptr::copy(
+                    self.sqes.add(consumed as usize).as_ptr(),
+                    self.sqes.as_ptr(),
+                    rest as usize,
+                );
+            }
+        }
+        self.staged = rest;
     }
 }
 
@@ -553,19 +551,19 @@ impl SubmissionQueue<'_> {
     /// Number of SQEs pushed but not yet consumed by the kernel.
     #[inline]
     pub const fn len(&self) -> usize {
-        self.sq.tail.wrapping_sub(self.sq.head) as usize
+        self.sq.staged as usize
     }
 
     /// Whether the kernel has consumed every pushed SQE.
     #[cfg(test)]
     pub const fn is_empty(&self) -> bool {
-        self.sq.tail == self.sq.head
+        self.sq.staged == 0
     }
 
     /// Whether no slot is free for another SQE.
     #[inline]
     pub const fn is_full(&self) -> bool {
-        self.sq.tail.wrapping_sub(self.sq.head) == self.sq.entries
+        self.sq.staged == self.sq.entries
     }
 
     /// Whether the kernel holds completions that did not fit in the CQ.
@@ -588,13 +586,11 @@ impl SubmissionQueue<'_> {
     pub unsafe fn push(&mut self, sqe: &Sqe) {
         assert!(!self.is_full(), "submission queue is full");
         let sq = &mut *self.sq;
-        let index = (sq.tail & (sq.entries - 1)) as usize;
 
-        // SAFETY: `index` is below the slot count. The slot is outside the
-        // published, unconsumed range, so the kernel does not read it until
-        // the next tail publication.
-        unsafe { sq.sqes.add(index).write(*sqe) };
-        sq.tail = sq.tail.wrapping_add(1);
+        // SAFETY: The slot after the staged SQEs is below the slot count. The
+        // kernel reads SQEs only during an enter, so it is not in use.
+        unsafe { sq.sqes.add(sq.staged as usize).write(*sqe) };
+        sq.staged += 1;
     }
 }
 
@@ -747,12 +743,9 @@ unsafe fn queues(
 
     let sq = Sq {
         sqes,
-        khead: word(sq_off.head)?,
-        ktail: word(sq_off.tail)?,
         kflags: word(sq_off.flags)?,
         entries: params.sq_entries,
-        head: 0,
-        tail: 0,
+        staged: 0,
     };
     let cq = Cq {
         cqes,
@@ -793,7 +786,8 @@ impl Ring {
         let mut params = Params {
             flags: IORING_SETUP_SINGLE_ISSUER
                 | IORING_SETUP_DEFER_TASKRUN
-                | IORING_SETUP_NO_SQARRAY,
+                | IORING_SETUP_NO_SQARRAY
+                | IORING_SETUP_SQ_REWIND,
             ..Params::default()
         };
 
@@ -882,7 +876,7 @@ impl Ring {
         mut flags: EnterFlags,
         timeout: Option<&Timespec>,
     ) -> io::Result<u32> {
-        let to_submit = self.sq.publish();
+        let to_submit = self.sq.staged;
 
         // No signal mask. EXT_ARG bounds the wait without a timeout SQE.
         let arg = timeout.map(|timeout| GeteventsArg {
@@ -915,7 +909,7 @@ impl Ring {
         }
 
         // SAFETY: `fd` names this ring, by its slot in this thread's table
-        // when REGISTERED_RING is set. Pushing guaranteed that the published
+        // when REGISTERED_RING is set. Pushing guaranteed that the staged
         // SQEs' resources outlive their completions. `arg_ptr` is null
         // exactly when EXT_ARG is unset, and otherwise points to an
         // `io_uring_getevents_arg` of `arg_size` bytes whose timespec pointer
@@ -936,7 +930,7 @@ impl Ring {
             return Err(io::Error::last_os_error());
         }
         let consumed = u32::try_from(result).unwrap_or(u32::MAX);
-        self.sq.consume(consumed, to_submit);
+        self.sq.consume(consumed);
         Ok(consumed)
     }
 
@@ -1079,13 +1073,9 @@ const _: () = {
 pub mod tests {
     use super::*;
     use std::{
-        cell::{Cell, RefCell},
+        cell::Cell,
         panic::{AssertUnwindSafe, catch_unwind},
-        rc::Rc,
     };
-
-    /// Fake kernel callback given the address of each stored ring word.
-    type StoreHook = Box<dyn FnMut(NonNull<AtomicU32>)>;
 
     thread_local! {
         /// Minimum completion count and flags of this thread's latest enter.
@@ -1101,10 +1091,6 @@ pub mod tests {
         /// Mappings this thread created minus those it unmapped. A ring
         /// dropped on another thread unmaps there.
         static LIVE_MAPPINGS: Cell<isize> = const { Cell::new(0) };
-
-        /// Fake kernel that observes each store to a shared ring word on this
-        /// thread.
-        static ON_STORE: RefCell<Option<StoreHook>> = const { RefCell::new(None) };
     }
 
     /// Remember an enter's arguments for assertions on the calling thread.
@@ -1123,8 +1109,8 @@ pub mod tests {
     /// The flag [`Ring::enter`] sets for an enter through a registered slot.
     pub const REGISTERED_RING: EnterFlags = EnterFlags::REGISTERED_RING;
 
-    /// Fail this thread's next enter with `errno` after it publishes the
-    /// SQ tail, as a kernel that rejects the enter before submitting does.
+    /// Fail this thread's next enter with `errno`, as a kernel that rejects
+    /// the enter before submitting does.
     pub fn fail_next_enter(errno: i32) {
         FAIL_ENTER.set(Some(errno));
     }
@@ -1190,16 +1176,6 @@ pub mod tests {
         LIVE_MAPPINGS.set(LIVE_MAPPINGS.get() - 1);
     }
 
-    /// Show a store to the shared ring `word` to the fake kernel installed
-    /// for this thread, if any.
-    pub(super) fn stored(word: NonNull<AtomicU32>) {
-        ON_STORE.with_borrow_mut(|hook| {
-            if let Some(hook) = hook {
-                hook(word);
-            }
-        });
-    }
-
     /// Slots in the fake ring's SQ.
     const SQ_ENTRIES: u32 = 4;
     /// Slots in the fake ring's CQ.
@@ -1250,8 +1226,6 @@ pub mod tests {
         rings_alloc: *mut [u64],
         /// Owner of the SQE slots.
         sqes_alloc: *mut [[u64; 8]],
-        /// Count of SQEs the fake kernel has fetched.
-        fetched: Cell<u32>,
     }
 
     impl FakeRing {
@@ -1265,7 +1239,6 @@ pub mod tests {
                 sqes: NonNull::new(sqes_alloc.cast()).unwrap(),
                 rings_alloc,
                 sqes_alloc,
-                fetched: Cell::new(0),
             };
             let params = fake_params();
             ring.word(params.sq_off.ring_mask)
@@ -1293,47 +1266,37 @@ pub mod tests {
             unsafe { self.rings.add(offset as usize).cast::<AtomicU32>().as_ref() }
         }
 
-        /// Move every counter of both queues to `start`, as if that many
-        /// entries had passed through them.
-        fn rewind(&self, sq: &mut Sq, cq: &mut Cq, start: u32) {
+        /// Move the CQ's counters to `start`, as if that many CQEs had
+        /// passed through it.
+        fn wind_cq(&self, cq: &mut Cq, start: u32) {
             let params = fake_params();
-            for offset in [
-                params.sq_off.head,
-                params.sq_off.tail,
-                params.cq_off.head,
-                params.cq_off.tail,
-            ] {
-                self.word(offset).store(start, Ordering::Relaxed);
-            }
-            self.fetched.set(start);
-            (sq.head, sq.tail, cq.head) = (start, start, start);
+            self.word(params.cq_off.head)
+                .store(start, Ordering::Relaxed);
+            self.word(params.cq_off.tail)
+                .store(start, Ordering::Relaxed);
+            cq.head = start;
         }
 
-        /// The `user_data` of every SQE published since the last fetch, read
-        /// from the slots at the tail the kernel observes.
-        fn published(&self) -> Vec<u64> {
-            let fetched = self.fetched.get();
-            let tail = self.word(fake_params().sq_off.tail).load(Ordering::Acquire);
-            (0..tail.wrapping_sub(fetched))
-                .map(|index| {
-                    let slot = (fetched.wrapping_add(index) & (SQ_ENTRIES - 1)) as usize;
+        /// Fetch `count` SQEs from the first slot, as the kernel does on a
+        /// rewinding ring, and return their `user_data`.
+        fn fetch(&self, count: u32) -> Vec<u64> {
+            (0..count as usize)
+                .map(|slot| {
                     // SAFETY: The slot is within the SQE slots, and the queue
-                    // does not write it while the kernel may read it.
+                    // does not write it during a fetch.
                     unsafe { self.sqes.add(slot).read() }.user_data()
                 })
                 .collect()
         }
 
-        /// Fetch `count` published SQEs, advancing the SQ head as the kernel
-        /// does, and return their `user_data`.
-        fn fetch(&self, count: u32) -> Vec<u64> {
-            let mut fetched = self.published();
-            fetched.truncate(count as usize);
-            assert_eq!(fetched.len(), count as usize, "fetched unpublished SQEs");
-            self.fetched.set(self.fetched.get().wrapping_add(count));
-            self.word(fake_params().sq_off.head)
-                .store(self.fetched.get(), Ordering::Release);
-            fetched
+        /// The shared SQ head and tail, which the kernel ignores and the
+        /// writer never writes.
+        fn sq_cursors(&self) -> (u32, u32) {
+            let params = fake_params();
+            (
+                self.word(params.sq_off.head).load(Ordering::Acquire),
+                self.word(params.sq_off.tail).load(Ordering::Acquire),
+            )
         }
 
         /// Post a CQE as the kernel does.
@@ -1375,29 +1338,6 @@ pub mod tests {
         }
     }
 
-    /// Record, at each store to the SQ tail, the `user_data` of the SQEs the
-    /// kernel can then read.
-    fn observe_publications(ring: &Rc<FakeRing>) -> Rc<RefCell<Vec<Vec<u64>>>> {
-        let seen = Rc::new(RefCell::new(Vec::new()));
-        let (ring, recorded) = (Rc::clone(ring), Rc::clone(&seen));
-        let previous = ON_STORE.replace(Some(Box::new(move |word| {
-            if ptr::eq(word.as_ptr(), ring.word(fake_params().sq_off.tail)) {
-                recorded.borrow_mut().push(ring.published());
-            }
-        })));
-        assert!(previous.is_none(), "publication hook already installed");
-        seen
-    }
-
-    /// Remove this thread's publication hook when a test ends.
-    struct PublicationGuard;
-
-    impl Drop for PublicationGuard {
-        fn drop(&mut self) {
-            ON_STORE.take();
-        }
-    }
-
     /// A NOP SQE carrying `user_data`.
     fn nop(user_data: u64) -> Sqe {
         Sqe::nop().with_user_data(user_data)
@@ -1417,66 +1357,57 @@ pub mod tests {
         }
     }
 
-    /// Submit like `Ring::enter`, with the fake kernel fetching `count` of the
-    /// published SQEs, and return the number published.
-    fn submit(sq: &mut Sq, ring: &FakeRing, count: u32) -> u32 {
-        let to_submit = sq.publish();
-        ring.fetch(count);
-        sq.consume(count, to_submit);
-        to_submit
+    /// Submit like `Ring::enter`, offering the kernel the staged SQEs, and
+    /// with the fake kernel fetching `count` of them. Returns the number
+    /// offered and the `user_data` fetched.
+    fn submit(sq: &mut Sq, ring: &FakeRing, count: u32) -> (u32, Vec<u64>) {
+        let to_submit = sq.staged;
+        assert!(count <= to_submit, "fetched unstaged SQEs");
+        let fetched = ring.fetch(count);
+        sq.consume(count);
+        (to_submit, fetched)
     }
 
-    /// Each publication exposes exactly the SQEs written before it, and the
-    /// writer asks the kernel to submit exactly the published, unconsumed ones.
+    /// Every enter offers the staged SQEs from the first slot. A full or empty
+    /// consumption moves nothing, an error or a zero count keeps every SQE,
+    /// and a partial one moves the rest to the first slots, in order and
+    /// ahead of later pushes, overlapping their old slots when the rest
+    /// outnumbers the consumed SQEs. The shared SQ head and tail stay zero.
     #[commonware_macros::test_group("miri")]
     #[test]
-    fn test_sq_publishes_written_entries() {
-        let ring = Rc::new(FakeRing::new());
+    fn test_sq_offers_staged_entries_from_the_first_slot() {
+        let ring = FakeRing::new();
         let (mut sq, _cq) = ring.queues();
-        let _guard = PublicationGuard;
-        let seen = observe_publications(&ring);
 
-        // Nothing is visible before the tail is published.
-        push(&mut sq, [1, 2, 3]);
+        // An empty queue offers nothing.
+        assert_eq!(submit(&mut sq, &ring, 0), (0, vec![]));
+
+        // A full consumption empties the queue.
+        push(&mut sq, [1, 2]);
+        assert_eq!(writer(&mut sq).len(), 2);
+        assert_eq!(submit(&mut sq, &ring, 2), (2, vec![1, 2]));
+        assert!(writer(&mut sq).is_empty());
+
+        // A zero count keeps every SQE in place.
+        push(&mut sq, [3, 4, 5, 6]);
+        assert!(writer(&mut sq).is_full());
+        assert_eq!(submit(&mut sq, &ring, 0), (4, vec![]));
+        assert_eq!(ring.fetch(4), [3, 4, 5, 6]);
+
+        // A partial consumption moves the overlapping rest to the front.
+        assert_eq!(submit(&mut sq, &ring, 1), (4, vec![3]));
         assert_eq!(writer(&mut sq).len(), 3);
-        assert!(ring.published().is_empty());
+        assert_eq!(ring.fetch(3), [4, 5, 6]);
 
-        // A short submission leaves the rest published for the next enter.
-        assert_eq!(submit(&mut sq, &ring, 2), 3);
-        assert_eq!(writer(&mut sq).len(), 1);
-
-        // Slots wrap once the kernel consumed them.
-        push(&mut sq, [4, 5, 6]);
+        // A push follows the moved SQEs, and the next enter offers them first.
+        push(&mut sq, [7]);
         assert!(writer(&mut sq).is_full());
-        assert_eq!(submit(&mut sq, &ring, 0), 4);
-        assert_eq!(writer(&mut sq).len(), 4);
-        assert_eq!(submit(&mut sq, &ring, 4), 4);
+        assert_eq!(submit(&mut sq, &ring, 3), (4, vec![4, 5, 6]));
+        assert_eq!(ring.fetch(1), [7]);
+        push(&mut sq, [8]);
+        assert_eq!(submit(&mut sq, &ring, 2), (2, vec![7, 8]));
         assert!(writer(&mut sq).is_empty());
-        assert_eq!(
-            *seen.borrow(),
-            [vec![1, 2, 3], vec![3, 4, 5, 6], vec![3, 4, 5, 6]]
-        );
-    }
-
-    /// The writer's counters wrap like the kernel's.
-    #[commonware_macros::test_group("miri")]
-    #[test]
-    fn test_sq_counters_wrap() {
-        let ring = Rc::new(FakeRing::new());
-        let (mut sq, mut cq) = ring.queues();
-        ring.rewind(&mut sq, &mut cq, u32::MAX - 1);
-        let _guard = PublicationGuard;
-        let seen = observe_publications(&ring);
-
-        push(&mut sq, [1, 2, 3, 4]);
-        assert!(writer(&mut sq).is_full());
-        assert_eq!(writer(&mut sq).len(), SQ_ENTRIES as usize);
-        assert_eq!(submit(&mut sq, &ring, 1), 4);
-        push(&mut sq, [5]);
-        assert!(writer(&mut sq).is_full());
-        assert_eq!(submit(&mut sq, &ring, 4), 4);
-        assert!(writer(&mut sq).is_empty());
-        assert_eq!(*seen.borrow(), [vec![1, 2, 3, 4], vec![2, 3, 4, 5]]);
+        assert_eq!(ring.sq_cursors(), (0, 0));
     }
 
     /// Pushing into a full queue panics instead of overwriting an unconsumed
@@ -1491,7 +1422,7 @@ pub mod tests {
     }
 
     /// A kernel that reports consuming more SQEs than were submitted panics
-    /// before the writer can reuse a published slot.
+    /// before the writer can reuse a staged slot.
     #[commonware_macros::test_group("miri")]
     #[test]
     #[should_panic(expected = "kernel consumed 2 of 1 SQEs")]
@@ -1499,8 +1430,7 @@ pub mod tests {
         let ring = FakeRing::new();
         let (mut sq, _cq) = ring.queues();
         push(&mut sq, [1]);
-        let to_submit = sq.publish();
-        sq.consume(2, to_submit);
+        sq.consume(2);
     }
 
     /// A view yields the CQEs posted before it was created and returns
@@ -1509,8 +1439,8 @@ pub mod tests {
     #[test]
     fn test_cq_returns_the_consumed_prefix() {
         let ring = FakeRing::new();
-        let (mut sq, mut cq) = ring.queues();
-        ring.rewind(&mut sq, &mut cq, u32::MAX - 2);
+        let (_sq, mut cq) = ring.queues();
+        ring.wind_cq(&mut cq, u32::MAX - 2);
 
         // A view that yields nothing returns nothing.
         for user_data in 1..=4 {
@@ -1568,7 +1498,7 @@ pub mod tests {
             assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidData);
         };
         let mut params = fake_params();
-        params.sq_off.tail = RINGS_LEN as u32 - 2;
+        params.sq_off.flags = RINGS_LEN as u32 - 2;
         check(params);
         let mut params = fake_params();
         params.cq_off.head = 66;
@@ -1635,42 +1565,120 @@ pub mod tests {
     }
 
     /// A submission that stops at an SQE the kernel rejects consumes exactly
-    /// the SQEs up to and including that one, and the next enter submits the
-    /// rest. A wait that fails after a positive submission still reports the
-    /// submission.
+    /// the SQEs up to and including that one. The next enter offers the rest
+    /// first, then a later push, and each completes once.
     #[test]
-    fn test_ring_counts_short_submissions() {
+    fn test_ring_resubmits_the_unconsumed_suffix() {
         let mut ring = Ring::new(4).unwrap();
-
-        // Invalid futex2 flags fail the wait's preparation, which ends the
-        // submission after it.
         let word = AtomicU32::new(0);
-        let invalid = Sqe::futex_wait(word.as_ptr(), 0, u64::MAX, u32::MAX).with_user_data(2);
-        let mut sq = ring.submission();
-        // SAFETY: NOPs refer to no resources, and the kernel rejects the wait
-        // before it reads the word.
-        unsafe {
-            sq.push(&nop(1));
-            sq.push(&invalid);
-            sq.push(&nop(3));
-            sq.push(&nop(4));
+        for rejected in [0u32, 1] {
+            // Invalid futex2 flags fail the wait's preparation, which ends the
+            // submission after it.
+            let invalid = Sqe::futex_wait(word.as_ptr(), 0, u64::MAX, u32::MAX);
+            let mut sq = ring.submission();
+            for user_data in 1..=4 {
+                let sqe = if user_data == u64::from(rejected) + 1 {
+                    invalid.with_user_data(user_data)
+                } else {
+                    nop(user_data)
+                };
+                // SAFETY: NOPs refer to no resources, and the kernel rejects
+                // the wait before it reads the word.
+                unsafe { sq.push(&sqe) };
+            }
+            let consumed = rejected + 1;
+            assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), consumed);
+            assert_eq!(ring.submission().len(), 4 - consumed as usize);
+            let completed: Vec<_> = ring
+                .completion()
+                .map(|cqe| (cqe.user_data(), cqe.result()))
+                .collect();
+            let mut expected: Vec<_> = (1..u64::from(consumed)).map(|nop| (nop, 0)).collect();
+            expected.push((u64::from(consumed), -libc::EINVAL));
+            assert_eq!(completed, expected);
+
+            // The rest goes first, then a push.
+            // SAFETY: A NOP refers to no resources.
+            unsafe { ring.submission().push(&nop(5)) };
+            let submitted = ring.enter(0, EnterFlags::empty(), None);
+            assert_eq!(submitted.unwrap(), 5 - consumed);
+            assert!(ring.submission().is_empty());
+            let completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
+            assert_eq!(completed, (u64::from(consumed) + 1..=5).collect::<Vec<_>>());
         }
-        assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), 2);
-        assert_eq!(ring.submission().len(), 2);
-        let completed: Vec<_> = ring
+    }
+
+    /// A wait that times out after a positive submission reports the
+    /// submission instead of the timeout, so the submitted SQE leaves the
+    /// queue.
+    #[test]
+    fn test_ring_counts_a_submission_whose_wait_fails() {
+        // The wait's futex key outlives any wait a failed test leaves queued.
+        static WORD: AtomicU32 = AtomicU32::new(0);
+        const FUTEX2_PRIVATE_U32: u32 = 0x02 | libc::FUTEX_PRIVATE_FLAG as u32;
+
+        let mut ring = Ring::new(4).unwrap();
+        let wait = Sqe::futex_wait(WORD.as_ptr(), 0, u64::from(u32::MAX), FUTEX2_PRIVATE_U32);
+        // SAFETY: The word is static.
+        unsafe { ring.submission().push(&wait.with_user_data(7)) };
+        let timeout = Timespec::from(Duration::from_millis(1));
+        assert_eq!(
+            ring.enter(1, EnterFlags::GETEVENTS, Some(&timeout))
+                .unwrap(),
+            1
+        );
+        assert!(ring.submission().is_empty());
+        assert!(ring.completion().is_empty());
+
+        // Cancel the wait and reap both completions.
+        // SAFETY: A cancel refers only to the target's user_data.
+        unsafe {
+            ring.submission()
+                .push(&Sqe::async_cancel(7).with_user_data(8))
+        };
+        let timeout = Timespec::from(Duration::from_secs(10));
+        assert_eq!(
+            ring.enter(2, EnterFlags::GETEVENTS, Some(&timeout))
+                .unwrap(),
+            1
+        );
+        let mut completed: Vec<_> = ring
             .completion()
             .map(|cqe| (cqe.user_data(), cqe.result()))
             .collect();
-        assert_eq!(completed, [(1, 0), (2, -libc::EINVAL)]);
+        completed.sort_unstable();
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0], (7, -libc::ECANCELED));
+        // A cancel reports success as a nonnegative count.
+        assert_eq!(completed[1].0, 8);
+        assert!(completed[1].1 >= 0, "{}", completed[1].1);
+    }
 
-        // The next enter submits the rest, then times out waiting for more
-        // completions than will come, and reports the submission.
-        let timeout = Timespec::from(Duration::from_millis(1));
-        let submitted = ring.enter(3, EnterFlags::GETEVENTS, Some(&timeout));
-        assert_eq!(submitted.unwrap(), 2);
-        assert!(ring.submission().is_empty());
+    /// An enter that fails before submitting keeps every staged SQE, and the
+    /// next enter submits each once.
+    #[test]
+    fn test_ring_keeps_staged_entries_when_enter_fails() {
+        let mut ring = Ring::new(4).unwrap();
+        ring.register().unwrap();
+        // SAFETY: NOPs refer to no resources.
+        unsafe {
+            let mut sq = ring.submission();
+            sq.push(&nop(1));
+            sq.push(&nop(2));
+        }
+
+        // A slot released behind the ring fails the enter before submission.
+        release_slot(&ring);
+        let error = ring.enter(0, EnterFlags::empty(), None).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+        assert_eq!(ring.submission().len(), 2);
+        assert!(ring.completion().is_empty());
+
+        // The raw descriptor submits both.
+        ring.unregister().unwrap();
+        assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), 2);
         let completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
-        assert_eq!(completed, [3, 4]);
+        assert_eq!(completed, [1, 2]);
     }
 
     /// A timed wait on an empty ring times out after its timeout.

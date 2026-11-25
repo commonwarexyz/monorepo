@@ -69,7 +69,7 @@
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.
-//! It targets Linux kernel 7.0 or newer. See [crate::iouring] for details.
+//! It requires Linux kernel 7.0 or newer. See [crate::iouring] for details.
 
 use super::{
     Generation, Layout, Pending, Sender, Tracker, create_header,

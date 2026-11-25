@@ -464,7 +464,7 @@ impl Driver {
             }
         }
 
-        // The ring asks the kernel to submit exactly the published SQEs. The
+        // The ring asks the kernel to submit exactly the staged SQEs. The
         // kernel skips GETEVENTS if it submits fewer, so a later service or
         // retry must still run the task work.
         let mut flags = EnterFlags::empty();
@@ -501,8 +501,8 @@ impl Driver {
             }
         }
 
-        // The ring advances its SQ head by the count the kernel consumed
-        // before any error is normalized here.
+        // The ring drops the SQEs the kernel consumed from its queue before
+        // any error is normalized here.
         if let Err(err) = ring.enter(min_complete, flags, timespec.as_ref()) {
             match err.raw_os_error() {
                 // A transient error falls through and returns `Ok`, so the
