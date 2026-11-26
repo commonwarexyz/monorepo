@@ -2274,7 +2274,8 @@ mod tests {
                 .unwrap();
                 let mut replayed = log.replayed.lock().clone();
                 if tasks == 1 {
-                    assert_eq!(replayed, [floor..end]);
+                    assert_eq!(replayed.len(), 1);
+                    assert_eq!(replayed[0], floor..end);
                     continue;
                 }
                 replayed.sort_unstable_by_key(|range| range.start);
