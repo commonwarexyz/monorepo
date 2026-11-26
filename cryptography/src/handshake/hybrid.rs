@@ -3,12 +3,12 @@
 //! [Hybrid] composes two [Kem]s conjunctively: encapsulation runs both
 //! mechanisms and the shared secret is `SHA-256(DOMAIN || len(a) || a || len(b) || b)`
 //! over the component secrets. Recovering the shared secret requires defeating
-//! **both** component KEMs — if either holds, the combined secret holds.
+//! **both** component KEMs -- if either holds, the combined secret holds.
 //!
 //! The canonical instantiation, [X25519MlKem768], pairs classical X25519 with
 //! post-quantum ML-KEM-768 so that a handshake stays secure if elliptic-curve
 //! Diffie-Hellman falls to a future (quantum or classical) break AND if the
-//! lattice KEM is found flawed — `max(A, B)` security, not `min`.
+//! lattice KEM is found flawed -- `max(A, B)` security, not `min`.
 
 use crate::{handshake::sake::X25519, ml_kem::MlKem768, sha256::Sha256, Hasher, Kem, Secret};
 use bytes::BufMut;
