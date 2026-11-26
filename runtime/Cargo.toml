@@ -44,7 +44,6 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 crossbeam-utils.workspace = true
-io-uring.workspace = true
 once_cell = { workspace = true, features = ["std"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]

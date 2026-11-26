@@ -19,10 +19,10 @@ use super::{
     request::{Request, RequestOutput},
     runtime::Deferred,
     slab::{Id, Slab},
+    sys::SqueueEntry,
 };
 use crate::Error;
 use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
-use io_uring::squeue::Entry as SqueueEntry;
 use std::{mem, task::Waker, time::Instant};
 
 /// Kernel completion identity packed into an SQE's `user_data` field.
