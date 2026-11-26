@@ -895,18 +895,17 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         }
 
         // Pin the new tip's peaks alongside peaks from earlier published states. Batches retain
-        // the appended nodes needed to prove intermediate states.
+        // the appended nodes needed to prove intermediate states. A tip has at most
+        // `MAX_PINNED_NODES` peaks.
         let leaves = Location::try_from(end)?;
-        let peaks = F::nodes_to_pin(leaves)
-            .filter(|&pos| pos >= initial)
-            .map(|pos| {
-                batch
-                    .get_node(pos)
-                    .map(|digest| (pos, digest))
-                    .ok_or(merkle::Error::MissingNode(pos))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Arc::make_mut(&mut self.mem).skip_to(leaves, peaks)?;
+        let mut peaks = [(Position::<F>::default(), D::EMPTY); merkle::MAX_PINNED_NODES];
+        let mut count = 0;
+        for pos in F::nodes_to_pin(leaves).filter(|&pos| pos >= initial) {
+            let digest = batch.get_node(pos).ok_or(merkle::Error::MissingNode(pos))?;
+            peaks[count] = (pos, digest);
+            count += 1;
+        }
+        Arc::make_mut(&mut self.mem).skip_to(leaves, peaks[..count].iter().copied())?;
         self.update_metrics();
         Ok(self)
     }

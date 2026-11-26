@@ -1824,17 +1824,18 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok(())
     }
 
-    /// Resolve a blob-sharing group of positions to its blob number and per-position byte
-    /// offsets within the blob.
-    fn locate_group(&self, group: &[u64]) -> Result<(u64, Vec<u64>), Error> {
+    /// Resolve a blob-sharing group of positions to its blob number, replacing the contents of
+    /// `offsets` with each position's byte offset within the blob.
+    fn locate_group(&self, group: &[u64], offsets: &mut Vec<u64>) -> Result<u64, Error> {
         let items_per_blob = self.items_per_blob.get();
         let blob = super::position_to_blob(group[0], items_per_blob);
         let first_position = first_in_blob(self.bounds.start, blob, items_per_blob)?;
-        let mut offsets = Vec::with_capacity(group.len());
+        offsets.clear();
+        offsets.reserve(group.len());
         for &pos in group {
             offsets.push(Inner::<E, A>::items_to_bytes(pos - first_position)?);
         }
-        Ok((blob, offsets))
+        Ok(blob)
     }
 
     /// Shared body of [`super::Contiguous::read_many`] and the variable journal's offsets
@@ -1869,7 +1870,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             super::position_to_blob(*a, items_per_blob)
                 == super::position_to_blob(*b, items_per_blob)
         }) {
-            let (blob_num, blob_offsets) = self.locate_group(group)?;
+            let mut blob_offsets = Vec::new();
+            let blob_num = self.locate_group(group, &mut blob_offsets)?;
             let blob = self
                 .blobs
                 .get(blob_num)
@@ -1956,6 +1958,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             scratch.resize(need, 0);
         }
         let buf = &mut scratch[..need];
+        let mut blob_offsets = Vec::new();
         let mut hits = 0u64;
         let mut group_base = start;
         for group in valid.chunk_by(|a, b| {
@@ -1964,7 +1967,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         }) {
             let base = group_base;
             group_base += group.len();
-            let Ok((blob_num, blob_offsets)) = self.locate_group(group) else {
+            let Ok(blob_num) = self.locate_group(group, &mut blob_offsets) else {
                 continue;
             };
             let Some(blob) = self.blobs.get(blob_num) else {

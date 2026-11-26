@@ -1035,6 +1035,11 @@ impl<const N: usize> BitmapBatch<N> {
             kept.push(Arc::clone(&layer.overlay));
             current = &layer.parent;
         }
+
+        // With no applied layer to drop, the chain is returned as it is.
+        if matches!(current, Self::Base(_)) {
+            return self.clone();
+        }
         let mut result = Self::Base(Arc::clone(shared));
         for overlay in kept.into_iter().rev() {
             result = Self::Layer(Arc::new(BitmapBatchLayer {

@@ -361,8 +361,10 @@ where
         let db = chain::merkleizable(db, db.commitment(), boundary, ancestors.iter().copied())?;
         let start_floor = self.floor(&*db);
 
-        // The Commit follows the appends.
+        // The Commit follows the appends. Reserving its slot exactly keeps a full vector from
+        // doubling for one operation.
         let mut ops = self.appends;
+        ops.reserve_exact(1);
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = self.base.size + ops.len() as u64;

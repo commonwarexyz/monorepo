@@ -1607,10 +1607,14 @@ where
         let db = self.batch.compatible(db)?;
 
         // Retain the keys first and resolve the reads against them, so each key is borrowed once.
+        // Their resolutions are recorded in the slots the keys take.
         self.keys
             .extend(keys.iter().map(|key| key.borrow().clone()));
-        let (values, mut resolutions) = self.batch.stage_reads(&self.keys[start..], db).await?;
-        self.resolutions.append(&mut resolutions);
+        self.resolutions.resize_with(end, || None);
+        let values = self
+            .batch
+            .stage_reads(&self.keys[start..], &mut self.resolutions[start..], db)
+            .await?;
         Ok((self, start..end, values))
     }
 
@@ -2258,7 +2262,9 @@ where
         // Clone the keys first and resolve the reads against the clones the staged batch keeps, so
         // each key is borrowed once.
         let keys: Vec<U::Key> = keys.iter().map(|key| key.borrow().clone()).collect();
-        let (results, resolutions) = self.stage_reads(&keys, db).await?;
+        let mut resolutions: Vec<StagedResolution<F, U>> =
+            iter::repeat_with(|| None).take(keys.len()).collect();
+        let results = self.stage_reads(&keys, &mut resolutions, db).await?;
         Ok((
             Staged {
                 batch: self,
@@ -2269,22 +2275,20 @@ where
         ))
     }
 
-    /// Read keys through this batch and return the values plus one resolution per staged slot.
-    /// Slots resolved in the database or an ancestor's diff carry the location and cached payload
-    /// they resolved to.
+    /// Read keys through this batch and return their values, recording one resolution per key in
+    /// `resolutions`, which holds an empty slot for each. Slots resolved in the database or an
+    /// ancestor's diff carry the location and cached payload they resolved to.
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[U::Key],
+        resolutions: &mut [StagedResolution<F, U>],
         db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
-    ) -> Result<(Vec<Option<U::Value>>, Vec<StagedResolution<F, U>>), crate::qmdb::Error<F>>
+    ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let mut resolutions: Vec<StagedResolution<F, U>> =
-            iter::repeat_with(|| None).take(keys.len()).collect();
-
         // Record ancestor-diff resolutions so the staged write reuses the resolved location at
         // merkleize. A write that falls back to a normal mutation pays for location gathering, a
         // journal re-read, and per-key re-resolution through the ancestors, and that cost grows
@@ -2325,7 +2329,7 @@ where
             },
         )
         .await?;
-        Ok((results, resolutions))
+        Ok(results)
     }
 }
 
@@ -2621,12 +2625,14 @@ where
 
         // Classify mutations into deleted, created, updated, collecting the successor and
         // predecessor candidates the link rewrites consult once they are sorted below. Each read
-        // location and staged record contributes at most one update and one successor candidate.
-        let existing = locations.len() + staged_updates.len();
+        // location and staged record contributes at most one successor candidate. A staged record
+        // also yields at most one update, while a read location may hold a collision sibling.
         let mut neighbors: Neighbors<K, (Cow<'_, V::Value>, Location<F>)> = Neighbors::new();
-        neighbors.next.reserve(existing);
+        neighbors
+            .next
+            .reserve(locations.len() + staged_updates.len());
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
-        let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::with_capacity(existing);
+        let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::with_capacity(staged_updates.len());
         for (update, old_loc) in m.read_live(&locations, &db.log).await? {
             let update::Ordered {
                 key,

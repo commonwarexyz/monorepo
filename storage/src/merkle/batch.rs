@@ -102,7 +102,8 @@
 //! ```
 
 use crate::merkle::{
-    Error, Family, Location, Position, Readable, hasher::Hasher, mem::Mem, proof::Proof,
+    Error, Family, Location, MAX_PINNED_NODES, Position, Readable, hasher::Hasher, mem::Mem,
+    proof::Proof,
 };
 use ahash::RandomState;
 use alloc::{
@@ -118,6 +119,18 @@ use core::{iter::Peekable, num::NonZeroUsize, ops::Range};
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
+
+/// Collect peak digests into a shared slice. A structure has at most [`MAX_PINNED_NODES`] peaks,
+/// so they are gathered on the stack and the slice is the only allocation.
+fn shared_peaks<D: Digest>(peaks: impl Iterator<Item = D>) -> Arc<[D]> {
+    let mut digests = [D::EMPTY; MAX_PINNED_NODES];
+    let mut count = 0;
+    for digest in peaks {
+        digests[count] = digest;
+        count += 1;
+    }
+    Arc::from(&digests[..count])
+}
 
 /// Push a node position into the list for its height, growing the outer Vec as needed.
 fn push_node<F: Family>(levels: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
@@ -635,12 +648,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let tip_peaks: Arc<[D]> = if self.appended.is_empty() && self.overwrites.is_empty() {
             Arc::clone(&self.parent.data.tip_peaks)
         } else {
-            F::peaks(self.size())
-                .map(|(pos, _)| {
-                    self.get_node(base, pos)
-                        .expect("peak must be in the batch chain or base")
-                })
-                .collect()
+            shared_peaks(F::peaks(self.size()).map(|(pos, _)| {
+                self.get_node(base, pos)
+                    .expect("peak must be in the batch chain or base")
+            }))
         };
 
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
@@ -709,7 +720,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         height: u32,
         digests: &mut Vec<D>,
     ) {
-        digests.clear();
+        // The workers overwrite every slot, so digests left by the previous level need no clearing.
         digests.resize(positions.len(), D::EMPTY);
         let pairs = positions.len().div_ceil(2);
         self.parent
@@ -826,7 +837,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// Create a root batch representing the committed state of `mem`, using `strategy`
     /// for merkleization.
     pub fn from_mem_with_strategy(mem: &Mem<F, D>, strategy: S) -> Arc<Self> {
-        let peaks: Arc<[D]> = mem.peaks().collect();
+        let peaks = shared_peaks(mem.peaks());
         Arc::new(Self {
             parent: None,
             data: Arc::new(BatchData {

@@ -1418,8 +1418,9 @@ commonware_macros::stability_scope!(BETA {
             iter.into_iter().try_fold(identity(), fold_op)
         }
 
-        // The maps below size their output from the iterator's size hint. The provided methods
-        // fold into an empty `Vec`, which regrows as it fills.
+        // The infallible maps below size their output from the iterator's size hint. The provided
+        // methods fold into an empty `Vec`, which regrows as it fills. The fallible map keeps the
+        // provided method, so an early error reserves nothing for the items after it.
 
         fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
         where
@@ -1428,21 +1429,6 @@ commonware_macros::stability_scope!(BETA {
             T: Send,
         {
             iter.into_iter().map(map_op).collect()
-        }
-
-        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
-            T: Send,
-            E: Send,
-        {
-            let iter = iter.into_iter();
-            let mut mapped = Vec::with_capacity(iter.size_hint().0);
-            for item in iter {
-                mapped.push(map_op(item)?);
-            }
-            Ok(mapped)
         }
 
         fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
@@ -5395,11 +5381,6 @@ mod test {
         // An output sized from the input's length has no spare capacity, where one grown from
         // empty to 100 elements would.
         let mapped = Sequential.map_collect_vec(0..100usize, |i| i);
-        assert_eq!(mapped.capacity(), mapped.len());
-
-        let mapped: Vec<usize> = Sequential
-            .try_map_collect_vec(0..100usize, Ok::<_, ()>)
-            .unwrap();
         assert_eq!(mapped.capacity(), mapped.len());
 
         let mapped = Sequential.map_init_collect_vec(0..100usize, || (), |_, i| i);
