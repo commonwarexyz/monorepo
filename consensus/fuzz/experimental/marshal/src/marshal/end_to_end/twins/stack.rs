@@ -67,6 +67,10 @@ const CERTIFICATION_TIMEOUT_MILLIS: u64 = 2_000;
 const ATTACK_TIMING_MARGIN_MILLIS: u64 = 250;
 const LEADER_TIMEOUT: Duration = Duration::from_millis(LEADER_TIMEOUT_MILLIS);
 const CERTIFICATION_TIMEOUT: Duration = Duration::from_millis(CERTIFICATION_TIMEOUT_MILLIS);
+/// How long a simplex engine of this stack waits for a fetch answer.
+pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a simplex engine of this stack waits before it retries a fetch.
+pub(crate) const FETCH_RETRY_DELAY: Duration = Duration::from_millis(100);
 // The slow validator must time out in the precursor view, then finish early
 // enough to vote for the good header in the attack view.
 pub(crate) const ATTACK_SLOW_VERIFY_DELAY: Duration =
@@ -829,8 +833,8 @@ where
             leader_timeout: LEADER_TIMEOUT,
             certification_timeout: CERTIFICATION_TIMEOUT,
             timeout_retry: Duration::from_secs(10),
-            fetch_timeout: NZDuration!(Duration::from_secs(1)),
-            fetch_retry_delay: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(FETCH_TIMEOUT),
+            fetch_retry_delay: FETCH_RETRY_DELAY,
             view_retention: Delta::new(10),
             skip: SkipPolicy::Enabled {
                 timeout: Duration::from_secs(11),

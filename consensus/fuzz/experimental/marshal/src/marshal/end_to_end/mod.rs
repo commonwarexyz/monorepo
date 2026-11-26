@@ -42,6 +42,7 @@ pub mod coding_stack;
 mod golden;
 mod input;
 pub(crate) mod invariants;
+pub mod poison_tape;
 mod runner;
 mod scenario;
 mod trusted;

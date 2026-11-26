@@ -61,6 +61,7 @@ use super::{
     },
     input::{MAX_ANCESTRY_DEPTH, MAX_TWINS_ROUNDS, MarshalDisrupterInput},
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant, Liveness},
+    poison_tape,
     trusted::{self, CodingActor, CodingReads, StandardActor, StandardReads},
     twins::{
         B, Ctx, ObservedMarshal, PublicKeyOf, SchemeOf,
@@ -71,8 +72,10 @@ use super::{
         },
     },
 };
+use commonware_actor::{Feedback, Unreliable};
+use commonware_codec::DecodeExt as _;
 use commonware_consensus::{
-    Block, CertifiableBlock as _, Handoff,
+    Block, CertifiableBlock as _, Handoff, Reporter, Viewable as _,
     marshal::{
         Start,
         mocks::{
@@ -85,6 +88,7 @@ use commonware_consensus::{
         Floor,
         elector::{Config as ElectorConfig, Elector, Mode as _},
         scheme::Scheme as SimplexScheme,
+        types::Activity,
     },
     types::{Epoch, Height, Participant, Round, TermLength, View, ViewDelta},
 };
@@ -93,7 +97,7 @@ use commonware_consensus_fuzz_core::{
     continuation::{
         Channel, Hook, gate, tap_automaton, tap_blocker, tap_elector, tap_finalized, tap_reporter,
     },
-    network::{CertificatePoison, CertificatePoisonReceiver},
+    network::{ActivityKind, CertificatePoison, CertificatePoisonReceiver},
     simplex::Simplex,
     start_disrupter_with_epoch,
     utils::{Partition, SetPartition, apply_partition},
@@ -103,15 +107,18 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, Scheme as _},
     sha256::Digest as Sha256Digest,
 };
-use commonware_p2p::simulated::Link;
-use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, NZUsize, SystemTimeExt as _, probability, sync::Mutex};
+use commonware_p2p::{CheckedSender, LimitedSender, Recipients, simulated::Link};
+use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
+use commonware_runtime::{Clock, IoBufs, Runner, Supervisor as _, deterministic};
+use commonware_utils::{
+    FuzzRng, NZUsize, SystemTimeExt as _, probability, sequence::U64, sync::Mutex,
+};
 use rand::RngExt as _;
 use std::{
     fmt::{self, Write as _},
     num::NonZeroUsize,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 /// Marshal backlog for the disrupter and coding configurations.
@@ -303,6 +310,8 @@ async fn run_liveness_phases<BL, KEY>(
             };
             watch_targets.push((idx, baseline, target));
         }
+        #[cfg(test)]
+        seams::raise_phase2_targets(&mut watch_targets);
 
         // GST heals the network topology. The byzantine `Disrupter` stays
         // active (its process faults are not gated by GST).
@@ -344,6 +353,8 @@ async fn run_liveness_phases<BL, KEY>(
             if let Some(on_stall) = on_stall {
                 on_stall(&missed, &diag);
             }
+            #[cfg(test)]
+            seams::push(seams::Event::StallPanic);
             panic!("marshal: no post-GST progress within {MARSHAL_LIVENESS_WINDOW:?};{diag}");
         }
     }
@@ -446,6 +457,11 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
     };
 
     executor.start(|mut context| async move {
+        if let Some(poison) = poison.as_ref().filter(|poison| poison.has_ledger()) {
+            poison.start_ledger(context.child("poison_ledger"));
+        }
+        let ledger = poison.clone().filter(CertificatePoison::has_ledger);
+        let _clock = LedgerClock(ledger.clone());
         // Shared fixture: the same participants/schemes drive the byzantine
         // disrupter, the honest engines, and the marshal providers.
         let (participants, schemes) = P::setup(
@@ -604,7 +620,12 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                     )
                 },
             );
-            let resolver = (resolver.0, gate(tap, resolver.1, Channel::Resolver));
+            let recorder = ledger.clone().filter(|_| idx == POISON_IDX);
+            let resolver_sender = match recorder.clone() {
+                Some(poison) => Recorded::Ledger(LedgerSender::new(resolver.0, Some(poison))),
+                None => Recorded::Plain(resolver.0),
+            };
+            let resolver = (resolver_sender, gate(tap, resolver.1, Channel::Resolver));
             let validator_ctx = context
                 .child("validator")
                 .with_attribute("public_key", validator);
@@ -659,6 +680,11 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
             };
 
             let automaton = tap_automaton(tap, observed, &validator_ctx);
+            let reporter = tap_reporter(tap, builder.clone());
+            let reporter = match recorder {
+                Some(poison) => Recorded::Ledger(LedgerReporter::new(reporter, Some(poison))),
+                None => Recorded::Plain(reporter),
+            };
             let (vote_sender, vote_receiver) = vote;
             let (certificate_sender, certificate_receiver) = certificate;
             drop(start_engine_with::<P, _, _, _, _>(
@@ -668,7 +694,7 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                 tap_elector(tap, P::elector(term_length, input.optimistic_views)),
                 automaton,
                 builder.clone(),
-                tap_reporter(tap, builder),
+                reporter,
                 Floor::Genesis(genesis_commitment),
                 format!("marshal-liveness-{idx}"),
                 input.forwarding,
@@ -710,7 +736,14 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
             .await;
         } else {
             let on_stall = |missed: &[usize], diag: &str| {
+                if let Some(ledger) = ledger.as_ref() {
+                    evaluate_retry(ledger, &context);
+                }
+                #[cfg(test)]
+                seams::push(seams::Event::OnStall(missed.to_vec()));
                 if let Some(poison) = poison.as_ref().filter(|_| missed.contains(&POISON_IDX)) {
+                    #[cfg(test)]
+                    seams::push(seams::Event::BackfillCheck);
                     invariants::check_certificate_backfill_retry(poison, diag);
                 }
             };
@@ -724,7 +757,12 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                 Some(&on_stall),
             )
             .await;
+            if let Some(ledger) = ledger.as_ref() {
+                evaluate_retry(ledger, &context);
+            }
         }
+        #[cfg(test)]
+        seams::push(seams::Event::CheckAllBlocks);
 
         invariants::check_all_blocks(
             &honest_apps,
@@ -793,6 +831,258 @@ pub(super) fn force_poison(input: &mut MarshalDisrupterInput) {
     input.optimistic_views = ViewDelta::zero();
     input.handoff = Handoff::Wait;
     input.application = ApplicationChoice::AlwaysAccept;
+}
+
+/// Releases the clock of a ledger poison when the root future ends or unwinds:
+/// the runtime asserts that no context outlives the run, and on a panic that
+/// assertion would replace the panic's own message.
+struct LedgerClock<K: commonware_cryptography::PublicKey>(Option<CertificatePoison<K>>);
+
+impl<K: commonware_cryptography::PublicKey> Drop for LedgerClock<K> {
+    fn drop(&mut self) {
+        if let Some(ledger) = self.0.as_ref() {
+            ledger.stop_ledger();
+        }
+    }
+}
+
+/// Evaluates the retry check of a ledger poison at the current simulated time.
+fn evaluate_retry<K: commonware_cryptography::PublicKey>(
+    ledger: &CertificatePoison<K>,
+    context: &deterministic::Context,
+) {
+    let at = context.current().epoch();
+    let _outcome = poison_tape::check_retry(&ledger.ledger(), at);
+    #[cfg(test)]
+    seams::push(seams::Event::RetryCheck(at, _outcome));
+}
+
+/// The resolver sender or the reporter of an honest node: the node's own one,
+/// or, for the poisoned node of a ledger run only, its ledger wrapper.
+#[derive(Clone)]
+pub(crate) enum Recorded<I, L> {
+    /// The node's own sender or reporter, used directly.
+    Plain(I),
+    /// The ledger wrapper around it.
+    Ledger(L),
+}
+
+impl<S: LimitedSender> LimitedSender for Recorded<S, LedgerSender<S>> {
+    type PublicKey = S::PublicKey;
+    type Checked<'a>
+        = Recorded<S::Checked<'a>, LedgerChecked<S::Checked<'a>>>
+    where
+        Self: 'a;
+
+    fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        match self {
+            Self::Plain(inner) => inner.check(recipients).map(Recorded::Plain),
+            Self::Ledger(inner) => inner.check(recipients).map(Recorded::Ledger),
+        }
+    }
+}
+
+impl<C: CheckedSender> CheckedSender for Recorded<C, LedgerChecked<C>> {
+    type PublicKey = C::PublicKey;
+
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        match self {
+            Self::Plain(inner) => inner.recipients(),
+            Self::Ledger(inner) => inner.recipients(),
+        }
+    }
+
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+        match self {
+            Self::Plain(inner) => inner.send(message, priority),
+            Self::Ledger(inner) => inner.send(message, priority),
+        }
+    }
+}
+
+impl<R, K> Reporter for Recorded<R, LedgerReporter<R, K>>
+where
+    R: Reporter,
+    K: commonware_cryptography::PublicKey,
+    LedgerReporter<R, K>: Reporter<Activity = R::Activity>,
+{
+    type Activity = R::Activity;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        match self {
+            Self::Plain(inner) => inner.report(activity),
+            Self::Ledger(inner) => inner.report(activity),
+        }
+    }
+}
+
+/// A resolver sender that records, in a ledger poison, the key of every
+/// request it sends to at least one recipient, and forwards every message
+/// unchanged. Without a poison it only forwards.
+#[derive(Clone)]
+pub(crate) struct LedgerSender<S: LimitedSender> {
+    inner: S,
+    poison: Option<CertificatePoison<S::PublicKey>>,
+}
+
+impl<S: LimitedSender> LedgerSender<S> {
+    pub(crate) const fn new(inner: S, poison: Option<CertificatePoison<S::PublicKey>>) -> Self {
+        Self { inner, poison }
+    }
+}
+
+impl<S: LimitedSender> LimitedSender for LedgerSender<S> {
+    type PublicKey = S::PublicKey;
+    type Checked<'a>
+        = LedgerChecked<S::Checked<'a>>
+    where
+        Self: 'a;
+
+    fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        let poison = self.poison.clone();
+        self.inner
+            .check(recipients)
+            .map(|inner| LedgerChecked { inner, poison })
+    }
+}
+
+/// The checked sender of a [LedgerSender].
+pub(crate) struct LedgerChecked<C: CheckedSender> {
+    inner: C,
+    poison: Option<CertificatePoison<C::PublicKey>>,
+}
+
+impl<C: CheckedSender> CheckedSender for LedgerChecked<C> {
+    type PublicKey = C::PublicKey;
+
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        self.inner.recipients()
+    }
+
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+        let message: IoBufs = message.into();
+        if let Some(poison) = self.poison.as_ref()
+            && !self.inner.recipients().is_empty()
+            && let Ok(ResolverMessage {
+                payload: ResolverPayload::Request(key),
+                ..
+            }) = ResolverMessage::<U64>::decode(message.clone())
+        {
+            poison.record_request(View::new(u64::from(&key)));
+        }
+        self.inner.send(message, priority)
+    }
+}
+
+/// A reporter that records, in a ledger poison, every nullification,
+/// finalization and certification the engine reports, and forwards every
+/// activity unchanged. Without a poison it only forwards.
+#[derive(Clone)]
+pub(crate) struct LedgerReporter<R, K: commonware_cryptography::PublicKey> {
+    inner: R,
+    poison: Option<CertificatePoison<K>>,
+}
+
+impl<R, K: commonware_cryptography::PublicKey> LedgerReporter<R, K> {
+    pub(crate) const fn new(inner: R, poison: Option<CertificatePoison<K>>) -> Self {
+        Self { inner, poison }
+    }
+}
+
+impl<S, D, R, K> Reporter for LedgerReporter<R, K>
+where
+    S: SimplexScheme<D>,
+    D: commonware_cryptography::Digest,
+    R: Reporter<Activity = Activity<S, D>>,
+    K: commonware_cryptography::PublicKey,
+{
+    type Activity = R::Activity;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        let settling = match &activity {
+            Activity::Nullification(nullification) => {
+                Some((ActivityKind::Nullification, nullification.view()))
+            }
+            Activity::Finalization(finalization) => {
+                Some((ActivityKind::Finalization, finalization.view()))
+            }
+            Activity::Certification(notarization) => {
+                Some((ActivityKind::Certification, notarization.view()))
+            }
+            _ => None,
+        };
+        if let (Some(poison), Some((kind, view))) = (self.poison.as_ref(), settling) {
+            poison.record_activity(kind, view);
+        }
+        self.inner.report(activity)
+    }
+}
+
+/// Test-only observation and fault seams of the standard runner. Nothing on
+/// a normal run or in a fuzz binary reads them.
+#[cfg(test)]
+#[allow(dead_code, reason = "read by tests")]
+pub(crate) mod seams {
+    use super::poison_tape::RetryCheck;
+    use std::{cell::RefCell, time::Duration};
+
+    /// A step of the end of a standard run, in the order it happened.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum Event {
+        /// The retry check ran at the given simulated time.
+        RetryCheck(Duration, RetryCheck),
+        /// The stall callback ran for the given missed nodes.
+        OnStall(Vec<usize>),
+        /// The certificate backfill check ran.
+        BackfillCheck,
+        /// The stall panic is about to be raised.
+        StallPanic,
+        /// The end-of-run block checks are about to run.
+        CheckAllBlocks,
+    }
+
+    thread_local! {
+        static RAISED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+        static TRACE: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Makes the phase-2 target of each node in `nodes` unreachable on this
+    /// thread's later runs, so phase 2 misses it. Clears the trace.
+    pub(crate) fn force_phase2_miss(nodes: Vec<usize>) {
+        RAISED.with(|raised| *raised.borrow_mut() = nodes);
+        TRACE.with(|trace| trace.borrow_mut().clear());
+    }
+
+    /// Clears the forced misses and the trace.
+    pub(crate) fn reset() {
+        force_phase2_miss(Vec::new());
+    }
+
+    /// Takes the steps recorded on this thread so far.
+    pub(crate) fn take_trace() -> Vec<Event> {
+        TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()))
+    }
+
+    pub(super) fn push(event: Event) {
+        TRACE.with(|trace| trace.borrow_mut().push(event));
+    }
+
+    pub(super) fn raise_phase2_targets(targets: &mut [(usize, u64, u64)]) {
+        RAISED.with(|raised| {
+            let raised = raised.borrow();
+            for (idx, _, target) in targets.iter_mut() {
+                if raised.contains(idx) {
+                    *target = u64::MAX;
+                }
+            }
+        });
+    }
 }
 
 /// Runs one coding disrupter case; returns the runtime's auditor state and the

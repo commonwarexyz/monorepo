@@ -32,7 +32,7 @@ use commonware_p2p::{Message, Receiver, simulated::SplitTarget};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{Clock, deterministic};
-use commonware_utils::{iter::NonEmpty, sequence::U64, sync::Mutex};
+use commonware_utils::{SystemTimeExt as _, iter::NonEmpty, sequence::U64, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
@@ -324,6 +324,9 @@ pub struct CertificatePoison<P: PublicKey> {
     requests: Arc<Mutex<BTreeMap<(P, u64), View>>>,
     retries_answered: Arc<AtomicUsize>,
     armed: Arc<AtomicBool>,
+    /// Ordered evidence of the poisoned node's reaction; only set by
+    /// [Self::with_ledger].
+    ledger: Option<Arc<Ledger>>,
 }
 
 impl<P: PublicKey> Default for CertificatePoison<P> {
@@ -333,9 +336,90 @@ impl<P: PublicKey> Default for CertificatePoison<P> {
             requests: Arc::new(Mutex::new(BTreeMap::new())),
             retries_answered: Arc::new(AtomicUsize::new(0)),
             armed: Arc::new(AtomicBool::new(true)),
+            ledger: None,
         }
     }
 }
+
+/// Settling activity of the poisoned node's engine that a [LedgerRecord]
+/// carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivityKind {
+    /// `Activity::Nullification`.
+    Nullification,
+    /// `Activity::Finalization`.
+    Finalization,
+    /// `Activity::Certification`: a notarization was certified locally.
+    Certification,
+}
+
+/// One entry of a [CertificatePoison] ledger. Every `at` is the simulated
+/// time since the Unix epoch at which the record was made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LedgerRecord {
+    /// The receiver returned the rewritten answer for `view`.
+    Poisoned { view: View, at: Duration },
+    /// The poisoned node sent a resolver request with key `view`.
+    Request { view: View, at: Duration },
+    /// The poisoned node's engine reported a settling activity at `view`.
+    Activity {
+        kind: ActivityKind,
+        view: View,
+        at: Duration,
+    },
+}
+
+/// The records of a ledger poison, in the order they were made.
+#[derive(Default)]
+struct Ledger {
+    /// The run's context; used only to read the simulated time.
+    clock: Mutex<Option<deterministic::Context>>,
+    records: Mutex<Vec<LedgerRecord>>,
+    suppressed: AtomicBool,
+}
+
+impl fmt::Debug for Ledger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ledger")
+            .field("clock", &self.clock.lock().is_some())
+            .field("records", &*self.records.lock())
+            .field("suppressed", &self.suppressed.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl Ledger {
+    /// Appends the record `make` builds from the current simulated time.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no clock was installed.
+    fn record(&self, make: impl FnOnce(Duration) -> LedgerRecord) {
+        let at = self
+            .clock
+            .lock()
+            .as_ref()
+            .map(|clock| clock.current().epoch())
+            .unwrap_or_else(|| panic!("{LEDGER_NO_CLOCK}"));
+        let record = make(at);
+        let mut records = self.records.lock();
+        if self.suppressed.load(Ordering::Relaxed) {
+            let poisoned = records
+                .iter()
+                .any(|record| matches!(record, LedgerRecord::Poisoned { .. }));
+            match record {
+                LedgerRecord::Activity { .. } => return,
+                LedgerRecord::Request { .. } if poisoned => return,
+                _ => {}
+            }
+        }
+        records.push(record);
+    }
+}
+
+/// Start of the panic text of a ledger record made before
+/// [CertificatePoison::start_ledger].
+pub const LEDGER_NO_CLOCK: &str = "poison ledger: no clock";
 
 impl<P: PublicKey> CertificatePoison<P> {
     /// An armed poison.
@@ -368,6 +452,82 @@ impl<P: PublicKey> CertificatePoison<P> {
     /// Answers to a re-fetch of the poisoned view.
     pub fn retries_answered(&self) -> usize {
         self.retries_answered.load(Ordering::Relaxed)
+    }
+
+    /// An armed poison with an empty ledger. Its records need the run's clock:
+    /// call [Self::start_ledger] before the run makes any.
+    pub fn with_ledger() -> Self {
+        Self {
+            ledger: Some(Arc::new(Ledger::default())),
+            ..Self::default()
+        }
+    }
+
+    /// Installs the clock of the ledger. The context is used only to read
+    /// the simulated time. Does nothing for a poison without a ledger.
+    pub fn start_ledger(&self, clock: deterministic::Context) {
+        if let Some(ledger) = self.ledger.as_ref() {
+            *ledger.clock.lock() = Some(clock);
+        }
+    }
+
+    /// Releases the clock of the ledger. The deterministic runtime refuses to
+    /// end while any of its contexts is alive, so a run calls this after its
+    /// last record; a record made after it panics like one made before
+    /// [Self::start_ledger]. Does nothing for a poison without a ledger.
+    pub fn stop_ledger(&self) {
+        if let Some(ledger) = self.ledger.as_ref() {
+            *ledger.clock.lock() = None;
+        }
+    }
+
+    /// Whether this poison keeps a ledger.
+    pub const fn has_ledger(&self) -> bool {
+        self.ledger.is_some()
+    }
+
+    /// A copy of the ledger's records in the order they were made; empty for
+    /// a poison without a ledger.
+    pub fn ledger(&self) -> Vec<LedgerRecord> {
+        self.ledger
+            .as_ref()
+            .map_or_else(Vec::new, |ledger| ledger.records.lock().clone())
+    }
+
+    /// Stops the ledger from storing any later settling activity and any
+    /// request made after the poisoned answer. Everything else, the rewrite
+    /// and the forwarding included, is unchanged.
+    ///
+    /// Exists only for the negative control of the retry check, which must
+    /// fail when the ledger holds no evidence; no other path may call it.
+    pub fn suppress_evidence(&self) {
+        if let Some(ledger) = self.ledger.as_ref() {
+            ledger.suppressed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Records a resolver request the poisoned node sent with key `view`. Does
+    /// nothing for a poison without a ledger.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the ledger's clock is not installed.
+    pub fn record_request(&self, view: View) {
+        if let Some(ledger) = self.ledger.as_ref() {
+            ledger.record(|at| LedgerRecord::Request { view, at });
+        }
+    }
+
+    /// Records a settling activity the poisoned node's engine reported. Does
+    /// nothing for a poison without a ledger.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the ledger's clock is not installed.
+    pub fn record_activity(&self, kind: ActivityKind, view: View) {
+        if let Some(ledger) = self.ledger.as_ref() {
+            ledger.record(|at| LedgerRecord::Activity { kind, view, at });
+        }
     }
 
     /// Records a request `responder` was asked to serve.
@@ -610,6 +770,9 @@ where
             return Ok((peer, message));
         };
         *poison.view.lock() = Some(view);
+        if let Some(ledger) = poison.ledger.as_ref() {
+            ledger.record(|at| LedgerRecord::Poisoned { view, at });
+        }
         crate::byzantine::record(POISON_ACTOR);
         Ok((peer, poisoned))
     }

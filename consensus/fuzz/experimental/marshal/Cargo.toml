@@ -146,3 +146,17 @@ path = "fuzz_targets/exp_marshal_e2e_coding_cert_mock_poison.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "exp_marshal_e2e_coding_cert_mock_poison_tape"
+path = "fuzz_targets/exp_marshal_e2e_coding_cert_mock_poison_tape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exp_marshal_e2e_standard_deferred_cert_mock_poison_tape"
+path = "fuzz_targets/exp_marshal_e2e_standard_deferred_cert_mock_poison_tape.rs"
+test = false
+doc = false
+bench = false

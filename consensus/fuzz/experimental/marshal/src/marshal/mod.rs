@@ -19,12 +19,18 @@
 //!   extends, heals the network at a rigid GST boundary, and requires every
 //!   correct node to finalize past the height it held there.
 //!   The coding poison target instead has the Byzantine node answer block
-//!   backfill requests with coded blocks that decode but mismatch.
+//!   backfill requests with coded blocks that decode but mismatch; its tape
+//!   variant runs the same cluster with the runtime tape decoded first. The
+//!   standard certificate poison target also has a tape variant, which checks
+//!   in every run that the poisoned node retries or settles the poisoned view
+//!   within a bound.
 //!   Targets: `exp_marshal_e2e_standard_deferred_cert_mock_disrupter`,
 //!   `exp_marshal_e2e_standard_deferred_cert_mock_poison`,
+//!   `exp_marshal_e2e_standard_deferred_cert_mock_poison_tape`,
 //!   `exp_marshal_e2e_standard_deferred_cert_mock_scenarios`,
 //!   `exp_marshal_e2e_coding_cert_mock_disrupter`,
 //!   `exp_marshal_e2e_coding_cert_mock_poison`,
+//!   `exp_marshal_e2e_coding_cert_mock_poison_tape`,
 //!   `exp_marshal_e2e_standard_app_cert_mock_twins`,
 //!   `exp_marshal_e2e_coding_app_cert_mock_twins`,
 //!   `exp_marshal_e2e_standard_deferred_cert_mock_twins_split_header`,
@@ -60,6 +66,6 @@ pub use end_to_end::{
     fuzz_marshal_standard_inline_cert_mock_twins_split_header,
     fuzz_marshal_standard_inline_cert_mock_twins_split_header_with_prefix,
     fuzz_marshal_standard_scenarios, fuzz_marshal_standard_twins,
-    fuzz_marshal_standard_twins_with_prefix,
+    fuzz_marshal_standard_twins_with_prefix, poison_tape,
 };
 pub use store::{MarshalActorStoreInput, fuzz_marshal_actor_store};
