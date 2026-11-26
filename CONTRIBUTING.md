@@ -18,29 +18,11 @@ The Commonware Library provides robust, high-performance primitives and contribu
 > [Just's installation guide](https://github.com/casey/just?tab=readme-ov-file#installation), or run
 > `cargo install just` on any platform.
 
-This repository uses the default cargo and clippy formatting rules for `.rs` files, treating warnings as errors. To check linting, run:
+This repository uses the default cargo and clippy formatting rules for `.rs` files, treating warnings as errors. The [agent guidance](AGENTS.md) records the always-applicable repository constraints. Its [tests and validation](AGENTS.md#tests-and-validation) section lists the `just` commands for testing, linting and formatting, and which checks each kind of change needs.
 
-```bash
-$ just lint
-```
-
-To fix formatting automatically, run:
-
-```bash
-$ just fix-fmt
-```
-
-Before making a PR, to run all lints and tests, run:
-
-```bash
-$ just pre-pr
-```
-
-Lint recipes use the pinned rustup toolchains. Clippy, rustfmt, required nightly tools, and Dylint read their pins from [`.github/toolchains.toml`](.github/toolchains.toml). The Dylint `rust-toolchain` file is a symlink to this shared configuration so rustup discovers its compiler automatically. Set `NIGHTLY_VERSION` to override the tooling nightly, or to an empty value to use `cargo` from `PATH`.
+Lint recipes use the pinned rustup toolchains described in the [toolchain policy](AGENTS.md#toolchain-policy). Clippy, rustfmt, required nightly tools, and Dylint read their pins from [`.github/toolchains.toml`](.github/toolchains.toml). The Dylint `rust-toolchain` file is a symlink to this shared configuration so rustup discovers its compiler automatically. Set `NIGHTLY_VERSION` to override the tooling nightly, or to an empty value to use `cargo` from `PATH`.
 
 Without rustup (for example, Nix), set `COMMONWARE_NO_RUSTUP=1` to use tools from `PATH` without toolchain selectors or installs. `RUSTFMT` can select a standalone formatter. Match the documented pins when running checks for CI, including Dylint's compiler.
-
-Use `just test -p <crate>` for routine development and reserve workspace-wide tests for changes that need them. The root [agent guidance](AGENTS.md) records the always-applicable repository constraints.
 
 When creating a new crate, follow the `lib.rs` header conventions used across the workspace: crates that support `no_std` gate `std` behind a feature flag or `cfg(test)` (e.g. `#![cfg_attr(not(any(feature = "std", test)), no_std)]`), and every crate sets the Commonware logos:
 
@@ -51,12 +33,7 @@ When creating a new crate, follow the `lib.rs` header conventions used across th
 )]
 ```
 
-For component-specific test and conformance guidance, see:
-
-- [Deterministic runtime and recovery tests](runtime/TESTING.md)
-- [Simulated network tests](p2p/TESTING.md)
-- [Storage tests](storage/TESTING.md)
-- [Conformance tests](conformance/TESTING.md)
+For component-specific test and conformance guidance, see the [task-specific guides](AGENTS.md#task-specific-guides).
 
 ## Benchmark authoring
 
