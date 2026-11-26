@@ -105,7 +105,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, Sequential> {
             page_cache,
         },
         translator: TwoCap,
-        init_cache: Some(NZUsize!(3)),
+        init_scratch_partition: format!("{test_name}-log-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     }

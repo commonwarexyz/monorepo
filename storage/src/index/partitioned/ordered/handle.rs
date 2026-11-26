@@ -11,6 +11,9 @@ pub trait GaugeHandle: Send + Sync {
     /// Increase the gauge by one.
     fn inc(&mut self);
 
+    /// Increase the gauge by `value`.
+    fn inc_by(&mut self, value: GaugeValue);
+
     /// Decrease the gauge by one.
     fn dec(&mut self);
 
@@ -36,6 +39,10 @@ pub trait CounterHandle: Send + Sync {
 impl GaugeHandle for Gauge {
     fn inc(&mut self) {
         self.metric().inc();
+    }
+
+    fn inc_by(&mut self, value: GaugeValue) {
+        self.metric().inc_by(value);
     }
 
     fn dec(&mut self) {
@@ -68,6 +75,10 @@ impl CounterHandle for Counter {
 impl GaugeHandle for Batched<raw::Gauge> {
     fn inc(&mut self) {
         Self::inc(self);
+    }
+
+    fn inc_by(&mut self, value: GaugeValue) {
+        Self::inc_by(self, value);
     }
 
     fn dec(&mut self) {

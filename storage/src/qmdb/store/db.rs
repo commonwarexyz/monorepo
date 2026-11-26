@@ -49,9 +49,11 @@ pub struct Config<T: Translator, C, S: Strategy> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// index collisions without re-reading the log; `None` disables it.
-    pub init_cache: Option<NonZeroUsize>,
+    /// The partition init keeps temporary data in when it rebuilds the index from more operations
+    /// than it holds in memory. Init removes that data before it returns, along with any an
+    /// interrupted init left behind. The partition must not be shared with another database or
+    /// used for anything else.
+    pub init_scratch_partition: String,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -59,8 +61,8 @@ pub struct Config<T: Translator, C, S: Strategy> {
     /// The strategy used to parallelize batched reads.
     pub strategy: S,
 
-    /// Maximum number of tasks used to build a partitioned index during initialization.
-    /// Other indexes build on the calling task.
+    /// Tasks that initialization builds the index on. With 1, initialization spawns nothing and
+    /// builds on the calling task.
     pub init_concurrency: NonZeroUsize,
 }
 
@@ -374,8 +376,8 @@ where
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
     ///
-    /// All index variants take a [Spawner] context. The unpartitioned index rebuilds on the
-    /// calling task.
+    /// All index variants take a [Spawner] context. Init spawns tasks only when
+    /// `init_concurrency` is more than one.
     #[boxed]
     pub async fn init(
         context: E,
@@ -446,8 +448,8 @@ where
         let mut index = I::new(context.child("index"), cfg.translator);
 
         // Replay the log from the floor, collecting each replayed location's activity status.
-        // The log is shared so a parallel build can hand each worker its own reader, and sole
-        // ownership is recovered once the build has dropped every worker clone.
+        // The log is shared so a parallel build can hand each task its own reader, and sole
+        // ownership is recovered once the build has dropped every clone.
         let log = Arc::new(log);
         let (active_keys, activity) = index
             .build_index(
@@ -456,7 +458,7 @@ where
                 &log,
                 cfg.init_concurrency,
                 cfg.init_buffer,
-                cfg.init_cache,
+                &cfg.init_scratch_partition,
             )
             .await?;
         let log = Arc::into_inner(log).expect("index build retained a log reference");
@@ -872,7 +874,7 @@ mod test {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: "journal-scratch".into(),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
             init_concurrency: NZUsize!(1),
@@ -1165,7 +1167,7 @@ mod test {
                 page_cache: CacheRef::new(NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("scratch-{suffix}"),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
             init_concurrency: NZUsize!(1),
@@ -1785,14 +1787,18 @@ mod test {
             );
             drop(serial);
 
+            // A build on more than one task spawns tasks to replay the log and to sort its records.
+            let spawned = |metrics: String| {
+                tasks(&metrics, SPAWNED, "index_decoder") + tasks(&metrics, SPAWNED, "index_sorter")
+            };
             for concurrency in [1, 2, 3, 4, 8] {
                 let cfg = test_config_with_tasks(concurrency);
-                let before = tasks(&context.encode(), SPAWNED, "index_worker");
+                let before = spawned(context.encode());
                 let reopen = context
                     .child("partitioned")
                     .with_attribute("index", concurrency);
                 let db = PartitionedStore::init(reopen, cfg, None).await.unwrap();
-                let after = tasks(&context.encode(), SPAWNED, "index_worker");
+                let after = spawned(context.encode());
                 assert_eq!(after > before, concurrency > 1, "concurrency={concurrency}");
                 assert_eq!(db.active_keys, active_keys);
                 assert_eq!(db.inactivity_floor(), floor);
@@ -2441,7 +2447,7 @@ mod test {
                     page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 translator: TwoCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: "journal-scratch".into(),
                 init_buffer: NZUsize!(1 << 21),
                 strategy: Sequential,
                 init_concurrency: NZUsize!(1),
@@ -2497,7 +2503,7 @@ mod test {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: OneCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("{partition}-scratch"),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
             init_concurrency: NZUsize!(1),
@@ -2650,7 +2656,7 @@ mod test {
                 Config {
                     log: cfg.log,
                     translator: CountingTranslator(lookups.clone()),
-                    init_cache: cfg.init_cache,
+                    init_scratch_partition: cfg.init_scratch_partition,
                     init_buffer: cfg.init_buffer,
                     strategy: cfg.strategy,
                     init_concurrency: cfg.init_concurrency,

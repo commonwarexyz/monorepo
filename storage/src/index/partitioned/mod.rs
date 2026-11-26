@@ -26,65 +26,45 @@
 pub mod ordered;
 pub mod unordered;
 
-use crate::index::{Cursor, Unordered};
+use crate::index::Unordered;
 
 // Because the prefix length has a max of 3, we can safely use a 4-byte int for the index type
 // used by prefix conversion.
 const INDEX_INT_SIZE: usize = 4;
 
-/// An index whose build can be split across parallel workers, each owning a contiguous
-/// range of its partitions. A worker's [Self::Range] is created empty by [Self::new_range],
-/// populated through its cursor operations, and folded back into the full index by
-/// [Self::install_range].
+/// An index that can be built a contiguous range of partitions at a time, each range on its own
+/// task. A [Self::Range] is created empty by [Self::new_range], loaded with the keys of its
+/// partitions, and folded back into the full index by [Self::install_range]. An index that does
+/// not partition its keys is one partition.
 pub(crate) trait Partitioned: Unordered {
-    /// A worker's restricted view over the contiguous partition range it owns.
+    /// The contiguous partition range one build task fills.
     type Range: PartitionRange<Value = Self::Value> + Send + 'static;
 
     /// The number of partitions in the index.
     fn partition_count(&self) -> usize;
 
-    /// The partition index that holds `key`.
+    /// The partition index that holds `key`. It depends on no more than the key's first eight
+    /// bytes and never decreases as keys ascend.
     fn partition_of(key: &[u8]) -> usize;
 
     /// Create a [Self::Range] covering partitions `[offset, offset + count)`.
     fn new_range(&self, offset: usize, count: usize) -> Self::Range;
 
-    /// Move a populated `range`'s contents into self at the global slot range it was created
-    /// with, which must be empty.
+    /// Move a loaded `range`'s contents into self at the partitions it was created with, which
+    /// must be empty.
     fn install_range(&mut self, range: Self::Range);
 }
 
-/// One [Partitioned] worker's restricted view of its partition range: only the cursor
-/// operations (addressed by full key), so the globally-addressed [Unordered] methods cannot be
-/// miscalled on a worker.
+/// A contiguous range of a [Partitioned] index's partitions, which accepts only bulk loads, so
+/// the globally-addressed [Unordered] methods cannot be miscalled on it.
 pub(crate) trait PartitionRange: Sized {
     /// The value type held by the range.
     type Value: Send + Sync;
 
-    /// The cursor over one key's values (see [Unordered::Cursor]).
-    type Cursor<'a>: Cursor<Value = Self::Value>
-    where
-        Self: 'a;
-
-    /// Mutable access to `key`'s values, if the key exists (see [Unordered::get_mut]). The key's
-    /// partition must fall within this range.
-    fn get_mut(&mut self, key: &[u8]) -> Option<Self::Cursor<'_>>;
-
-    /// Mutable access to `key`'s values if the key exists, otherwise insert `value` for it and
-    /// return `None` (see [Unordered::get_mut_or_insert]). The key's partition must fall within
-    /// this range.
-    fn get_mut_or_insert(&mut self, key: &[u8], value: Self::Value) -> Option<Self::Cursor<'_>>;
-
-    /// Visit every value held across the range, in unspecified order.
-    fn for_each_value(&self, f: impl FnMut(&Self::Value));
-
-    /// Hint the header of `key`'s partition, the fixed-size slot this range holds for it, without
-    /// reading it. The key's partition must fall within this range.
-    fn prefetch_header(&self, _key: &[u8]) {}
-
-    /// Hint the memory `key`'s partition's entries live in, reading its header to find them. The
-    /// key's partition must fall within this range.
-    fn prefetch_entries(&self, _key: &[u8]) {}
+    /// Insert every entry of `entries` as [Unordered::insert] would. The entries' keys must
+    /// ascend and share one partition, which must fall within this range. Loading a partition
+    /// that holds nothing yet sizes it for exactly these entries.
+    fn load<'a>(&mut self, entries: impl ExactSizeIterator<Item = (&'a [u8], Self::Value)>);
 }
 
 /// Get the partition index for the given key, along with the prefix-stripped key for probing

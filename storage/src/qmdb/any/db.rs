@@ -586,7 +586,7 @@ where
         shared_bitmap: Option<Arc<Shared<N>>>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
+        scratch_partition: &str,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
@@ -594,8 +594,8 @@ where
         I: crate::qmdb::IndexBuild<F>,
         C: 'static,
     {
-        // Share the log so the index build can hand each parallel worker its own reader. Sole
-        // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
+        // Share the log so the index build can hand it to each of its tasks. Sole ownership
+        // is recovered (`Arc::into_inner`) once the build has dropped every task's clone.
         let log = Arc::new(log);
         let (inactivity_floor_loc, active_keys, activity) = {
             let bounds = log.bounds();
@@ -614,7 +614,7 @@ where
                     &log,
                     init_concurrency,
                     init_buffer,
-                    cache_size,
+                    scratch_partition,
                 )
                 .await?;
             (inactivity_floor_loc, active_keys, activity)

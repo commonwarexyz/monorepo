@@ -5,6 +5,7 @@
 use crate::{
     index::{
         Cursor as CursorTrait, Unordered,
+        partitioned::{PartitionRange, Partitioned},
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
     translator::Translator,
@@ -77,8 +78,8 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
 
     /// Create an empty index that shares this index's translator and metrics. It updates the
     /// metrics through detached handles and holds no registrations, so the metrics leave the
-    /// registry when this index is dropped. Parallel index-build workers use it for their
-    /// partition slots.
+    /// registry when this index is dropped. Index-build tasks fill such an index before it
+    /// is absorbed.
     pub(crate) fn empty(&self) -> Self {
         Self {
             translator: self.translator.clone(),
@@ -90,9 +91,8 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Move `other`'s contents into self, which must be empty. Moving the maps wholesale lets
-    /// [`Self::empty`] build-worker slots install without re-inserting each entry. Metrics need no
-    /// adjustment because `other` updated self's metrics directly.
+    /// Move `other`'s contents into self, which must be empty. `other` must have been made by
+    /// [`Self::empty`] on self, so that self's metrics already count its contents.
     ///
     /// # Panics
     ///
@@ -102,20 +102,72 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
             self.map.is_empty() && self.overflow.is_empty(),
             "absorb target must be empty"
         );
+
+        // `other` updated self's metrics as it was filled, so only its maps move.
         self.map = other.map;
         self.overflow = other.overflow;
     }
 
-    /// Visit every value held by the index (inline and overflow), in unspecified order.
-    pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
-        for v in self.map.values() {
-            f(v);
+    /// Insert every entry of `entries` as [Unordered::insert] would, updating the metrics once.
+    /// An empty index grows its map once for all of them, and keeps no more room than their
+    /// translated keys need.
+    pub(crate) fn load<'a>(&mut self, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
+        let empty = self.map.is_empty();
+        if empty {
+            self.map.reserve(entries.len());
         }
-        for chain in self.overflow.values() {
-            for v in chain {
-                f(v);
+        let mut keys = 0;
+        let mut items = 0;
+        for (key, v) in entries {
+            let k = self.translator.transform(key);
+            match self.map.entry(k) {
+                Entry::Occupied(mut entry) => {
+                    let old = std::mem::replace(entry.get_mut(), v);
+                    push_displaced(&mut self.overflow, k, old);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(v);
+                    keys += 1;
+                }
             }
+            items += 1;
         }
+
+        // Entries that share a translated key take one slot of the map between them, so the map
+        // gives back the room they left unused.
+        if empty {
+            self.map.shrink_to_fit();
+        }
+        self.keys.inc_by(keys);
+        self.items.inc_by(items);
+    }
+}
+
+impl<T: Translator, V: Send + Sync + 'static> Partitioned for Index<T, V> {
+    type Range = Self;
+
+    fn partition_count(&self) -> usize {
+        1
+    }
+
+    fn partition_of(_key: &[u8]) -> usize {
+        0
+    }
+
+    fn new_range(&self, _offset: usize, _count: usize) -> Self {
+        self.empty()
+    }
+
+    fn install_range(&mut self, range: Self) {
+        self.absorb(range);
+    }
+}
+
+impl<T: Translator, V: Send + Sync> PartitionRange for Index<T, V> {
+    type Value = V;
+
+    fn load<'a>(&mut self, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
+        Self::load(self, entries);
     }
 }
 
@@ -277,5 +329,89 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     #[cfg(test)]
     fn pruned(&self) -> usize {
         self.pruned.get() as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::translator::OneCap;
+    use commonware_macros::test_traced;
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+
+    /// Loading keys in order must leave the map no larger than inserting them one at a time
+    /// does, however many of them share a translated key.
+    #[test_traced]
+    fn test_load_sizes_map_for_translated_keys() {
+        deterministic::Runner::default().start(|context| async move {
+            // Ascending keys that all share one translated key, and that share one in runs.
+            for (case, stride) in [("shared", 1u64), ("runs", 1 << 50)] {
+                let context = context.child("case").with_attribute("keys", case);
+                let keys: Vec<_> = (0..8192).map(|i| (i * stride).to_be_bytes()).collect();
+                let mut loaded = Index::new(context.child("loaded"), OneCap);
+                let mut inserted = Index::new(context.child("inserted"), OneCap);
+                loaded.load(keys.iter().enumerate().map(|(i, key)| (key.as_slice(), i)));
+                for (i, key) in keys.iter().enumerate() {
+                    inserted.insert(key, i);
+                }
+                assert_eq!(loaded.items(), 8192);
+                assert_eq!(loaded.map.len(), inserted.map.len());
+                assert!(loaded.map.capacity() <= inserted.map.capacity());
+            }
+        });
+    }
+
+    /// Loading must leave the index as inserting the same entries one at a time would, whether
+    /// the index is empty or not, whether or not keys share a translated key, and whatever
+    /// order the entries are in.
+    #[test_traced]
+    fn test_load_matches_inserts() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut loaded = Index::new(context.child("loaded"), OneCap);
+            let mut inserted = Index::new(context.child("inserted"), OneCap);
+            let loads: [&[(&[u8], u64)]; 4] = [
+                &[(&[0x01], 1), (&[0x01, 0xAA], 2), (&[0x02], 3), (&[0x04], 4)],
+                &[],
+                &[(&[0x03], 5), (&[0x01, 0xBB], 6), (&[0x00], 7)],
+                &[(&[0x05], 8)],
+            ];
+            for entries in loads {
+                loaded.load(entries.iter().copied());
+                for &(key, value) in entries {
+                    inserted.insert(key, value);
+                }
+            }
+            assert_eq!(loaded.keys(), inserted.keys());
+            assert_eq!(loaded.items(), inserted.items());
+            for &(key, _) in loads.iter().copied().flatten() {
+                assert_eq!(
+                    loaded.get(key).collect::<Vec<_>>(),
+                    inserted.get(key).collect::<Vec<_>>()
+                );
+            }
+
+            // An empty index loaded out of order takes the same path as one that holds entries.
+            let mut loaded = Index::new(context.child("loaded_unordered"), OneCap);
+            let mut inserted = Index::new(context.child("inserted_unordered"), OneCap);
+            let entries: [(&[u8], u64); 5] = [
+                (&[0x03], 1),
+                (&[0x01], 2),
+                (&[0x03, 0xAA], 3),
+                (&[0x02], 4),
+                (&[0x01, 0xBB], 5),
+            ];
+            loaded.load(entries.into_iter());
+            for (key, value) in entries {
+                inserted.insert(key, value);
+            }
+            assert_eq!(loaded.keys(), inserted.keys());
+            assert_eq!(loaded.items(), inserted.items());
+            for (key, _) in entries {
+                assert_eq!(
+                    loaded.get(key).collect::<Vec<_>>(),
+                    inserted.get(key).collect::<Vec<_>>()
+                );
+            }
+        });
     }
 }

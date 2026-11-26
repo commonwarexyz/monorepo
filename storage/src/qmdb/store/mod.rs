@@ -36,10 +36,10 @@
 //!             page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
-//!         init_cache: Some(NZUsize!(1 << 16)),
+//!         init_scratch_partition: "test-partition-scratch".into(),
 //!         init_buffer: NZUsize!(1 << 21),
 //!         strategy: Sequential,
-//!         init_concurrency: NZUsize!(1),
+//!         init_concurrency: NZUsize!(8),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap, _>::init(ctx.child("store"), config, None)
@@ -98,8 +98,9 @@ pub mod unpartitioned {
     pub type Batch<'a, E, K, V, T, S> = super::Batch<'a, E, K, V, Index<T, Location>, S>;
 }
 
-/// Partitioned index variants that divide the key space into `2^(P*8)` partitions and can build
-/// the index in parallel at startup. With `init_concurrency = 1`, the calling task rebuilds it.
+/// Partitioned index variants that divide the key space into `2^(P*8)` partitions, which startup
+/// fills on up to `init_concurrency` tasks. With `init_concurrency = 1`, the calling task rebuilds
+/// the index.
 ///
 /// Partition metrics use the `index` attribute for the partition number. Use a separate attribute,
 /// such as `store`, to distinguish stores that share a metrics prefix.

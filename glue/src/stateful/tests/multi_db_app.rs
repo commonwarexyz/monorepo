@@ -105,7 +105,7 @@ pub(super) fn qmdb_config(
             replay_buffer: IO_BUFFER_SIZE,
         },
         translator: TwoCap,
-        init_cache: Some(NZUsize!(1024)),
+        init_scratch_partition: format!("{prefix}-qmdb-a-log-journal-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     };

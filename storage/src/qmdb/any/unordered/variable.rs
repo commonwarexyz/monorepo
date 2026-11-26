@@ -124,7 +124,7 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("scratch-{seed}"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: NZUsize!(2),
         }

@@ -122,7 +122,7 @@ fn make_config(suffix: &str, params: ConfigParams) -> Config<TwoCap, ((), ()), S
         },
         grafted_metadata_partition: format!("crash-grafted-merkle-metadata-{suffix}"),
         translator: TwoCap,
-        init_cache: Some(NZUsize!(3)),
+        init_scratch_partition: format!("crash-scratch-{suffix}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     }

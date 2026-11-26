@@ -1482,7 +1482,7 @@ mod test {
                 merkle: config.merkle,
                 grafted_metadata_partition: config.grafted_metadata_partition,
                 translator: config.translator,
-                init_cache: config.init_cache,
+                init_scratch_partition: config.init_scratch_partition,
                 init_buffer: config.init_buffer,
                 init_concurrency: config.init_concurrency,
             };
@@ -1851,7 +1851,7 @@ mod test {
                 },
                 merkle: base.merkle,
                 translator: base.translator,
-                init_cache: base.init_cache,
+                init_scratch_partition: base.init_scratch_partition,
                 init_buffer: base.init_buffer,
                 init_concurrency: base.init_concurrency,
             };

@@ -121,7 +121,6 @@ use thiserror::Error;
 
 pub mod any;
 pub(crate) mod bitmap;
-mod cache;
 pub mod chain;
 pub mod compact;
 #[cfg(test)]

@@ -60,7 +60,6 @@ pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
 pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 pub const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
-pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 
 pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
 pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
@@ -183,7 +182,7 @@ pub fn any_fix_cfg_full(
         merkle: merkle_cfg(PARTITION_FIX, ctx),
         log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
-        init_cache: INIT_CACHE_SIZE,
+        init_scratch_partition: format!("scratch-{PARTITION_FIX}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency,
     }
@@ -217,7 +216,7 @@ pub fn cur_fix_cfg_with(
         log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
-        init_cache: INIT_CACHE_SIZE,
+        init_scratch_partition: format!("scratch-{PARTITION_FIX}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: THREADS,
     }
@@ -236,7 +235,7 @@ pub fn any_var_digest_cfg_with(
         merkle: merkle_cfg(PARTITION_VAR, ctx),
         log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
-        init_cache: INIT_CACHE_SIZE,
+        init_scratch_partition: format!("scratch-{PARTITION_VAR}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: THREADS,
     }
@@ -258,7 +257,7 @@ pub fn cur_var_digest_cfg_with(
         log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
-        init_cache: INIT_CACHE_SIZE,
+        init_scratch_partition: format!("scratch-{PARTITION_VAR}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: THREADS,
     }
@@ -285,7 +284,7 @@ pub fn any_var_vec_cfg_with(
             items_per_blob,
         ),
         translator: EightCap,
-        init_cache: INIT_CACHE_SIZE,
+        init_scratch_partition: format!("scratch-{PARTITION_VAR}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: THREADS,
     }
@@ -312,7 +311,7 @@ pub fn cur_var_vec_cfg_with(
         ),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
-        init_cache: INIT_CACHE_SIZE,
+        init_scratch_partition: format!("scratch-{PARTITION_VAR}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: THREADS,
     }
@@ -341,8 +340,8 @@ pub fn keyless_cfg_with(
     }
 }
 
-/// Unauthenticated store config for variable-size values, using the shared page cache, journal
-/// layout, and init cache.
+/// Unauthenticated store config for variable-size values, using the shared page cache and
+/// journal layout.
 pub fn store_cfg(ctx: &impl Strategizer) -> StoreConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     StoreConfig {
@@ -353,7 +352,7 @@ pub fn store_cfg(ctx: &impl Strategizer) -> StoreConfig<EightCap, VarVecCfg, Ray
             ITEMS_PER_BLOB,
         ),
         translator: EightCap,
-        init_cache: INIT_CACHE_SIZE,
+        init_scratch_partition: format!("scratch-{PARTITION_STORE}"),
         init_buffer: NZUsize!(1 << 21),
         strategy: ctx.strategy(THREADS),
         init_concurrency: NZUsize!(1),
@@ -410,13 +409,12 @@ macro_rules! define_db_variants {
 
         #[allow(unused_macros)]
         macro_rules! $timed_dispatch_name {
-            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, $cache_size:expr) => {
+            ($ctx_expr:expr, $variant_expr:expr, $iters:expr) => {
                 match $variant_expr {
                     $(
                         $enum_name::$entry => {
                             let ctx = $ctx_expr;
-                            let mut cfg = $cfg(&ctx);
-                            cfg.init_cache = $cache_size;
+                            let cfg = $cfg(&ctx);
                             let start = std::time::Instant::now();
                             for _ in 0..$iters {
                                 <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();

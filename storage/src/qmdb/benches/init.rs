@@ -20,7 +20,6 @@ use commonware_storage::{
     qmdb::any::traits::DbAny,
 };
 use commonware_utils::{NZUsize, TestRng};
-use core::num::NonZeroUsize;
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
 use std::time::{Duration, Instant};
@@ -28,10 +27,6 @@ use std::time::{Duration, Instant};
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
 const COMMIT_FREQUENCY: u32 = 10_000;
-
-/// Init-time `(location -> key)` cache sizes to compare: `None` disables the cache (the no-cache
-/// baseline), and a reasonably sized cache that covers the bench's working set.
-const CACHE_SIZES: [Option<NonZeroUsize>; 2] = [None, Some(NZUsize!(1 << 18))];
 
 /// Whether setup prunes to the inactivity floor before the timed reopen. Unpruned cases add
 /// `prune=none` to the bench name.
@@ -120,47 +115,43 @@ fn bench_fixed_value_init(c: &mut Criterion) {
             .into_iter()
             .flat_map(|prune| FIXED_VARIANTS.iter().map(move |variant| (prune, variant)))
         {
-            // Populated lazily on the first sample of the first matched cache size, then reused by
-            // every cache size for this variant (all read the same on-disk database).
+            // Populated lazily on the first matched sample.
             let mut initialized = false;
-            for &cache_size in &CACHE_SIZES {
-                let cache = cache_size.map_or(0, NonZeroUsize::get);
-                let runner = tokio::Runner::new(cfg.clone());
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} cache={cache} elements={elements}{}",
-                        module_path!(),
-                        variant.name(),
-                        if prune { "" } else { " prune=none" },
-                    ),
-                    |b| {
-                        // Setup: populate database (once, on first matched sample).
-                        if !initialized {
-                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
-                                |ctx| async move {
-                                    dispatch_fixed!(ctx, variant, |db| {
-                                        populate_and_sync(
-                                            db,
-                                            elements,
-                                            operations,
-                                            prune,
-                                            make_fixed_value,
-                                        )
-                                        .await;
-                                    });
-                                },
-                            );
-                            initialized = true;
-                        }
+            let runner = tokio::Runner::new(cfg.clone());
+            c.bench_function(
+                &format!(
+                    "{}/variant={} elements={elements}{}",
+                    module_path!(),
+                    variant.name(),
+                    if prune { "" } else { " prune=none" },
+                ),
+                |b| {
+                    // Setup: populate database (once, on first matched sample).
+                    if !initialized {
+                        commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                            |ctx| async move {
+                                dispatch_fixed!(ctx, variant, |db| {
+                                    populate_and_sync(
+                                        db,
+                                        elements,
+                                        operations,
+                                        prune,
+                                        make_fixed_value,
+                                    )
+                                    .await;
+                                });
+                            },
+                        );
+                        initialized = true;
+                    }
 
-                        // Benchmark: measure init time at this cache size.
-                        b.to_async(&runner).iter_custom(move |iters| async move {
-                            let ctx = context::get::<Context>();
-                            dispatch_fixed_timed_init!(ctx, variant, iters, cache_size)
-                        });
-                    },
-                );
-            }
+                    // Benchmark: measure init time.
+                    b.to_async(&runner).iter_custom(move |iters| async move {
+                        let ctx = context::get::<Context>();
+                        dispatch_fixed_timed_init!(ctx, variant, iters)
+                    });
+                },
+            );
 
             // Cleanup: destroy database.
             if initialized {
@@ -188,47 +179,43 @@ fn bench_var_value_init(c: &mut Criterion) {
             .into_iter()
             .flat_map(|prune| VEC_VARIANTS.iter().map(move |variant| (prune, variant)))
         {
-            // Populated lazily on the first sample of the first matched cache size, then reused by
-            // every cache size for this variant (all read the same on-disk database).
+            // Populated lazily on the first matched sample.
             let mut initialized = false;
-            for &cache_size in &CACHE_SIZES {
-                let cache = cache_size.map_or(0, NonZeroUsize::get);
-                let runner = tokio::Runner::new(cfg.clone());
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} cache={cache} elements={elements}{}",
-                        module_path!(),
-                        variant.name(),
-                        if prune { "" } else { " prune=none" },
-                    ),
-                    |b| {
-                        // Setup: populate database (once, on first matched sample).
-                        if !initialized {
-                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
-                                |ctx| async move {
-                                    dispatch_var!(ctx, variant, |db| {
-                                        populate_and_sync(
-                                            db,
-                                            elements,
-                                            operations,
-                                            prune,
-                                            make_var_value,
-                                        )
-                                        .await;
-                                    });
-                                },
-                            );
-                            initialized = true;
-                        }
+            let runner = tokio::Runner::new(cfg.clone());
+            c.bench_function(
+                &format!(
+                    "{}/variant={} elements={elements}{}",
+                    module_path!(),
+                    variant.name(),
+                    if prune { "" } else { " prune=none" },
+                ),
+                |b| {
+                    // Setup: populate database (once, on first matched sample).
+                    if !initialized {
+                        commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                            |ctx| async move {
+                                dispatch_var!(ctx, variant, |db| {
+                                    populate_and_sync(
+                                        db,
+                                        elements,
+                                        operations,
+                                        prune,
+                                        make_var_value,
+                                    )
+                                    .await;
+                                });
+                            },
+                        );
+                        initialized = true;
+                    }
 
-                        // Benchmark: measure init time at this cache size.
-                        b.to_async(&runner).iter_custom(move |iters| async move {
-                            let ctx = context::get::<Context>();
-                            dispatch_var_timed_init!(ctx, variant, iters, cache_size)
-                        });
-                    },
-                );
-            }
+                    // Benchmark: measure init time.
+                    b.to_async(&runner).iter_custom(move |iters| async move {
+                        let ctx = context::get::<Context>();
+                        dispatch_var_timed_init!(ctx, variant, iters)
+                    });
+                },
+            );
 
             // Cleanup: destroy database.
             if initialized {
@@ -298,25 +285,20 @@ fn bench_keyless_init(c: &mut Criterion) {
     bench_keyless_family::<mmb::Family>(c, "keyless::mmb");
 }
 
-/// Benchmark reopening a populated unauthenticated store at each init cache size, over the plain
-/// index on one task and a partitioned index on one or [THREADS] tasks.
+/// Benchmark reopening a populated unauthenticated store, over the plain index on one task and a
+/// partitioned index on one or [THREADS] tasks.
 fn bench_store_init(c: &mut Criterion) {
     let cfg = Config::default();
     for &(elements, operations) in cases() {
-        // Populated lazily on the first matched sample, then reused by every variant and cache
-        // size. All read the same on-disk database, which does not depend on the index it is
-        // reopened with. Holds the populated database's size once it exists.
+        // Populated lazily on the first matched sample, then reused by every variant. All read
+        // the same on-disk database, which does not depend on the index it is reopened with.
+        // Holds the populated database's size once it exists.
         let mut populated = None;
-        for ((partitioned, tasks), &cache_size) in
-            [(false, NZUsize!(1)), (true, NZUsize!(1)), (true, THREADS)]
-                .into_iter()
-                .flat_map(|variant| CACHE_SIZES.iter().map(move |cache| (variant, cache)))
-        {
-            let cache = cache_size.map_or(0, NonZeroUsize::get);
+        for (partitioned, tasks) in [(false, NZUsize!(1)), (true, NZUsize!(1)), (true, THREADS)] {
             let runner = tokio::Runner::new(cfg.clone());
             c.bench_function(
                 &format!(
-                    "{}/variant=store::variable{} tasks={tasks} cache={cache} elements={elements}",
+                    "{}/variant=store::variable{} tasks={tasks} elements={elements}",
                     module_path!(),
                     if partitioned { "::partitioned" } else { "" },
                 ),
@@ -343,11 +325,10 @@ fn bench_store_init(c: &mut Criterion) {
                         )
                     });
 
-                    // Measure init time at this cache size.
+                    // Measure init time.
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let ctx = context::get::<Context>();
                         let mut cfg = store_cfg(&ctx);
-                        cfg.init_cache = cache_size;
                         cfg.init_concurrency = tasks;
                         let start = std::time::Instant::now();
                         for _ in 0..iters {

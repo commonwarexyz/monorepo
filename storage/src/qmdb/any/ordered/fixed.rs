@@ -548,11 +548,10 @@ pub(crate) mod test {
     }
 
     /// Build a `P`-partitioned ordered db with churny ops, then assert that reopening it with a
-    /// range of `init_concurrency` values (`1` for the serial path, `2` for the single-worker
-    /// de-interleave, counts that round down to fewer workers with wider ranges, and counts
-    /// above the partition count that clamp) all reconstruct the identical root and key-value
-    /// state: the parallel build replays the same immutable log, just split across workers
-    /// owning disjoint partition ranges.
+    /// range of `init_concurrency` values (`1` for a build on the init task, counts that split
+    /// the partitions unevenly, and counts above the partition and chunk counts that clamp) all
+    /// reconstruct the identical root and key-value state: every build replays the same immutable
+    /// log, just split across tasks.
     #[boxed]
     async fn check_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
@@ -747,8 +746,9 @@ pub(crate) mod test {
         });
     }
 
-    /// On replay failure, a parallel build must join its workers and release their partition
-    /// ranges. Every log clone must be dropped before returning, as required by [`Rebuild`].
+    /// A replay failure during a parallel build must join every task before surfacing the
+    /// error: no task may outlive the failed build, retaining a clone of the log, as required
+    /// by [`Rebuild`].
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
@@ -789,7 +789,7 @@ pub(crate) mod test {
             );
 
             // The reopened journal has a fresh page cache, so replay's first item requires a read.
-            // Failing that read leaves workers idle because no batches have been routed.
+            // Failing that read fails every task replaying the log.
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let result = index
                 .build_index(
@@ -798,20 +798,20 @@ pub(crate) mod test {
                     &log,
                     NZUsize!(4),
                     NZUsize!(1 << 21),
-                    None,
+                    &cfg.init_scratch_partition,
                 )
                 .await;
             assert!(result.is_err(), "replay must fail under read faults");
 
-            // Every worker was joined before the error surfaced: nothing else may retain the log.
+            // Every task was joined before the error surfaced: nothing else may retain the log.
             assert_eq!(Arc::strong_count(&log), 1);
 
             context.storage_fault_config().write().read_rate = None;
         });
     }
 
-    /// A multi-worker build of an empty log must return the serial build's result (zero active
-    /// keys, an empty bitmap) rather than panicking on the last-commit bit.
+    /// A build of an empty log on several tasks must return what a build on one task does (zero
+    /// active keys, an empty bitmap) rather than panicking on the last-commit bit.
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_empty_log() {
         deterministic::Runner::default().start(|context| async move {
@@ -843,7 +843,7 @@ pub(crate) mod test {
                         &log,
                         core::num::NonZeroUsize::new(concurrency).unwrap(),
                         NZUsize!(1 << 21),
-                        None,
+                        &cfg.init_scratch_partition,
                     )
                     .await
                     .unwrap();
@@ -854,16 +854,17 @@ pub(crate) mod test {
         });
     }
 
-    /// A multi-worker build's activity bitmap must match the serial build's bit for bit: over a
-    /// log with live keys and deletes (the workers' disjoint shares union), and over a log whose
-    /// keys were all deleted (every share empty, leaving only the final commit's bit).
+    /// The activity bitmap of a build on several tasks must match that of a build on one task bit
+    /// for bit: over a log with live keys and deletes (the tasks' disjoint shares union), and
+    /// over a log whose keys were all deleted (every share empty, leaving only the final
+    /// commit's bit).
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_bitmap_equivalence() {
         deterministic::Runner::default().start(|context| async move {
             type BitmapDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
-            /// Rebuild the index from the persisted log serially and with workers, assert the
+            /// Rebuild the index from the persisted log on one task and on several, assert the
             /// `(active_keys, bitmap)` results and the index's `keys`, `items`, and `pruned`
             /// metrics match, and return the bitmap.
             async fn assert_builds_match(
@@ -908,7 +909,7 @@ pub(crate) mod test {
                             &log,
                             core::num::NonZeroUsize::new(concurrency).unwrap(),
                             NZUsize!(1 << 21),
-                            None,
+                            &cfg.init_scratch_partition,
                         )
                         .await
                         .unwrap();
@@ -978,9 +979,9 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_partitioned_p1_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            // Concurrency 201 (200 workers) rounds down to 128 equal two-partition ranges for
-            // P=1 (count=256) and 301 exceeds the partition count and clamps. Both must
-            // reconstruct the same root without panicking.
+            // Concurrency 201 leaves buckets that split the 256 partitions of P=1 unevenly and
+            // 301 exceeds the partition count and clamps. Both must reconstruct the same root
+            // without panicking.
             check_parallel_init_equivalence::<1>(
                 context,
                 "parallel_equiv_p1",

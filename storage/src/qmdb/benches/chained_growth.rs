@@ -82,7 +82,7 @@ fn cur_fix_cfg(ctx: &impl Strategizer) -> CurrentConfig<EightCap, FConfig, Rayon
         log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
-        init_cache: crate::common::INIT_CACHE_SIZE,
+        init_scratch_partition: format!("scratch-{PARTITION}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: THREADS,
     }
