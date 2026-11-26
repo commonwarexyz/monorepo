@@ -64,7 +64,7 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 - When diagnosing a bug, add a failing test before claiming the cause. Mutable storage-operation failures are fatal: do not keep using that database instance or report its inconsistent state as a defect.
 - Storage handles and runtime writers take `self` on asynchronous methods that mutate storage and return it on success, so an error or a dropped future destroys it. A method may borrow instead when a failure leaves its receiver unchanged or permanently failed. Synchronous methods that perform no I/O borrow.
 - Write PR descriptions in DRY [Simplified Technical English](https://www.asd-ste100.org/): short sentences, active voice, one meaning per word, and each fact stated once. Link generously to source code, pinned to a commit, for concepts unique to this repository.
-- Before opening a PR for review, rebase its commits into logical chunks so reviewers can read one commit at a time. PRs are squash-merged, so only the PR title and description reach `main`.
+- Before opening a PR for review, rebase its commits into logical chunks so reviewers can read one commit at a time. PRs are squash-merged, so only the PR title and description reach `main`. Make a change its own PR, stacked on any PR it needs, if `main` can take it alone and someone may want to accept, revert, or bisect it alone. Otherwise, make it its own commit if a reviewer can check it alone.
 
 ## Task-specific guides
 
