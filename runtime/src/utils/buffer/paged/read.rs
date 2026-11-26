@@ -73,6 +73,11 @@ pub(super) struct PageReader<B: Blob> {
     physical_blob_size: u64,
     /// The size of the blob.
     logical_blob_size: u64,
+    /// The logical offset the replay ends at. No byte at or past it is yielded.
+    end: u64,
+    /// The physical offset reads stop at: the end of the stored page that holds the last byte
+    /// before `end`, or of the last stored page when `end` lies past them.
+    physical_end: u64,
     /// Immutable logical bytes of the final partial page.
     partial_page: Option<Bytes>,
     /// Next page index to hand to the decoder.
@@ -133,6 +138,8 @@ impl<B: Blob> PageReader<B> {
             page_size,
             physical_blob_size,
             logical_blob_size,
+            end: logical_blob_size,
+            physical_end: physical_blob_size,
             partial_page: partial_page.map(Bytes::from),
             blob_page: 0,
             batch_pages: buffer_pages.div_ceil(MAX_READ_AHEAD + 1),
@@ -141,14 +148,22 @@ impl<B: Blob> PageReader<B> {
         }
     }
 
-    /// Position the reader at `page`, discarding the batches read ahead.
-    fn seek_to_page(&mut self, page: u64) {
+    /// Position the reader at `page` and end the replay at the logical offset `end`, discarding
+    /// the batches read ahead.
+    fn seek_to_page(&mut self, page: u64, end: u64) {
+        let page_size: u64 = Widen::widen(self.page_size);
+        let physical_page_size: u64 = Widen::widen(self.physical_page_size);
         self.blob_page = page;
+        self.end = end;
+        self.physical_end = end
+            .div_ceil(page_size)
+            .saturating_mul(physical_page_size)
+            .min(self.physical_blob_size);
         self.inflight.clear();
     }
 
     /// Start batches after the queued ones, or after `consumed_end` when none is queued, until
-    /// [`MAX_READ_AHEAD`] are in flight or the blob ends.
+    /// [`MAX_READ_AHEAD`] are in flight or the replay ends.
     async fn top_up(&mut self, consumed_end: u64) -> Result<(), Error> {
         let mut next = self.inflight.back().map_or(consumed_end, Inflight::end);
         while self.inflight.len() < MAX_READ_AHEAD {
@@ -162,16 +177,16 @@ impl<B: Blob> PageReader<B> {
     }
 
     /// Start a read of up to `batch_pages` consecutive physical pages from `first_page`, or
-    /// `None` when no stored page remains there.
+    /// `None` when no stored page of the replay remains there.
     async fn start_batch(&self, first_page: u64) -> Result<Option<Inflight>, Error> {
         let physical_page_size: u64 = Widen::widen(self.physical_page_size);
         let start = first_page
             .checked_mul(physical_page_size)
             .ok_or(Error::OffsetOverflow)?;
-        if start >= self.physical_blob_size {
+        if start >= self.physical_end {
             return Ok(None);
         }
-        let pages = ((self.physical_blob_size - start) / physical_page_size)
+        let pages = ((self.physical_end - start) / physical_page_size)
             .min(Widen::widen(self.batch_pages)) as usize;
         let len = pages * self.physical_page_size;
 
@@ -244,11 +259,16 @@ impl<B: Blob> PageReader<B> {
             Some(o) => o,
             None => return Err(Error::OffsetOverflow),
         };
+        // The frozen partial page follows the stored pages. It holds bytes of the replay only
+        // when the replay ends past them.
+        let page_size: u64 = Widen::widen(self.page_size);
+        let stored = self.blob_page.saturating_mul(page_size);
         if start_offset == self.physical_blob_size
+            && self.end > stored
             && let Some(partial_page) = &self.partial_page
         {
             self.blob_page += 1;
-            let len = partial_page.len();
+            let len = partial_page.len().min((self.end - stored) as usize);
             return Ok(Some((
                 BufferState {
                     buffer: partial_page.clone(),
@@ -258,7 +278,7 @@ impl<B: Blob> PageReader<B> {
                 len,
             )));
         }
-        if start_offset >= self.physical_blob_size {
+        if start_offset >= self.physical_end {
             return Ok(None); // No more data
         }
 
@@ -292,6 +312,14 @@ impl<B: Blob> PageReader<B> {
             last_len = self.page_size;
         }
         self.blob_page += Widen::widen(pages_to_read);
+
+        // A replay that ends inside the batch's last page yields only the bytes before its end.
+        let past_end = self
+            .blob_page
+            .saturating_mul(page_size)
+            .saturating_sub(self.end) as usize;
+        total_logical -= past_end;
+        last_len -= past_end;
 
         let state = BufferState {
             buffer: physical_buf,
@@ -536,20 +564,33 @@ impl<B: Blob> Replay<B> {
         Ok(self.buffer.remaining >= n)
     }
 
-    /// Seeks to `offset` in the blob, returning `Err(BlobInsufficientLength)` if `offset` exceeds
-    /// the blob size.
+    /// Seeks to `offset` in the blob and replays from there to the end of the blob, returning
+    /// `Err(BlobInsufficientLength)` if `offset` exceeds the blob size.
     pub fn seek_to(&mut self, offset: u64) -> Result<(), Error> {
-        if offset > self.reader.blob_size() {
+        self.seek_to_range(offset..self.reader.blob_size())
+    }
+
+    /// Seeks to `range.start` and ends the replay at `range.end`, as if the blob ended there.
+    ///
+    /// No byte at or past the end is yielded, and no page past the one that holds the last byte
+    /// before it is read. A replay of part of a blob therefore reads ahead no further than that
+    /// part. An empty range yields nothing.
+    ///
+    /// Returns `Err(BlobInsufficientLength)` if the range extends past the blob.
+    pub fn seek_to_range(&mut self, range: Range<u64>) -> Result<(), Error> {
+        let blob_size = self.reader.blob_size();
+        if range.start > blob_size || range.end > blob_size {
             return Err(Error::BlobInsufficientLength);
         }
 
+        // An empty range has nothing to read, not even the page its position falls in.
         self.buffer.clear();
-        self.exhausted = false;
+        self.exhausted = range.start >= range.end;
 
         let page_size = self.reader.page_size as u64;
-        self.reader.seek_to_page(offset / page_size);
+        self.reader.seek_to_page(range.start / page_size, range.end);
         self.buffer.current_page = 0;
-        self.buffer.offset_in_page = (offset % page_size) as usize;
+        self.buffer.offset_in_page = (range.start % page_size) as usize;
 
         Ok(())
     }
@@ -1080,6 +1121,81 @@ mod tests {
                 calls.lock()[ahead + 1..],
                 piped_calls(batch..PIPE_BLOB_BATCHES)
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_ranged_seek_reads_no_page_past_its_end() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (sealed, calls, data, _) = piped_blob(&context, b"range", Reads::default()).await;
+            let mut replay = sealed
+                .replay(NZUsize!(PIPE_BUFFER_BYTES), ReadOptions::default())
+                .unwrap();
+            let page = |index: usize| (index * PIPE_PHYSICAL_PAGE) as u64;
+
+            // A range from inside the second page to inside the second page of the next batch
+            // reads one batch and that one page. A replay to the end of the blob would have
+            // started every batch the buffer holds.
+            let (start, end) = (64 + 36, PIPE_BATCH_LOGICAL + 64 + 6);
+            replay.seek_to_range(start as u64..end as u64).unwrap();
+            take(&mut replay, &data[start..end]).await;
+            assert!(!replay.ensure(1).await.unwrap());
+            assert!(replay.is_exhausted());
+            assert_eq!(
+                *calls.lock(),
+                vec![
+                    (true, vec![(page(1), PIPE_BATCH_BYTES)]),
+                    (true, vec![(page(1 + PIPE_BATCH_PAGES), PIPE_PHYSICAL_PAGE)]),
+                ]
+            );
+
+            // A range of exactly one page reads that page.
+            calls.lock().clear();
+            replay.seek_to_range(64..128).unwrap();
+            take(&mut replay, &data[64..128]).await;
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(
+                *calls.lock(),
+                vec![(true, vec![(page(1), PIPE_PHYSICAL_PAGE)])]
+            );
+
+            // A range that ends inside the frozen partial page reads the last stored page and
+            // yields only the bytes of the partial page before its end.
+            calls.lock().clear();
+            let stored = PIPE_BLOB_BATCHES * PIPE_BATCH_PAGES;
+            let (start, end) = (PIPE_BLOB_BYTES - 30, PIPE_BLOB_BYTES - 4);
+            replay.seek_to_range(start as u64..end as u64).unwrap();
+            take(&mut replay, &data[start..end]).await;
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(
+                *calls.lock(),
+                vec![(true, vec![(page(stored - 1), PIPE_PHYSICAL_PAGE)])]
+            );
+
+            // An empty range reads and yields nothing.
+            calls.lock().clear();
+            replay.seek_to_range(200..200).unwrap();
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(replay.remaining(), 0);
+            assert!(calls.lock().is_empty());
+
+            // A range may not extend past the blob.
+            let size = PIPE_BLOB_BYTES as u64;
+            assert!(matches!(
+                replay.seek_to_range(0..size + 1),
+                Err(Error::BlobInsufficientLength)
+            ));
+            assert!(matches!(
+                replay.seek_to_range(size + 1..size + 1),
+                Err(Error::BlobInsufficientLength)
+            ));
+
+            // A plain seek replays to the end of the blob again.
+            let offset = PIPE_BLOB_BYTES - PIPE_BATCH_LOGICAL - 3;
+            replay.seek_to(offset as u64).unwrap();
+            take(&mut replay, &data[offset..]).await;
+            assert!(!replay.ensure(1).await.unwrap());
         });
     }
 

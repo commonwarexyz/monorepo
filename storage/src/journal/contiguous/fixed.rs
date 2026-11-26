@@ -187,8 +187,9 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
 /// Build a replay batch stream over the retained blob range.
 ///
 /// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
-/// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
-/// budget for each blob replay, not an item count.
+/// stop at the journal's logical end, and avoid reading across blob files. Each state reads no
+/// further than the last item of `range` in its blob. `buffer` is a byte budget for each blob
+/// replay, not an item count.
 fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
@@ -229,12 +230,15 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
             let offset = (first_pos - blob_first)
                 .checked_mul(A::SIZE as u64)
                 .ok_or(Error::OffsetOverflow)?;
+            let end = (blob_end - blob_first)
+                .checked_mul(A::SIZE as u64)
+                .ok_or(Error::OffsetOverflow)?;
             let blob = blobs
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
 
             states.push(FixedReplayState::<B, A> {
-                replay: blob.replay_from(offset, buffer, read_options)?,
+                replay: blob.replay_range(offset..end, buffer, read_options)?,
                 pos: first_pos,
                 end_pos: blob_end,
                 items_per_batch,
@@ -4154,7 +4158,7 @@ mod tests {
             ] {
                 let mut state = FixedReplayState::<_, View> {
                     replay: source
-                        .replay_from(0, NZUsize!(256), ReadOptions::DONT_CACHE)
+                        .replay_range(0..u64::MAX, NZUsize!(256), ReadOptions::DONT_CACHE)
                         .unwrap(),
                     pos: 0,
                     end_pos: 16,
@@ -4321,6 +4325,71 @@ mod tests {
 
                 journal.destroy().await.unwrap();
             }
+        });
+    }
+
+    /// A replay of part of a journal reads the pages that hold that part and none after them,
+    /// however large its buffer.
+    #[test_traced]
+    fn test_fixed_journal_replay_reads_only_its_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Two blobs of 1,000 digests each, written and reopened so that the replay reads
+            // every page from storage.
+            let cfg = test_cfg(NZU64!(1000));
+            let mut journal = Journal::init(context.child("writer"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..2000u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+            let journal = Journal::<_, Digest>::init(context.child("reader"), cfg)
+                .await
+                .unwrap();
+
+            // The pages that hold items `[start, end)` of one blob.
+            let page = PAGE_SIZE.get() as u64;
+            let physical_page = page + commonware_runtime::buffer::paged::CHECKSUM_SIZE;
+            let pages = |start: u64, end: u64| {
+                (end * Digest::SIZE as u64).div_ceil(page) - start * Digest::SIZE as u64 / page
+            };
+
+            // Ranges inside a blob, up to the end of a blob, and across two blobs.
+            for (range, expected) in [
+                (100..110u64, pages(100, 110)),
+                (990..1000, pages(990, 1000)),
+                (995..1010, pages(995, 1000) + pages(0, 10)),
+            ] {
+                let before = context.encode();
+                {
+                    let stream = journal
+                        .replay(range.clone(), NZUsize!(1 << 16), ReadOptions::DONT_CACHE)
+                        .await
+                        .unwrap();
+                    pin_mut!(stream);
+                    let mut next = range.start;
+                    while let Some(batch) = stream.next().await {
+                        let batch = batch.unwrap();
+                        assert_eq!(batch.start, next);
+                        for item in batch.items {
+                            assert_eq!(item, test_digest(next));
+                            next += 1;
+                        }
+                    }
+                    assert_eq!(next, range.end);
+                }
+                let after = context.encode();
+                let read =
+                    counter(&after, "storage_read_bytes") - counter(&before, "storage_read_bytes");
+                assert!(read > 0);
+                assert!(
+                    read <= expected * physical_page,
+                    "range {range:?} read {read} bytes"
+                );
+            }
+
+            journal.destroy().await.unwrap();
         });
     }
 
