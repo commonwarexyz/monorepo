@@ -422,6 +422,10 @@ where
             // written before the last shutdown.
             self.cache = self.cache.load_persisted_epochs().await;
 
+            // Dispatch stops at the highest stored finalization. Recover a cached finalization
+            // for a block stored above it before the first dispatch.
+            self = self.restore_finalization(&mut application).await;
+
             // A configured floor follows the same path as `SetFloor`: verify it,
             // then apply a local anchor or await it from the buffer or peers.
             if let Some(finalization) = self.floor.take_configured() {
@@ -1903,6 +1907,25 @@ where
     /// still call [`Self::sync_finalized`] or [`Self::start_finalized_sync`]
     /// before yielding to the `select_loop!` so the freeze is released.
     ///
+    /// A block is also dispatched only once a finalization at or above its
+    /// height is durable. Dispatch stops at the highest stored finalization,
+    /// and when [`Self::store_finalization`] stores a higher one, it freezes
+    /// dispatch above the previous one until a sync covers the write. At
+    /// startup, [`Self::restore_finalization`] can store a cached
+    /// finalization for a block left above every stored finalization.
+    ///
+    /// ```text
+    ///                         H-1     H     H+1    H+2
+    ///                       +------+------+------+------+
+    ///  store::Blocks        |  B   |  B   |  B   |  w   |  w buffered write, not yet durable
+    ///                       +------+------+------+------+
+    ///  store::Certificates  |  f   |      |      |  w   |
+    ///                       +------+------+------+------+
+    ///                          ^                    ^
+    ///                         tip                new tip
+    ///  held                        |<------------------>|  until a sync covers both writes
+    /// ```
+    ///
     /// Acks are processed in FIFO order so the processed floor height always
     /// advances sequentially.
     ///
@@ -1944,6 +1967,12 @@ where
                 .pending_acks
                 .next_dispatch_height(self.stream.next_height());
             if barrier.is_some_and(|lowest| next_height >= lowest) {
+                return self;
+            }
+
+            // Finalization barrier: never dispatch above the highest stored
+            // finalization, so the processed height cannot pass it.
+            if next_height > self.tip {
                 return self;
             }
 
@@ -2152,8 +2181,8 @@ where
     ///
     /// Walkback repair stores a block without its finalization when the cache lacks one, and an
     /// unclean shutdown during the concurrent sync of both archives can leave a block durable
-    /// without its finalization. In either case the application can process the block before its
-    /// finalization is reported.
+    /// without its finalization. The application can process such a block once a finalization
+    /// above it is durable, before its own finalization is reported.
     ///
     /// Returns whether the block is above the processed height.
     async fn store_finalization(
@@ -2230,9 +2259,15 @@ where
         )
         .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
 
-        // The write above is buffered and readable before it is durable, so
-        // hold dispatch at or above it until a sync covers it.
-        self.dispatch_gate.defer(height);
+        // The writes above are buffered and readable before they are durable, so hold dispatch at
+        // or above the block until a sync covers them. A finalization that raises the tip also
+        // makes the stored blocks between the previous tip and its height eligible, so the hold
+        // starts just above the previous tip.
+        let lowest = match round {
+            Some(_) if height > self.tip => self.tip.next(),
+            _ => height,
+        };
+        self.dispatch_gate.defer(lowest);
 
         // The tip is the newest stored finalization, so a block repaired without its finalization
         // leaves it unchanged.
@@ -2482,6 +2517,91 @@ where
             .fetch_finalizations_if_permitted(resolver, missing_items)
             .ignore();
         (self, wrote)
+    }
+
+    /// Walks down from the highest stored block above both the processed height and every stored
+    /// finalization, and stores the cached finalization of the first block that has one.
+    ///
+    /// ```text
+    ///                         H-1     H     H+1    H+2    H+3
+    ///                       +------+------+------+------+------+
+    ///  store::Blocks        |  B   |  B   |  B   |  B   |  B   |  H-1 is already processed
+    ///                       +------+------+------+------+------+
+    ///  cache                |      |      |  f   |  f   |      |  H+1 and H+2 were reported
+    ///                       +------+------+------+--v---+------+  v copied at startup
+    ///  store::Certificates  |  f   |      |      |  f   |      |
+    ///                       +------+------+------+------+------+
+    ///                          ^                    ^
+    ///                         tip              restored tip
+    ///  delivered                   |<------------------>|
+    ///  held                                             |<---->|  until a finalization at or
+    ///                                                             above H+3 is durable
+    /// ```
+    ///
+    /// The block and finalization archives sync concurrently, so a process that stops between
+    /// the two syncs can leave blocks durable without a finalization at or above them, and
+    /// dispatch stops below those blocks. A finalization reported by consensus is durable in the
+    /// cache before its block is written. Storing it again covers its block and every stored
+    /// block below it.
+    ///
+    /// A finalization delivered by the resolver is not cached. Marshal does not request one for
+    /// such a block, so the block waits until its height is hinted again with
+    /// [`Mailbox::hint_finalized`] or a finalization at or above its height is stored.
+    async fn restore_finalization(
+        mut self: Box<Self>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+    ) -> Box<Self> {
+        // Only blocks above both the tip and the processed height are candidates. The block store
+        // reports ranges in ascending order, so collect them before walking down.
+        let covered = self.tip.max(self.floor.processed_height());
+        let mut ranges = Vec::new();
+        let mut cursor = Some(covered.next());
+        while let Some(start) = cursor {
+            let (end, next) = self.finalized_blocks.next_gap(start);
+            if let Some(end) = end {
+                ranges.push((start, end));
+            }
+            cursor = next;
+        }
+
+        // Descend through the stored heights without visiting the gaps between ranges, and stop at
+        // the first block whose finalization is cached.
+        let heights = ranges
+            .into_iter()
+            .rev()
+            .flat_map(|(start, end)| (start.get()..=end.get()).rev().map(Height::new));
+        for height in heights {
+            // Load the stored block and its cached finalization. The cache is keyed by block digest
+            // and a digest does not determine the commitment, so the finalization must name the
+            // commitment of this block.
+            let Some(stored) = self.get_finalized_block(height).await else {
+                continue;
+            };
+            let block = V::restore_across(stored, &self.strategy).await;
+            let digest = block.digest();
+            let Some(finalization) = self
+                .cache
+                .get_finalization_for(digest)
+                .await
+                .filter(|finalization| finalization.proposal.payload == V::commitment(&block))
+            else {
+                continue;
+            };
+
+            // The block is already durable, so only the finalization archive needs a sync.
+            self.finalizations_by_height = self
+                .finalizations_by_height
+                .put(height, digest, &finalization)
+                .await
+                .unwrap_or_else(|e| panic!("restored finalization must be stored: {e}"))
+                .sync()
+                .await
+                .unwrap_or_else(|e| panic!("restored finalization must sync: {e}"));
+            self.advance_tip(finalization.round(), height, digest, application);
+            debug!(%height, ?digest, "restored finalization for stored block");
+            break;
+        }
+        self
     }
 
     /// Buffers a processed height update in memory and metrics. Does NOT sync

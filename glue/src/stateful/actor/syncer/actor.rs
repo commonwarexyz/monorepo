@@ -392,31 +392,41 @@ mod tests {
         }
     }
 
+    /// State sync starts from the block marshal already processed when that block is above the
+    /// selected finalization, even though the block has no finalization of its own.
     #[test]
     fn resolve_covers_durable_marshal_progress() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            // Seed block one without a finalization of its own and the finalization of its
+            // successor, so marshal delivers block one under the higher finalization.
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor", 1);
             let selected = fixtures::finalization(&fixture, 0, Sha256::fill(0));
             let processed_block = TestBlock::new(1, 1);
+            let successor = TestBlock::child(&processed_block, 2);
+            let covering = fixtures::finalization(&fixture, 2, successor.digest());
             let MarshalFixture {
                 mailbox: marshal,
                 floor,
                 guards: _guards,
-            } = fixtures::marshal_fixture_with_finalized_block(
+            } = fixtures::marshal_fixture_with_covered_block(
                 context.child("marshal"),
                 "syncer-floor",
                 fixture.schemes[0].clone(),
                 &processed_block,
+                (&successor, covering),
                 NZUsize!(1),
-                true,
             )
             .await;
 
+            // Wait until marshal has processed block one. The block still has no finalization of
+            // its own.
             while marshal.get_processed().await.map(Processed::height) != Some(Height::new(1)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert!(marshal.get_finalization(Height::new(1)).await.is_none());
 
+            // The selected finalization is below the processed height, so state sync starts from
+            // block one.
             let resolved = resolve(&marshal, floor, &selected).await;
             assert_eq!(
                 Anchor::from_block(&resolved),

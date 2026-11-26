@@ -182,21 +182,47 @@
 //!
 //! Marshal stores finalized blocks in [`store::Blocks`] and their finalizations in
 //! [`store::Certificates`]. After it writes a block and its finalization, it syncs both stores
-//! before it delivers the block in an [`Update::Block`].
+//! before it delivers the block in an [`Update::Block`]. When consensus reports a finalization,
+//! marshal first syncs it into its cache.
 //!
-//! The two syncs run concurrently, so a process that stops between them can leave one store
-//! holding a height that the other lacks. A restart can then find either of two states:
+//! ```text
+//!                                 marshal waits    both syncs in flight
+//!                                 |<-------->|     |<------>|
+//!  consensus              report--.
+//!  cache                          w==========#-----.
+//!  store::Blocks                                   w========#
+//!  store::Certificates                             w================#
+//!  application                                                        > Update::Block(H)
+//!
+//!  a stop in              <------- 1 --------|----- 2 ------|-- 3 --|--- 4 --->
+//!  is sure to leave
+//!    in the cache                                   f           f        f
+//!    in Blocks                                                  B        B
+//!    in Certificates                                                     f
+//!
+//!  w buffered write    = sync in flight    # durable    --. then    > delivery
+//!  f finalization of H    B block H
+//! ```
+//!
+//! Marshal delivers a block only when [`store::Certificates`] durably holds a finalization at or
+//! above the block's height, so acknowledging a delivered block never moves the
+//! [processed height](core::Processed) above the highest stored finalization. Every stored block
+//! below a finalized block is one of its ancestors, so that finalization also covers a block that
+//! has none of its own. The block at height zero is delivered without one. The rule applies to
+//! every block [`store::Blocks`] serves, including a block that marshal did not write.
+//!
+//! The two syncs run concurrently, so a process that stops between them (span 3) can leave one
+//! store holding a height that the other lacks. The figure draws [`store::Blocks`] finishing
+//! first. A restart can then find either of two states:
 //!
 //! - A finalization without its block. Marshal tries to recover the block from local data or
 //!   peers, and it does not deliver that height until it has the block.
-//! - A block without its finalization. Marshal can still deliver the block, because only
-//!   finalized blocks are written to [`store::Blocks`]. If consensus reports the finalization
-//!   again, marshal stores it unless that height has been pruned.
-//!
-//! [`Identifier::Latest`] identifies the block named by the highest finalization in
-//! [`store::Certificates`]. In the second state, the [processed height](core::Processed) can rise
-//! above that block's height and stay there until a finalization at or above the processed height
-//! is stored.
+//! - A block above every stored finalization. Marshal does not deliver it until a finalization
+//!   at or above its height is durable. A finalization that consensus reported is cached before
+//!   its block is written, so at startup marshal restores the cached finalization of the highest
+//!   such block that has one. A finalization delivered by the resolver is not cached, and marshal
+//!   does not request one. Its block waits until its height is hinted again with
+//!   [`core::Mailbox::hint_finalized`] or a finalization at or above its height is stored.
 //!
 //! After a restart that follows an interrupted sync:
 //!
@@ -206,8 +232,8 @@
 //! | H-1    | stored            | stored                  |
 //! | H      | stored            | missing                 |
 //!
-//! [`Identifier::Latest`] is the block at H-1. Once the application acknowledges H, the processed
-//! height becomes H.
+//! If the cache lacks the finalization of H, [`Identifier::Latest`] is the block at H-1 and marshal
+//! delivers through H-1. It delivers H once a finalization for H or a later height is durable.
 //!
 //! A block can also be stored without a finalization while marshal fills a gap. Marshal can reach
 //! an ancestor of a finalized block by following parent links, and a block stored this way may
@@ -255,8 +281,8 @@ pub enum Identifier<D: Digest> {
     /// The digest of the block to retrieve.
     Digest(D),
     /// The block named by the highest finalization in [`store::Certificates`]. Marshal may lack
-    /// this block and some of the blocks below it. The Durability section of the
-    /// [module docs](self) describes when the processed height can be above this block's height.
+    /// this block and some of the blocks below it, and it delivers no block above this block's
+    /// height. The Durability section of the [module docs](self) explains both.
     Latest,
 }
 
