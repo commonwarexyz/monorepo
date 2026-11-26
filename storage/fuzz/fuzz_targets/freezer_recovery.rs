@@ -13,19 +13,21 @@
 //! the oversized journal, table epochs, and any interrupted resize back to exactly the
 //! checkpointed logical state, and every cursor from the discarded candidate suffix must
 //! be unreadable. A sentinel put, sync, and reopen then prove the recovered instance can
-//! publish a new checkpoint.
+//! publish a new checkpoint. In about half of the runs the table blob is then cut shorter than
+//! that checkpoint needs, and every open with the checkpoint must refuse it without resizing it.
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Runner, Supervisor as _,
+    Blob as _, Runner, Storage as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic::{self, PartialWriteMode, WriteConfig},
 };
-use commonware_storage::freezer::{Config, Freezer, Identifier};
+use commonware_storage::freezer::{Checkpoint, Config, Error, Freezer, Identifier};
 use commonware_storage_fuzz::faulted_recovery;
 use commonware_utils::{Entropy, NZU16, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
+use rand::RngExt as _;
 
 type Key = FixedBytes<32>;
 
@@ -276,7 +278,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         .await
     });
 
-    deterministic::Runner::from(runtime_checkpoint).start(move |context| async move {
+    deterministic::Runner::from(runtime_checkpoint).start(move |mut context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         // A supplied checkpoint is the Freezer authority: recovery trims the oversized journal,
@@ -316,8 +318,54 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                 .await
                 .expect("post-recovery reopen must succeed");
         assert_values(&freezer, &expected).await;
-        freezer.destroy().await.expect("freezer destroy failed");
+        if context.random_range(0..=1) == 0 {
+            drop(freezer);
+            assert_short_table_refused(&mut context, checkpoint).await;
+        } else {
+            freezer.destroy().await.expect("freezer destroy failed");
+        }
     });
+}
+
+/// Cut the table blob shorter than `checkpoint` needs and require that opening with it fails with
+/// a checkpoint mismatch, on a retry too, and leaves the blob's length as it was cut.
+///
+/// The store was just opened with `checkpoint`, which truncates a longer table to exactly the
+/// checkpointed size, so every shorter length is below what the checkpoint needs.
+async fn assert_short_table_refused(context: &mut deterministic::Context, checkpoint: Checkpoint) {
+    let partition = config().table_partition;
+    let names = context.scan(&partition).await.expect("table scan failed");
+    assert_eq!(names.len(), 1, "the table partition must hold one blob");
+    let name = &names[0];
+    let (table, len) = context
+        .open(&partition, name)
+        .await
+        .expect("table open failed");
+    assert!(len > 0, "a table backing a checkpoint is empty");
+    let new_len = context.random_range(0..len);
+    table.resize(new_len).await.expect("table resize failed");
+    table.sync().await.expect("table sync failed");
+    drop(table);
+
+    for label in ["short_table", "short_table_retry"] {
+        let err = Freezer::<_, Key, i32>::init(context.child(label), config(), Some(checkpoint))
+            .await
+            .err();
+        assert!(
+            matches!(err, Some(Error::CheckpointMismatch)),
+            "an open with a checkpoint accepted a shorter table (len {len}, new_len {new_len}): \
+             {err:?}",
+        );
+    }
+
+    let (_, after) = context
+        .open(&partition, name)
+        .await
+        .expect("table reopen failed");
+    assert_eq!(
+        after, new_len,
+        "a refused open resized the table (len {len}, new_len {new_len})",
+    );
 }
 
 /// Exercise recovery under both supported partial-write retention modes.

@@ -6,7 +6,9 @@
 //! floors (see `recover_expected` for the recovery rule and marker-floor invariants). It asserts
 //! that entries covered by a completed sync survive, that recovery removes orphan value sections
 //! and truncates each value glob to the last retained entry, that a second recovery mutates
-//! nothing, and that sentinel appends land at the repaired tail and reopen intact.
+//! nothing, and that sentinel appends land at the repaired tail and reopen intact. Before the
+//! clean recovery, one replay of the crash image has a value read held at a gate and the pending
+//! call dropped; the calls after it must report the interruption.
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Buf, Copying, DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
@@ -15,7 +17,10 @@ use commonware_runtime::{
     Blob as _, BufMut, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
-    mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
+    mocks::{
+        DelayedSyncContext, PendingSyncs, ReadGateContext, drive_pending_syncs,
+        release_pending_syncs,
+    },
 };
 use commonware_storage::{
     Context,
@@ -27,7 +32,9 @@ use commonware_storage::{
 };
 use commonware_storage_fuzz::{faulted_recovery, poll_interrupted};
 use commonware_utils::{Entropy, NZU16, NZUsize, Probability, sequence::U64};
+use futures::future::poll_immediate;
 use libfuzzer_sys::fuzz_target;
+use rand::RngExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroUsize},
@@ -41,6 +48,9 @@ const SECTIONS: u64 = 4;
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
 const METADATA_PARTITION: &str = "fuzz-markers";
+
+/// The most entries an input appends (see `items`).
+const MAX_ENTRIES: usize = 24;
 
 /// Test index entry that stores a u64 id and references a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,6 +178,76 @@ async fn init_tracked<E: Context>(
         result?;
     }
     replay.finish().await
+}
+
+/// Replay the crash image with a value read held at a gate: calls before the input-chosen call
+/// `gated` run to completion, and from `gated` on each call is polled once behind the armed gate.
+/// The first call that stays pending is dropped, and the calls after it must report the
+/// interruption. A replay that drains first must finish.
+async fn interrupted_recovery(mut context: deterministic::Context) {
+    let gated = context.random_range(0..=MAX_ENTRIES);
+    let resume = context.random_range(0..=1) == 0;
+    let unpolled = context.random_range(0..=1) == 0;
+    let (context, gate) =
+        ReadGateContext::new(context.child("interrupted"), VALUE_PARTITION.into());
+    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
+        context.child("oversized"),
+        config(),
+        METADATA_PARTITION.into(),
+        ReadOptions::default(),
+    )
+    .await
+    .expect("gated recovery init failed");
+    let mut call = 0;
+    loop {
+        if call == gated && unpolled {
+            // A call dropped before its first poll starts nothing and must not disturb the replay.
+            drop(replay.next());
+        }
+        let result = if call < gated {
+            replay.next().await
+        } else {
+            gate.arm();
+            let mut next = std::pin::pin!(replay.next());
+            let polled = poll_immediate(next.as_mut()).await;
+            gate.disarm();
+            match polled {
+                Some(result) => result,
+                None => break,
+            }
+        };
+        match result {
+            Some(Ok(_)) => call += 1,
+            Some(Err(err)) => panic!("an undisturbed replay call failed at call {call}: {err:?}"),
+            None => {
+                replay
+                    .finish()
+                    .await
+                    .expect("a drained undisturbed replay failed to finish");
+                return;
+            }
+        }
+    }
+
+    if resume {
+        let result = replay.next().await;
+        assert!(
+            matches!(result, Some(Err(JournalError::ReplayInterrupted))),
+            "the call after a dropped pending call did not report the interruption: {result:?}",
+        );
+        for _ in 0..2 {
+            let result = replay.next().await;
+            assert!(
+                result.is_none(),
+                "an interrupted replay yielded more after reporting it: {result:?}",
+            );
+        }
+    }
+    let result = replay.finish().await.err();
+    assert!(
+        matches!(result, Some(JournalError::ReplayFailed)),
+        "an interrupted replay finished: {result:?}",
+    );
 }
 
 /// The scripted append stream: `(section, id)` per operation, ids in append order.
@@ -661,6 +741,14 @@ fn fuzz(input: FuzzInput) {
     let checkpoint = faulted_recovery(checkpoint, |context| async move {
         init_tracked(context.child("faulted_recovery"), config()).await
     });
+
+    // A replay that is interrupted, or one that drains undisturbed, leaves the image to the clean
+    // recovery below, whose checks judge it.
+    let ((), checkpoint) =
+        deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            interrupted_recovery(context).await;
+        });
 
     let recovery_model = model.clone();
     let ((expected, sizes), checkpoint) = deterministic::Runner::from(checkpoint)

@@ -148,8 +148,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "index_ordered_model"
+path = "fuzz_targets/index_ordered_model.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "index_unordered_operations"
 path = "fuzz_targets/index_unordered_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_unordered_model"
+path = "fuzz_targets/index_unordered_model.rs"
 test = false
 doc = false
 bench = false

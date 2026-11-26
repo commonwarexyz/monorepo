@@ -42,6 +42,16 @@ const INDEX_PAGE_SIZE: usize = 128;
 const PAGE_CHECKSUM_RECORD_SIZE: usize = commonware_runtime::buffer::paged::CHECKSUM_SIZE as usize;
 const VALUE_CHECKSUM_SIZE: usize = 4;
 
+/// Per-entry action: a put-and-sync call whose put stores nothing, driven to completion.
+const PROBE_BLOCKING: u8 = 5;
+
+/// Per-entry action: a put-and-sync call whose put stores nothing, returning a handle.
+const PROBE_HANDLE: u8 = 6;
+
+/// Bit of the per-entry action that sends a probe to the index just written even when a prune
+/// floor exists.
+const PROBE_EXISTING_INDEX: u8 = 1 << 3;
+
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
     /// Number of entries to append (1..=24).
@@ -55,7 +65,7 @@ struct FuzzInput {
     /// Use put_multi with repeated indices instead of put.
     multi: bool,
     /// Per-entry action applied after its put: pipeline a sync, release one held completion,
-    /// settle everything held, or prune.
+    /// settle everything held, prune, or a put-and-sync call whose put stores nothing.
     ops: [u8; 24],
     /// Shape of the faulted crash: an abandoned sync request, an interrupted blocking sync,
     /// or an interrupted prune.
@@ -443,6 +453,18 @@ async fn assert_view(archive: &TestArchive, intended: &[Entry], expected: &[Entr
     }
 }
 
+/// Choose where a put-and-sync probe puts so that, by contract, it stores nothing: one index below
+/// the prune floor (through the multi calls in multi mode), or the index of the entry just
+/// written (a single-item put on an existing index). Returns the index and whether the multi
+/// calls are used.
+fn probe_target(op: u8, exempt_below: u64, multi: bool, entry: &Entry) -> (u64, bool) {
+    if exempt_below > 0 && op & PROBE_EXISTING_INDEX == 0 {
+        (exempt_below - 1, multi)
+    } else {
+        (entry.index, false)
+    }
+}
+
 /// Run the archive through faulted appends, recovery, and tail repair.
 fn fuzz(input: FuzzInput) {
     let items_per_section = NonZeroU64::new(u64::from(input.items_per_section % 8) + 1).unwrap();
@@ -490,12 +512,12 @@ fn fuzz(input: FuzzInput) {
                 }
                 archive = if first_phase_input.multi {
                     archive
-                        .put_multi(entry.index, entry.key, &entry.value)
+                        .put_multi(entry.index, entry.key.clone(), &entry.value)
                         .await
                         .expect("put_multi failed")
                 } else {
                     archive
-                        .put(entry.index, entry.key, &entry.value)
+                        .put(entry.index, entry.key.clone(), &entry.value)
                         .await
                         .expect("put failed")
                 };
@@ -568,6 +590,45 @@ fn fuzz(input: FuzzInput) {
                         }
                         pruned |= floor > 0;
                         exempt_below = exempt_below.max(floor);
+                    }
+                    PROBE_BLOCKING => {
+                        let (index, multi) =
+                            probe_target(op, exempt_below, first_phase_input.multi, &entry);
+                        release_pending_syncs(&pending);
+                        archive = if multi {
+                            drive_pending_syncs(
+                                &pending,
+                                archive.put_multi_sync(index, entry.key, &entry.value),
+                            )
+                            .await
+                            .expect("probe put_multi_sync failed")
+                        } else {
+                            drive_pending_syncs(
+                                &pending,
+                                archive.put_sync(index, entry.key, &entry.value),
+                            )
+                            .await
+                            .expect("probe put_sync failed")
+                        };
+                        durable = durable.max(offset + 1);
+                    }
+                    PROBE_HANDLE => {
+                        let (index, multi) =
+                            probe_target(op, exempt_below, first_phase_input.multi, &entry);
+                        release_pending_syncs(&pending);
+                        let handle;
+                        (archive, handle) = if multi {
+                            archive
+                                .put_multi_start_sync(index, entry.key, &entry.value)
+                                .await
+                                .expect("probe put_multi_start_sync failed")
+                        } else {
+                            archive
+                                .put_start_sync(index, entry.key, &entry.value)
+                                .await
+                                .expect("probe put_start_sync failed")
+                        };
+                        held.push((offset + 1, handle));
                     }
                     _ => {}
                 }
