@@ -1,6 +1,6 @@
 use commonware_codec::{Encode, Read};
 use commonware_consensus::{
-    Handoff,
+    Handoff, Reporter as _,
     simplex::{
         elector::{Config as Elector, Elector as ElectorInstance, Mode as _},
         mocks::reporter::Reporter,
@@ -23,6 +23,7 @@ use commonware_cryptography::{
 use commonware_utils::{Participant, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     hash::Hash,
 };
@@ -1002,6 +1003,158 @@ pub fn check_no_invalid_reports_if_no_faults<E, S, L>(
 {
     if faults == 0 {
         check_no_invalid_reports(reporters);
+    }
+}
+
+/// One honest reporter as [`check_no_invalid_certificates`] judged it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Judged {
+    pub participant: u32,
+    pub invalid_votes: usize,
+    pub invalid_certificates: usize,
+}
+
+/// What [`install_certificate_probe`] asked for and what each check judged since.
+struct CertificateProbe {
+    plant: bool,
+    planted: bool,
+    log: Vec<Vec<Judged>>,
+}
+
+thread_local! {
+    static CERTIFICATE_PROBE: RefCell<Option<CertificateProbe>> = const { RefCell::new(None) };
+}
+
+/// Installs an empty probe of [`check_no_invalid_certificates`] on this thread,
+/// replacing any installed one. For negative controls only: no fuzz target or
+/// driver calls it.
+///
+/// With `plant`, the first check that runs afterwards reports one certificate with
+/// a changed subject to the inner reporter of the last reporter it judges, so that
+/// reporter counts one invalid certificate. Nothing else of the reporters changes.
+pub fn install_certificate_probe(plant: bool) {
+    CERTIFICATE_PROBE.with(|probe| {
+        *probe.borrow_mut() = Some(CertificateProbe {
+            plant,
+            planted: false,
+            log: Vec::new(),
+        });
+    });
+}
+
+/// Removes this thread's probe and returns one entry per check call, each holding
+/// the judged reporters in slice order (`None` if no probe was installed). For
+/// negative controls only.
+pub fn take_certificate_probe() -> Option<Vec<Vec<Judged>>> {
+    CERTIFICATE_PROBE.with(|probe| probe.borrow_mut().take().map(|probe| probe.log))
+}
+
+/// `payload` with every byte XORed with `0xff`.
+fn flip(payload: &Sha256Digest) -> Sha256Digest {
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(payload.as_ref());
+    for byte in &mut bytes {
+        *byte ^= 0xff;
+    }
+    Sha256Digest::from(bytes)
+}
+
+/// Reports one recorded certificate of `reporter` with a changed subject to its
+/// inner reporter, bypassing the audit log: the notarization with the lowest view
+/// (payload flipped), else the finalization with the lowest view (payload flipped),
+/// else the nullification with the lowest view (moved to the next view).
+fn plant_invalid_certificate<E, S, L>(reporter: &RecordingReporter<E, S, L, Sha256Digest>)
+where
+    E: CryptoRng + Send + Sync + 'static,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    let mut inner = reporter.inner().clone();
+    let notarization = inner
+        .notarizations
+        .lock()
+        .iter()
+        .min_by_key(|(view, _)| **view)
+        .map(|(_, notarization)| notarization.clone());
+    if let Some(mut planted) = notarization {
+        planted.proposal.payload = flip(&planted.proposal.payload);
+        inner.report(Activity::Notarization(planted));
+        return;
+    }
+    let finalization = inner
+        .finalizations
+        .lock()
+        .iter()
+        .min_by_key(|(view, _)| **view)
+        .map(|(_, (finalization, _))| finalization.clone());
+    if let Some(mut planted) = finalization {
+        planted.proposal.payload = flip(&planted.proposal.payload);
+        inner.report(Activity::Finalization(planted));
+        return;
+    }
+    let nullification = inner
+        .nullifications
+        .lock()
+        .iter()
+        .min_by_key(|(view, _)| **view)
+        .map(|(_, nullification)| nullification.clone());
+    if let Some(mut planted) = nullification {
+        planted.round = Round::new(planted.round.epoch(), planted.round.view().next());
+        inner.report(Activity::Nullification(planted));
+        return;
+    }
+    panic!(
+        "certificate plant vacuous: participant {} recorded no certificate",
+        usize::from(reporter.me().expect("an honest engine signs"))
+    );
+}
+
+/// Checks that no honest reporter counted an invalid certificate.
+///
+/// An honest engine verifies every certificate before it reports one, or builds
+/// it from verified votes, whatever its peers send. So this holds in runs with
+/// Byzantine participants too, unlike the invalid-vote counter, which
+/// [`check_no_invalid_reports`] asserts only where no participant runs Byzantine
+/// code. `reporters` must hold honest reporters only.
+pub fn check_no_invalid_certificates<E, S, L>(
+    reporters: &[RecordingReporter<E, S, L, Sha256Digest>],
+) where
+    E: CryptoRng + Send + Sync + 'static,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    if let Some(last) = reporters.last() {
+        let plant = CERTIFICATE_PROBE.with(|probe| {
+            probe
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|probe| probe.plant && !std::mem::replace(&mut probe.planted, true))
+        });
+        if plant {
+            plant_invalid_certificate(last);
+        }
+    }
+    CERTIFICATE_PROBE.with(|probe| {
+        if let Some(probe) = probe.borrow_mut().as_mut() {
+            probe.log.push(
+                reporters
+                    .iter()
+                    .map(|reporter| Judged {
+                        participant: reporter.me().expect("an honest engine signs").get(),
+                        invalid_votes: *reporter.inner().invalid_votes.lock(),
+                        invalid_certificates: *reporter.inner().invalid_certificates.lock(),
+                    })
+                    .collect(),
+            );
+        }
+    });
+    for reporter in reporters {
+        let count = *reporter.inner().invalid_certificates.lock();
+        assert!(
+            count == 0,
+            "Invariant violation: honest reporter {} counted {count} invalid certificates",
+            usize::from(reporter.me().expect("an honest engine signs"))
+        );
     }
 }
 
@@ -3237,7 +3390,6 @@ where
 mod tests {
     use super::*;
     use commonware_consensus::{
-        Reporter as _,
         simplex::{
             elector::{Random, RandomVersion, RoundRobin},
             mocks::reporter::Config as ReporterConfig,

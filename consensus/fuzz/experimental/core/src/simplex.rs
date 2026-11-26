@@ -5,7 +5,7 @@ use crate::{BYZANTINE_IDX, Configuration};
 use crate::{attributable_mock, simplex_certificate_mock as cert_mock};
 use commonware_codec::Read;
 #[cfg(any(feature = "mocks", test))]
-use commonware_consensus::simplex::scheme::ed25519;
+use commonware_consensus::simplex::scheme::{ed25519, secp256r1};
 use commonware_consensus::{
     simplex::{
         elector::{Config as ElectorConfig, Elector, Input, RoundRobin, Terms},
@@ -221,6 +221,33 @@ impl Simplex for SimplexEd25519 {
         Vec<Self::Scheme>,
     ) {
         let fixture = ed25519::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+}
+
+/// The production secp256r1 scheme: attributable, with real signatures, and not
+/// batchable, so the batcher verifies every vote as it arrives.
+#[cfg(any(feature = "mocks", test))]
+pub struct SimplexSecp256r1;
+
+#[cfg(any(feature = "mocks", test))]
+impl Simplex for SimplexSecp256r1 {
+    type Scheme = secp256r1::Scheme<Ed25519PublicKey>;
+    type Elector = RoundRobin;
+
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
+    }
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = secp256r1::fixture(context, namespace, n);
         (fixture.participants, fixture.schemes)
     }
 }

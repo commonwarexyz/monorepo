@@ -2226,6 +2226,7 @@ pub fn run_planted(scenario: &Scenario, plant: Option<Plant>) -> Outcome {
             .iter()
             .map(|(_, _, recorder)| recorder.recording().clone())
             .collect();
+        invariants::check_no_invalid_certificates(&recordings);
         invariants::check_recorded_vote_invariants(
             config.faults as usize,
             P::elector(base.term_length, base.optimistic_views),

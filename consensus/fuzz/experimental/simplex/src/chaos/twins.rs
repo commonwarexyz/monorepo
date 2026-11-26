@@ -574,6 +574,7 @@ fn check_safety<P: Simplex>(
             .iter()
             .map(|recorder| recorder.recording().clone()),
     );
+    invariants::check_no_invalid_certificates(honest);
     invariants::check_no_invalid_reports(&summaries(honest));
     invariants::check_recorded_vote_invariants_with_byzantine(
         &HashSet::from([byz]),

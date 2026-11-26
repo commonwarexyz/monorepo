@@ -996,6 +996,7 @@ pub fn run_planted(input: &FuzzInput, plant: Option<Plant>) -> Report {
             .iter()
             .map(|node| node.recorder.recording().clone())
             .collect();
+        invariants::check_no_invalid_certificates(&recordings);
         invariants::check_recorded_vote_invariants(
             config.faults as usize,
             P::elector(base.term_length, base.optimistic_views),

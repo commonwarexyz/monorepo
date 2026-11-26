@@ -347,6 +347,7 @@ pub(crate) fn check_safety<P: Simplex>(
     for reporter in &summaries {
         reporter.assert_no_faults();
     }
+    invariants::check_no_invalid_certificates(reporters);
     invariants::check_no_invalid_reports(&summaries);
     invariants::check_recorded_vote_invariants(
         0,

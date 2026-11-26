@@ -11,6 +11,8 @@ pub mod flood;
 pub mod happens_before;
 pub mod invariants;
 pub(crate) mod mallory;
+#[cfg(any(feature = "mocks", test))]
+pub mod proposal_switch;
 pub mod state_cov;
 mod trusted;
 use commonware_codec::{Decode, DecodeExt};
@@ -765,6 +767,7 @@ fn run_standard_once<P: simplex::Simplex>(
                 .map(|(_, r)| r.recording().clone())
                 .collect();
             let reporter_only = summaries(&recordings);
+            invariants::check_no_invalid_certificates(&recordings);
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_recorded_vote_invariants(
                 config.faults as usize,
@@ -1196,6 +1199,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 )
             })
         });
+        invariants::check_no_invalid_certificates(&reporter_only);
         // Without a participant running Byzantine code, as when the faulty slot
         // runs a normal engine under rejected certification (see the spawn
         // above), every report must be valid.
@@ -1964,6 +1968,12 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             .chain(state.reporters.iter())
             .map(TwinsReporter::activities)
             .collect::<Vec<_>>();
+        invariants::check_no_invalid_certificates(
+            &honest_reporters
+                .iter()
+                .map(TwinsReporter::activities)
+                .collect::<Vec<_>>(),
+        );
         invariants::check_recorded_vote_invariants_with_byzantine(
             &topology.compromised,
             topology.elector.clone(),

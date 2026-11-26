@@ -1585,6 +1585,17 @@ fn run_inner<P: Simplex>(
             .collect();
         let mut observers = recordings.clone();
         observers.extend(managed.iter().map(|m| m.reporter().recording().clone()));
+        invariants::check_no_invalid_certificates(
+            &recordings
+                .iter()
+                .filter(|recording| {
+                    !byzantine.contains(&usize::from(
+                        recording.me().expect("an honest engine signs"),
+                    ))
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         invariants::check_recorded_vote_invariants_with_byzantine(
             &byzantine,
             P::elector(term_length, input.optimistic_views),

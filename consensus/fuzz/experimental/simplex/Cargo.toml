@@ -256,3 +256,11 @@ test = false
 doc = false
 bench = false
 required-features = ["base"]
+
+[[bin]]
+name = "exp_simplex_secp256r1_proposal_switch"
+path = "fuzz_targets/exp_simplex_secp256r1_proposal_switch.rs"
+test = false
+doc = false
+bench = false
+required-features = ["base"]
