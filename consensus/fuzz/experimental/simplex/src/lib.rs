@@ -1,3 +1,5 @@
+#[cfg(any(feature = "mocks", test))]
+pub mod blackout;
 #[cfg(feature = "blame")]
 pub mod blame;
 pub mod byzzfuzz;

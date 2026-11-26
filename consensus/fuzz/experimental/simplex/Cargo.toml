@@ -226,6 +226,14 @@ bench = false
 required-features = ["base"]
 
 [[bin]]
+name = "exp_simplex_cert_mock_blackout"
+path = "fuzz_targets/exp_simplex_cert_mock_blackout.rs"
+test = false
+doc = false
+bench = false
+required-features = ["base"]
+
+[[bin]]
 name = "exp_simplex_cert_mock_chaos_twins"
 path = "fuzz_targets/exp_simplex_cert_mock_chaos_twins.rs"
 test = false

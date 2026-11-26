@@ -75,14 +75,14 @@ const CHAOS_LIVENESS_WINDOW: Duration = Duration::from_secs(120);
 /// check, so recovery work still runnable after the terminal liveness boundary
 /// gets to emit any conflicting or invalid activity before the root future
 /// returns.
-const CHAOS_FINISH_SETTLE: Duration = CHAOS_STEP_TIMEOUT;
+pub(crate) const CHAOS_FINISH_SETTLE: Duration = CHAOS_STEP_TIMEOUT;
 
 pub(super) fn all_nodes_reached(latest: &[u64], nodes: &HashSet<usize>, target: u64) -> bool {
     nodes.iter().all(|node| latest[*node] >= target)
 }
 
 /// The recording reporter the runner snapshots for the safety checker.
-type ChaosReporter<P> = RecordingReporter<
+pub(crate) type ChaosReporter<P> = RecordingReporter<
     deterministic::Context,
     <P as Simplex>::Scheme,
     <P as Simplex>::Elector,
@@ -95,7 +95,7 @@ type ChaosSummary<P> =
 
 /// The managed-validator instantiation chaos drives: the shared harness with
 /// the recording reporter in place of the mock.
-type ChaosValidator<P> = ManagedValidator<P, ChaosReporter<P>>;
+pub(crate) type ChaosValidator<P> = ManagedValidator<P, ChaosReporter<P>>;
 
 /// Surgical connectivity controller: touches only the edges adjacent to the
 /// node whose state changes. A full-topology reset (`apply_partition`) would
@@ -199,7 +199,7 @@ impl<P: PublicKey> Connectivity<P> {
 /// replays its journal and backfills. `mallory::runner::restart` minus the
 /// pump/sniffer/dispatch re-wrap chaos does not install.
 #[allow(clippy::too_many_arguments)]
-async fn restart_durable<P: Simplex>(
+pub(crate) async fn restart_durable<P: Simplex>(
     mv: &mut ChaosValidator<P>,
     context: &deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
@@ -315,7 +315,7 @@ fn finalize_votes<P: Simplex>(reporters: &[ChaosSummary<P>]) -> Vec<(u64, Sha256
 /// Run the full safety suite over the honest reporters. The Byzantine set is
 /// EMPTY: every node is honest and restarts are durable, so any conflicting
 /// finalization, equivocation, fault evidence, or invalid report is a finding.
-fn check_safety<P: Simplex>(
+pub(crate) fn check_safety<P: Simplex>(
     checker: &mut Checker,
     reporters: &[ChaosReporter<P>],
     term_length: TermLength,
