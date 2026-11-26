@@ -584,15 +584,11 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let end_blob = position_to_blob(range.end - 1, items_per_blob);
             let start_offset = self.offsets.read(start_pos).await?;
 
-            // Frames in a blob are byte-adjacent, so the range's last frame ends where the frame
-            // at `range.end` starts. A range that ends with its blob has no such frame there, and
-            // its last blob is replayed to the end.
-            let end_offset = if range.end < bounds.end
-                && position_to_blob(range.end, items_per_blob) == end_blob
-            {
-                self.offsets.read(range.end).await?
-            } else {
-                u64::MAX
+            // The range's last frame ends where the next frame in its blob starts. A range that
+            // ends with its blob has no such frame, and its last blob is replayed to the end.
+            let end_offset = match self.next_in_blob(range.end - 1) {
+                Some(next) => self.offsets.read(next).await?,
+                None => u64::MAX,
             };
 
             for blob in start_blob..=end_blob {

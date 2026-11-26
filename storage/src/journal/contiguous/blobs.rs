@@ -1048,6 +1048,49 @@ mod tests {
         });
     }
 
+    /// A replay of a byte range yields the range's bytes and no more, through a live view of a
+    /// writer and through a paged replay alike. A range that extends past the blob ends with it.
+    #[test]
+    fn test_replay_range_ends_with_its_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(3));
+            let (blob, size) = context.open("replay-range", b"blob").await.unwrap();
+            let writer = Writer::new(blob, size, 128, cache.clone()).await.unwrap();
+            let (writer, _) = writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
+
+            // A writer holding an unwritten full page is replayed through a live view. Its
+            // page of filler precedes the same bytes.
+            let (blob, size) = context.open("replay-range", b"pending").await.unwrap();
+            let pending = Writer::new(blob, size, 128, cache).await.unwrap();
+            let (pending, _) = pending.append(&[0; 40]).await.unwrap();
+            let (pending, _) = pending.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
+            assert!(pending.try_snapshot().is_none());
+
+            for (source, offset) in [
+                (Blob::Writer(&pending), 40),
+                (Blob::Writer(&writer), 0),
+                (Blob::Sealed(snapshot), 0),
+            ] {
+                for (range, expected) in [(0..2, "ab"), (2..10, "cdefghij"), (20..100, "uvwx")] {
+                    // The replay buffer has room for more than the range holds, and a request
+                    // for one byte more than that finds exactly the range's bytes.
+                    let bytes = offset + range.start..offset + range.end;
+                    let mut replay = source
+                        .clone()
+                        .replay_range(bytes, NZUsize!(12), ReadOptions::default())
+                        .unwrap();
+                    assert!(!replay.ensure(expected.len() + 1).await.unwrap());
+                    assert!(replay.is_exhausted());
+                    assert_eq!(replay.remaining(), expected.len());
+                    let yielded = replay.copy_to_bytes(expected.len());
+                    assert_eq!(yielded.as_ref(), expected.as_bytes());
+                }
+            }
+        });
+    }
+
     /// A writer-view replay decodes an `IoBuf` item as a view of its read buffer when the frame
     /// lies within one read, and as one native copy when it spans reads; either way the item ends
     /// up as the sole owner of native storage.
