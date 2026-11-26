@@ -1870,7 +1870,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             super::position_to_blob(*a, items_per_blob)
                 == super::position_to_blob(*b, items_per_blob)
         }) {
-            let mut blob_offsets = Vec::new();
+            let mut blob_offsets = Vec::with_capacity(group.len());
             let blob_num = self.locate_group(group, &mut blob_offsets)?;
             let blob = self
                 .blobs

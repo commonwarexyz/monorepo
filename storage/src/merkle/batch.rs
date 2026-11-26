@@ -170,17 +170,7 @@ fn plan_hashes<F: Family>(
                 .get(height as usize)
                 .is_some_and(|nodes| nodes.binary_search(&pos).is_ok())
     };
-
-    // A level holds at most one dirty node per updated leaf, and no more nodes than the structure
-    // has at that height. Leaves are not dirty nodes, so level 0 stays empty.
-    let leaf_count = *Location::<F>::try_from(size).expect("invalid size");
-    let updated = updated_leaves.len();
-    let mut dirty: Vec<Vec<Position<F>>> = (0..u64::BITS)
-        .map(|height| match height {
-            0 => Vec::new(),
-            _ => Vec::with_capacity(updated.min((leaf_count >> height) as usize)),
-        })
-        .collect();
+    let mut dirty = Vec::new();
     let mut leaves = updated_leaves.into_iter().peekable();
     let mut first_leaf = Location::new(0);
     for (pos, height) in F::peaks(size) {
