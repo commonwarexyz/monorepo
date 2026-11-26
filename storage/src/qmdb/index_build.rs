@@ -33,7 +33,6 @@ use crate::{
     qmdb::operation::Operation,
     translator::Translator,
 };
-use bytes::BufMut as _;
 use commonware_codec::Encode;
 use commonware_runtime::{
     Blob, Error as RuntimeError, Handle, IoBufMut, ReadOptions, Spawner, Storage, WriteOptions,
@@ -110,6 +109,14 @@ const READ_BYTES: usize = 512;
 
 /// Name of a build's blob in its scratch partition.
 const SCRATCH_BLOB: &[u8] = b"records";
+
+/// Bytes of records sorted at a time. A bucket's records are first split by key into groups of
+/// about this size, so that sorting a group and loading its keys stays within a processor's
+/// cache. Small in tests so ordinary buckets split into several groups.
+#[cfg(not(test))]
+const GROUP_BYTES: usize = 256 << 10;
+#[cfg(test)]
+const GROUP_BYTES: usize = 256;
 
 /// Bytes of records above which a bucket is sorted in pieces that are then merged, rather than
 /// all at once. Buckets of the expected size stay below it. A bucket exceeds it when keys crowd
@@ -223,6 +230,21 @@ impl Layout {
         tagged[..self.loc_bytes].copy_from_slice(&data[at..at + self.loc_bytes]);
         (Tagged(u64::from_le_bytes(tagged)), at + self.loc_bytes, len)
     }
+
+    /// The smallest and largest key prefix (see [key_prefix]) among the records in `data`, or
+    /// `(u64::MAX, 0)` if it holds none.
+    fn prefixes(&self, data: &[u8]) -> (u64, u64) {
+        let (mut min, mut max) = (u64::MAX, 0);
+        let mut at = 0;
+        while at < data.len() {
+            let (_, key_at, key_len) = self.decode(data, at);
+            at = key_at + key_len;
+            let prefix = key_prefix(&data[key_at..at]);
+            min = min.min(prefix);
+            max = max.max(prefix);
+        }
+        (min, max)
+    }
 }
 
 /// The first eight bytes of `key` as an integer that orders as they do, padded with zeros.
@@ -252,13 +274,15 @@ impl Record {
     }
 }
 
-/// Return the newest record of each key in `data`, records in any order, in ascending key order.
-fn sort_records(data: &[u8], layout: Layout) -> Vec<Record> {
+/// Fill `records` with the newest record of each key in `data`, records in any order, in
+/// ascending key order.
+fn sort_records(data: &[u8], layout: Layout, records: &mut Vec<Record>) {
     assert!(
         u32::try_from(data.len()).is_ok(),
         "too many records to sort at once"
     );
-    let mut records = Vec::with_capacity(data.len() / layout.record_bytes + 1);
+    records.clear();
+    records.reserve(data.len() / layout.record_bytes + 1);
     let mut at = 0;
     while at < data.len() {
         let (tagged, key_at, key_len) = layout.decode(data, at);
@@ -291,15 +315,196 @@ fn sort_records(data: &[u8], layout: Layout) -> Vec<Record> {
         }
     }
     records.truncate(kept);
-    records
 }
 
-/// Insert the keys that survive `data`, one bucket's records, into `index` in ascending key order.
-/// A key survives if its newest operation is not a delete. Calls `activate` with each survivor's
-/// offset from the floor and returns their number.
+/// The memory a task sorts records in, kept from one bucket to the next.
+///
+/// Records are split by key into groups (see [GROUP_BYTES]) before any are sorted. Every key of
+/// a group sorts before every key of the next, so sorting the groups in turn visits the keys in
+/// ascending order.
+#[derive(Default)]
+struct Sorter {
+    /// One region of `width` bytes per group, back to back, which the group's records fill
+    /// from its start.
+    regions: Vec<u8>,
+    width: usize,
+    /// Bytes of records in each group's region.
+    lens: Vec<usize>,
+    /// The records of each group that did not fit its region.
+    rest: BTreeMap<usize, Vec<u8>>,
+    /// A key belongs to the group at its prefix less `base`, shifted right by `shift`.
+    base: u64,
+    shift: u32,
+
+    /// The group last sorted (see [Self::sort]): all its records if some did not fit its
+    /// region, and the records it kept.
+    whole: Vec<u8>,
+    records: Vec<Record>,
+}
+
+impl Sorter {
+    /// Prepare to split `bytes` of records whose key prefixes span `prefixes`, their smallest
+    /// and largest.
+    fn start(&mut self, bytes: usize, (min, max): (u64, u64)) {
+        // Groups cover equal ranges of prefixes, a power of two wide, so keys that crowd into
+        // part of the span leave groups larger than intended. Those still sort correctly.
+        let span = max.saturating_sub(min);
+        let bits = u64::BITS - span.leading_zeros();
+        let wanted = bytes
+            .div_ceil(GROUP_BYTES)
+            .max(1)
+            .next_power_of_two()
+            .trailing_zeros();
+        self.base = min;
+        self.shift = bits.saturating_sub(wanted).min(u64::BITS - 1);
+        let groups = (span >> self.shift) as usize + 1;
+
+        // A region has room for a group of the expected size and some more, so that the records
+        // of few groups go elsewhere.
+        let expected = bytes / groups;
+        self.width = expected + expected / 4;
+        self.lens.clear();
+        self.lens.resize(groups, 0);
+        self.rest.clear();
+        self.whole = Vec::new();
+        if self.regions.len() < groups * self.width {
+            // Free the old regions before the new ones are allocated.
+            self.regions = Vec::new();
+            self.regions = vec![0; groups * self.width];
+        }
+    }
+
+    /// The number of groups.
+    const fn groups(&self) -> usize {
+        self.lens.len()
+    }
+
+    /// Add the records in `data`, whole records in any order, to their groups.
+    fn split(&mut self, data: &[u8], layout: Layout) {
+        let last = self.groups() - 1;
+        let mut at = 0;
+        while at < data.len() {
+            let (_, key_at, key_len) = layout.decode(data, at);
+            let end = key_at + key_len;
+            let record = &data[at..end];
+            at = end;
+
+            // A prefix outside the span joins the nearest group, which keeps the groups in key
+            // order. The group is bounded before it is narrowed, because a prefix far above the
+            // span would otherwise wrap where addresses are narrower than a prefix.
+            let prefix = key_prefix(&data[key_at..end]);
+            let group = (prefix.saturating_sub(self.base) >> self.shift).min(last as u64) as usize;
+            let len = self.lens[group];
+            let region = &mut self.regions[group * self.width..][len..self.width];
+            match region.get_mut(..record.len()) {
+                Some(room) => {
+                    room.copy_from_slice(record);
+                    self.lens[group] = len + record.len();
+                }
+                None => self
+                    .rest
+                    .entry(group)
+                    .or_default()
+                    .extend_from_slice(record),
+            }
+        }
+    }
+
+    /// Sort `group` (see [sort_records]) and return its records with the bytes they refer to.
+    fn sort(&mut self, group: usize, layout: Layout) -> (&[Record], &[u8]) {
+        let region = &self.regions[group * self.width..][..self.lens[group]];
+        let data = match self.rest.remove(&group) {
+            None => region,
+            Some(mut rest) => {
+                rest.extend_from_slice(region);
+                self.whole = rest;
+                &self.whole
+            }
+        };
+        sort_records(data, layout, &mut self.records);
+        (&self.records, data)
+    }
+}
+
+/// The survivors of one partition that are waiting to be loaded into it: their keys back to
+/// back, and each one's place among the keys with its offset from the floor.
+struct Loader {
+    partition: usize,
+    keys: Vec<u8>,
+    entries: Vec<(usize, usize, u64)>,
+    /// Keys and bytes of keys held before they are loaded, whatever else their partition has.
+    max_keys: usize,
+    max_bytes: usize,
+}
+
+impl Loader {
+    /// A loader that holds a partition's survivors until it has them all, which sizes the
+    /// partition exactly. For survivors that memory already holds.
+    const fn whole() -> Self {
+        Self::new(usize::MAX, usize::MAX)
+    }
+
+    /// A loader that holds at most [LOAD_KEYS] keys and [LOAD_BYTES] of them.
+    const fn bounded() -> Self {
+        Self::new(LOAD_KEYS, LOAD_BYTES)
+    }
+
+    const fn new(max_keys: usize, max_bytes: usize) -> Self {
+        Self {
+            partition: 0,
+            keys: Vec::new(),
+            entries: Vec::new(),
+            max_keys,
+            max_bytes,
+        }
+    }
+
+    /// Add the survivor `key`, whose operation is `offset` from the floor. Survivors must
+    /// arrive in ascending key order.
+    fn push<F, R>(&mut self, index: &mut R, layout: Layout, key: &[u8], offset: u64)
+    where
+        F: Family,
+        R: PartitionRange<Value = Location<F>>,
+    {
+        let of = (layout.partition_of)(key);
+        if !self.entries.is_empty()
+            && (of != self.partition
+                || self.entries.len() >= self.max_keys
+                || self.keys.len().saturating_add(key.len()) > self.max_bytes)
+        {
+            self.load(index, layout);
+        }
+        self.partition = of;
+        self.entries.push((self.keys.len(), key.len(), offset));
+        self.keys.extend_from_slice(key);
+    }
+
+    /// Load the survivors held into `index`.
+    fn load<F, R>(&mut self, index: &mut R, layout: Layout)
+    where
+        F: Family,
+        R: PartitionRange<Value = Location<F>>,
+    {
+        if self.entries.is_empty() {
+            return;
+        }
+        index.load(self.entries.iter().map(|&(at, len, offset)| {
+            (
+                &self.keys[at..at + len],
+                Location::new(layout.floor + offset),
+            )
+        }));
+        self.keys.clear();
+        self.entries.clear();
+    }
+}
+
+/// Insert the keys that survive the records split in `sorter`, one bucket's, into `index` in
+/// ascending key order. A key survives if its newest operation is not a delete. Calls `activate`
+/// with each survivor's offset from the floor and returns their number.
 fn load_bucket<F, R>(
     index: &mut R,
-    data: &[u8],
+    sorter: &mut Sorter,
     layout: Layout,
     mut activate: impl FnMut(u64),
 ) -> usize
@@ -307,35 +512,23 @@ where
     F: Family,
     R: PartitionRange<Value = Location<F>>,
 {
-    let mut records = sort_records(data, layout);
-    records.retain(|record| {
-        let survives = !record.tagged.is_delete();
-        if survives {
-            activate(record.tagged.offset());
+    // A partition's keys are contiguous in key order but can span groups.
+    let mut loader = Loader::whole();
+    let mut survivors = 0;
+    for group in 0..sorter.groups() {
+        let (records, data) = sorter.sort(group, layout);
+        for record in records {
+            if record.tagged.is_delete() {
+                continue;
+            }
+            let offset = record.tagged.offset();
+            activate(offset);
+            loader.push(index, layout, record.key(data), offset);
+            survivors += 1;
         }
-        survives
-    });
-
-    // Survivors are distinct keys in ascending order, and a partition's keys are contiguous in
-    // that order, so each partition is loaded at once. A key's partition depends only on its
-    // first bytes, which the prefix holds.
-    let partition = |record: &Record| {
-        let prefix = record.prefix.to_be_bytes();
-        (layout.partition_of)(&prefix[..(record.key_len as usize).min(prefix.len())])
-    };
-    let mut rest = records.as_slice();
-    while let Some(first) = rest.first() {
-        let first = partition(first);
-        let (run, tail) = rest.split_at(rest.partition_point(|record| partition(record) == first));
-        index.load(run.iter().map(|record| {
-            (
-                record.key(data),
-                Location::new(layout.floor + record.tagged.offset()),
-            )
-        }));
-        rest = tail;
     }
-    records.len()
+    loader.load(index, layout);
+    survivors
 }
 
 /// A sorted run of a bucket being merged, read from the scratch blob a block at a time. Each
@@ -490,13 +683,31 @@ struct RunWriter {
     blocks: Vec<(u64, usize)>,
 }
 
-/// One bucket of a build: the records of the operations whose keys fall in a contiguous
-/// range of partitions, and those partitions.
-struct Bucket<R> {
+/// The records of a bucket.
+struct Records {
     /// Records not yet written to the scratch blob.
     buf: Vec<u8>,
     /// Offset and length of each run of records written to the scratch blob.
     runs: Vec<(u64, usize)>,
+    /// The smallest and largest key prefix (see [key_prefix]) among the records.
+    prefixes: (u64, u64),
+}
+
+impl Default for Records {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            runs: Vec::new(),
+            prefixes: (u64::MAX, 0),
+        }
+    }
+}
+
+/// One bucket of a build: the records of the operations whose keys fall in a contiguous
+/// range of partitions, and those partitions.
+struct Bucket<R> {
+    /// The bucket's records, taken by the task that sorts them.
+    records: Records,
     /// The bucket's partitions, taken by the task that fills them.
     range: Option<R>,
 }
@@ -556,21 +767,40 @@ impl<B: Blob, R> Buckets<B, R> {
         Ok((offset, len))
     }
 
-    /// Append the records of `runs` to `data`, in whatever order their reads finish.
-    async fn read(&self, runs: &[(u64, usize)], data: &mut Vec<u8>) -> Result<(), RuntimeError> {
-        let blob = self.blob.lock().await.clone().expect("runs were written");
+    /// Pass the records of `runs` to `each`, a run at a time.
+    async fn read(
+        &self,
+        runs: &[(u64, usize)],
+        mut each: impl FnMut(&[u8]) + Send,
+    ) -> Result<(), RuntimeError> {
         let mut rest = runs;
-        while !rest.is_empty() {
+        let mut batches = core::iter::from_fn(|| {
             let (batch, later) = rest.split_at(leading_runs(rest, READ_BYTES));
             rest = later;
-            let reads = blob.read_many(batch, ReadOptions::DONT_CACHE);
-            pin_mut!(reads);
-            while let Some(read) = reads.next().await {
-                let (_, run) = read?;
-                data.put(run);
+            (!batch.is_empty()).then_some(batch)
+        });
+
+        // A bucket that was never written to the blob may find none.
+        let Some(first) = batches.next() else {
+            return Ok(());
+        };
+        let blob = self.blob.lock().await.clone().expect("runs were written");
+        let mut reading = blob.start_read_many(first, ReadOptions::DONT_CACHE).await;
+        loop {
+            // The next batch is requested before this one is passed on, so that storage reads
+            // while the caller works.
+            let next = match batches.next() {
+                Some(batch) => Some(blob.start_read_many(batch, ReadOptions::DONT_CACHE).await),
+                None => None,
+            };
+            for run in reading.await? {
+                each(run.coalesce().as_ref());
             }
+            let Some(next) = next else {
+                return Ok(());
+            };
+            reading = next;
         }
-        Ok(())
     }
 
     /// Take a set of empty staging buffers, one per bucket.
@@ -597,19 +827,22 @@ impl<B: Blob, R> Buckets<B, R> {
         bucket: usize,
         staged: &mut Vec<u8>,
     ) -> Result<(), RuntimeError> {
+        let (min, max) = self.layout.prefixes(staged);
         let run = {
             let mut bucket = self.buckets[bucket].lock();
-            bucket.buf.extend_from_slice(staged);
+            let records = &mut bucket.records;
+            records.prefixes = (records.prefixes.0.min(min), records.prefixes.1.max(max));
+            records.buf.extend_from_slice(staged);
             let added = staged.len() as u64;
             staged.clear();
             let held = self.held.fetch_add(added, Ordering::Relaxed) + added;
-            if held <= MEMORY_BYTES || bucket.buf.len() < SPILL_BYTES {
+            if held <= MEMORY_BYTES || records.buf.len() < SPILL_BYTES {
                 return Ok(());
             }
             self.held
-                .fetch_sub(bucket.buf.len() as u64, Ordering::Relaxed);
+                .fetch_sub(records.buf.len() as u64, Ordering::Relaxed);
             core::mem::replace(
-                &mut bucket.buf,
+                &mut records.buf,
                 Vec::with_capacity(SPILL_BYTES + STAGE_BYTES),
             )
         };
@@ -617,18 +850,16 @@ impl<B: Blob, R> Buckets<B, R> {
         // Buckets are read back only after every decoder is done, so the run can be recorded
         // once its write completes.
         let run = self.write(context, run).await?;
-        self.buckets[bucket].lock().runs.push(run);
+        self.buckets[bucket].lock().records.runs.push(run);
         Ok(())
     }
 
-    /// Take `bucket`'s partitions, the records it holds in memory and its runs in the scratch
-    /// blob. A bucket can be taken once.
-    fn take(&self, bucket: usize) -> (R, Vec<u8>, Vec<(u64, usize)>) {
+    /// Take `bucket`'s partitions and its records. A bucket can be taken once.
+    fn take(&self, bucket: usize) -> (R, Records) {
         let mut bucket = self.buckets[bucket].lock();
         (
             bucket.range.take().expect("bucket taken twice"),
-            core::mem::take(&mut bucket.buf),
-            core::mem::take(&mut bucket.runs),
+            core::mem::take(&mut bucket.records),
         )
     }
 
@@ -664,9 +895,9 @@ impl<B: Blob, R> Buckets<B, R> {
         Ok(Run::new(blocks))
     }
 
-    /// Insert the keys that survive a bucket too large to sort at once into `index`, where `buf`
-    /// and `runs` hold the bucket's records. Calls `activate` with each survivor's offset from
-    /// the floor and returns their number.
+    /// Insert the keys that survive a bucket too large to sort at once into `index`, where
+    /// `records` are the bucket's. Calls `activate` with each survivor's offset from the floor
+    /// and returns their number.
     ///
     /// The records are sorted a piece at a time. Each piece keeps the newest record of each of
     /// its keys and returns to the scratch blob as a sorted run. Merging runs brings every
@@ -677,8 +908,8 @@ impl<B: Blob, R> Buckets<B, R> {
         &self,
         context: &impl Storage<Blob = B>,
         index: &mut R,
-        buf: Vec<u8>,
-        runs: Vec<(u64, usize)>,
+        sorter: &mut Sorter,
+        records: Records,
         mut activate: impl FnMut(u64) + Send,
     ) -> Result<usize, RuntimeError>
     where
@@ -686,6 +917,11 @@ impl<B: Blob, R> Buckets<B, R> {
         R: PartitionRange<Value = Location<F>> + Send,
     {
         let layout = self.layout;
+        let Records {
+            buf,
+            runs,
+            prefixes,
+        } = records;
         let mut sorted = VecDeque::new();
         let mut unsorted = runs.as_slice();
         let mut buf = Some(buf);
@@ -694,17 +930,23 @@ impl<B: Blob, R> Buckets<B, R> {
             // records still in memory, so it is sized once for both.
             let (piece, rest) = unsorted.split_at(leading_runs(unsorted, PIECE_BYTES));
             unsorted = rest;
-            let mut data = if unsorted.is_empty() {
+            let held = if unsorted.is_empty() {
                 buf.take().expect("records in memory join once")
             } else {
                 Vec::new()
             };
-            data.reserve_exact(piece.iter().map(|(_, len)| len).sum());
-            self.read(piece, &mut data).await?;
+            let stored: usize = piece.iter().map(|(_, len)| len).sum();
+            sorter.start(stored + held.len(), prefixes);
+            sorter.split(&held, layout);
+            drop(held);
+            self.read(piece, |run| sorter.split(run, layout)).await?;
             let mut run = RunWriter::default();
-            for record in sort_records(&data, layout) {
-                self.push(context, &mut run, record.key(&data), record.tagged)
-                    .await?;
+            for group in 0..sorter.groups() {
+                let (records, data) = sorter.sort(group, layout);
+                for record in records {
+                    self.push(context, &mut run, record.key(data), record.tagged)
+                        .await?;
+                }
             }
             sorted.push_back(self.finish(context, run).await?);
         }
@@ -722,41 +964,19 @@ impl<B: Blob, R> Buckets<B, R> {
             sorted.push_back(self.finish(context, run).await?);
         }
 
-        // The survivors of one partition that are waiting to be loaded: their keys back to back,
-        // and each one's place among the keys with its offset from the floor.
-        let mut partition = 0;
-        let mut keys = Vec::new();
-        let mut entries: Vec<(usize, usize, u64)> = Vec::new();
-        let mut load = |keys: &mut Vec<u8>, entries: &mut Vec<(usize, usize, u64)>| {
-            index.load(entries.iter().map(|&(at, len, offset)| {
-                (&keys[at..at + len], Location::new(layout.floor + offset))
-            }));
-            keys.clear();
-            entries.clear();
-        };
+        let mut loader = Loader::bounded();
         let mut merge = Merge::new(blob, layout, sorted.into()).await?;
         let mut survivors = 0;
         while let Some(tagged) = merge.next(blob, layout).await? {
             if tagged.is_delete() {
                 continue;
             }
-            let of = (layout.partition_of)(&merge.key);
-            if !entries.is_empty()
-                && (of != partition
-                    || entries.len() >= LOAD_KEYS
-                    || keys.len() + merge.key.len() > LOAD_BYTES)
-            {
-                load(&mut keys, &mut entries);
-            }
-            partition = of;
-            entries.push((keys.len(), merge.key.len(), tagged.offset()));
-            keys.extend_from_slice(&merge.key);
-            activate(tagged.offset());
+            let offset = tagged.offset();
+            activate(offset);
+            loader.push(index, layout, &merge.key, offset);
             survivors += 1;
         }
-        if !entries.is_empty() {
-            load(&mut keys, &mut entries);
-        }
+        loader.load(index, layout);
         Ok(survivors)
     }
 }
@@ -1071,6 +1291,8 @@ where
     E: Storage,
     R: PartitionRange<Value = Location<F>> + Send,
 {
+    let layout = buckets.layout;
+    let mut sorter = Sorter::default();
     let mut filled = Vec::new();
     let mut active_keys = 0;
     loop {
@@ -1078,22 +1300,27 @@ where
         if bucket >= buckets.buckets.len() {
             return Ok((filled, active_keys));
         }
-        let (mut range, buf, runs) = buckets.take(bucket);
+        let (mut range, records) = buckets.take(bucket);
 
         // A bucket's records can exceed what a narrow address space counts, and such a bucket
         // is merged, so they are counted in 64 bits.
-        let stored: u64 = runs.iter().map(|&(_, len)| len as u64).sum();
+        let stored: u64 = records.runs.iter().map(|&(_, len)| len as u64).sum();
+        let bytes = stored + records.buf.len() as u64;
         let activate = |offset| active.set(offset);
-        active_keys += if runs.is_empty() {
-            load_bucket::<F, _>(&mut range, &buf, buckets.layout, activate)
-        } else if stored + buf.len() as u64 <= MERGE_BYTES as u64 {
-            let mut data = buf;
-            data.reserve_exact(stored as usize);
-            buckets.read(&runs, &mut data).await?;
-            load_bucket::<F, _>(&mut range, &data, buckets.layout, activate)
+        active_keys += if records.runs.is_empty() || bytes <= MERGE_BYTES as u64 {
+            let Records {
+                buf,
+                runs,
+                prefixes,
+            } = records;
+            sorter.start(bytes as usize, prefixes);
+            sorter.split(&buf, layout);
+            drop(buf);
+            buckets.read(&runs, |run| sorter.split(run, layout)).await?;
+            load_bucket::<F, _>(&mut range, &mut sorter, layout, activate)
         } else {
             buckets
-                .merge::<F>(context, &mut range, buf, runs, activate)
+                .merge::<F>(context, &mut range, &mut sorter, records, activate)
                 .await?
         };
         filled.push(range);
@@ -1212,8 +1439,7 @@ where
             .map(|bucket| {
                 let lo = bucket * per_bucket;
                 Mutex::new(Bucket {
-                    buf: Vec::new(),
-                    runs: Vec::new(),
+                    records: Records::default(),
                     range: Some(index.new_range(lo, per_bucket.min(partitions - lo))),
                 })
             })
@@ -1943,7 +2169,10 @@ mod tests {
             let runs = [first.unwrap(), second.unwrap()];
             assert_ne!(runs[0].0, runs[1].0);
             let mut data = Vec::new();
-            buckets.read(&runs, &mut data).await.unwrap();
+            buckets
+                .read(&runs, |run| data.extend_from_slice(run))
+                .await
+                .unwrap();
             data.sort_unstable();
             assert_eq!(data, [vec![1; 100], vec![2; 100]].concat());
         });
@@ -2340,5 +2569,135 @@ mod tests {
     fn test_build_without_keys() {
         check_builds(vec![TestOp::Commit]);
         check_builds(vec![TestOp::Commit; 300]);
+    }
+
+    /// Split the records of `ops`, each a key and a tagged location, through a [Sorter] started
+    /// for `prefixes`, and check that its groups in turn yield the newest record of every key in
+    /// ascending key order. The records arrive `piece` at a time.
+    fn check_sorter(ops: &[(Vec<u8>, u64)], prefixes: (u64, u64), piece: usize) {
+        let layout = Layout {
+            partition_of: |_| 0,
+            per_bucket: 1,
+            floor: 0,
+            loc_bytes: 3,
+            record_bytes: 12,
+        };
+        let mut pieces = Vec::new();
+        let mut bytes = 0;
+        for chunk in ops.chunks(piece.max(1)) {
+            let mut data = Vec::new();
+            for (key, tagged) in chunk {
+                layout.encode(&mut data, key, Tagged(*tagged));
+            }
+            bytes += data.len();
+            pieces.push(data);
+        }
+        let mut sorter = Sorter::default();
+
+        // A sorter is reused, so one that held other records must give the same result.
+        for round in 0..2 {
+            sorter.start(bytes, prefixes);
+            for data in &pieces {
+                sorter.split(data, layout);
+            }
+            let mut sorted = Vec::new();
+            for group in 0..sorter.groups() {
+                let (records, data) = sorter.sort(group, layout);
+                sorted.extend(records.iter().map(|r| (r.key(data).to_vec(), r.tagged.0)));
+            }
+            let mut newest = BTreeMap::new();
+            for (key, tagged) in ops {
+                let entry = newest.entry(key.clone()).or_insert(*tagged);
+                *entry = (*entry).max(*tagged);
+            }
+            let expected: Vec<_> = newest.into_iter().collect();
+            assert_eq!(sorted, expected, "round {round}");
+        }
+    }
+
+    /// The smallest and largest key prefix among `ops`.
+    fn prefixes_of(ops: &[(Vec<u8>, u64)]) -> (u64, u64) {
+        ops.iter().fold((u64::MAX, 0), |(min, max), (key, _)| {
+            let prefix = key_prefix(key);
+            (min.min(prefix), max.max(prefix))
+        })
+    }
+
+    #[test]
+    fn test_sorter_orders_groups() {
+        let mut rng = test_rng();
+
+        // Keys spread over every prefix, each rewritten a few times.
+        let mut spread = Vec::new();
+        for tagged in 0..2000u64 {
+            let mut key = vec![0u8; 9];
+            key[0] = rng.random();
+            key[1] = rng.random();
+            key[8] = rng.random::<u8>() % 3;
+            spread.push((key, tagged));
+        }
+        for piece in [1, 7, 2000] {
+            check_sorter(&spread, prefixes_of(&spread), piece);
+        }
+
+        // Keys of a narrow span, of every length up to and beyond the prefix.
+        let mut narrow = Vec::new();
+        for tagged in 0..1500u64 {
+            let len = rng.random_range(0..12usize);
+            let mut key = vec![7u8; len];
+            if let Some(last) = key.last_mut() {
+                *last = rng.random();
+            }
+            narrow.push((key, tagged));
+        }
+        check_sorter(&narrow, prefixes_of(&narrow), 100);
+
+        // Nothing to sort.
+        check_sorter(&[], (u64::MAX, 0), 1);
+    }
+
+    #[test]
+    fn test_sorter_orders_crowded_groups() {
+        let mut rng = test_rng();
+
+        // Every key shares its prefix, so they all crowd into one group, which holds far more
+        // than its region does.
+        let mut crowded = Vec::new();
+        for tagged in 0..1500u64 {
+            let mut key = vec![9u8; 10];
+            key[8] = rng.random();
+            key[9] = rng.random::<u8>() % 4;
+            crowded.push((key, tagged));
+        }
+        check_sorter(&crowded, prefixes_of(&crowded), 64);
+
+        // Most keys crowd at one end of a span that the rest stretch to its widest.
+        let mut lopsided = crowded.clone();
+        lopsided.push((vec![0u8; 8], 5000));
+        lopsided.push((vec![0xFFu8; 8], 5001));
+        check_sorter(&lopsided, prefixes_of(&lopsided), 64);
+        assert_eq!(prefixes_of(&lopsided), (0, u64::MAX));
+    }
+
+    #[test]
+    fn test_sorter_orders_keys_outside_its_span() {
+        let mut rng = test_rng();
+        let mut ops = Vec::new();
+        for tagged in 0..1000u64 {
+            ops.push((rng.random::<[u8; 8]>().to_vec(), tagged));
+        }
+
+        // A span that covers none, some or all of the keys changes only how they are grouped.
+        let (min, max) = prefixes_of(&ops);
+        let middle = min / 2 + max / 2;
+        for prefixes in [
+            (u64::MAX, 0),
+            (middle, middle),
+            (middle, max),
+            (min, middle),
+            (0, u64::MAX),
+        ] {
+            check_sorter(&ops, prefixes, 50);
+        }
     }
 }
