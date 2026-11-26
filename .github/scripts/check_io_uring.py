@@ -13,7 +13,6 @@ and exits with status 1. Linux only.
 """
 
 import ctypes
-import errno
 import os
 import struct
 import sys
@@ -28,7 +27,7 @@ IO_URING_PARAMS_SIZE = 120
 IO_URING_PARAMS_FLAGS_OFFSET = 8
 
 # The flags every runtime ring is created with: SINGLE_ISSUER, DEFER_TASKRUN,
-# NO_SQARRAY, and SQ_REWIND (Linux 7.0).
+# NO_SQARRAY, and SQ_REWIND.
 SETUP_FLAGS = (1 << 12) | (1 << 13) | (1 << 16) | (1 << 20)
 
 
@@ -39,14 +38,7 @@ def main() -> int:
     struct.pack_into("=I", params, IO_URING_PARAMS_FLAGS_OFFSET, SETUP_FLAGS)
     fd = libc.syscall(ctypes.c_long(SYS_IO_URING_SETUP), ctypes.c_long(1), params)
     if fd < 0:
-        err = ctypes.get_errno()
-        if err == errno.EINVAL:
-            print(
-                "io_uring_setup rejected the runtime's setup flags "
-                f"(SQ_REWIND requires Linux 7.0 or newer): {os.strerror(err)}"
-            )
-        else:
-            print(os.strerror(err))
+        print(os.strerror(ctypes.get_errno()))
         return 1
     os.close(fd)
     return 0

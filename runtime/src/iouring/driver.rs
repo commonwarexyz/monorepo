@@ -81,7 +81,7 @@ use std::{
     task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Shared user data of cancellation SQEs, which post CQEs only on failure.
 ///
@@ -156,6 +156,9 @@ enum Enter {
 impl Driver {
     /// Create a ring on its permanent owner thread after configuration validation.
     ///
+    /// Fails if the thread already registers 16 rings, which only deeply
+    /// nested runtimes reach.
+    ///
     /// Uses the CQ sizing and overflow policy described by [`RingConfig::size`].
     /// Request deadlines are measured from `now`.
     pub fn new(cfg: &RingConfig, unparker: Unparker, now: Instant) -> io::Result<Self> {
@@ -165,7 +168,7 @@ impl Driver {
         let ring = IoUring::new(cfg.size)?;
         let size = cfg.size as usize;
 
-        let mut driver = Self {
+        Ok(Self {
             ring,
             state: State {
                 waiters: Waiters::new(size),
@@ -180,20 +183,7 @@ impl Driver {
                 unparker,
                 ring_wait_needed: true,
             },
-        };
-
-        // Register last, once the complete driver owns the registration, so
-        // nothing can unwind between them. A full table (EBUSY) is expected
-        // with many drivers on one thread. Any failure leaves enters on the raw
-        // descriptor.
-        match driver.ring.register_ring_fd() {
-            Ok(_) => {}
-            Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {
-                debug!("io_uring ring descriptor table full, entering through the descriptor");
-            }
-            Err(error) => warn!(%error, "failed to register the io_uring ring descriptor"),
-        }
-        Ok(driver)
+        })
     }
 
     /// Accept an owned request without staging kernel work.
@@ -433,10 +423,6 @@ impl Driver {
     /// kernel consumed the SQ or posted a completion. Other errors are
     /// permanent, and once the kernel has dropped a completion every enter
     /// fails with `EBADR`.
-    ///
-    /// A registered ring enters through its slot in the calling thread's
-    /// table. A permanent error on that path is returned as is, without a
-    /// retry through the raw descriptor.
     fn enter(ring: &mut IoUring, mut mode: Enter) -> io::Result<()> {
         // A stalled flush fails as a kernel that rejects it before consuming
         // any SQE does.
@@ -913,9 +899,7 @@ pub mod tests {
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
                 ResizeRequest, SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
             },
-            sys::tests::{
-                EXT_ARG, REGISTERED_RING, cq_entries, fail_next_enter, last_enter, set_overflow,
-            },
+            sys::tests::{EXT_ARG, cq_entries, fail_next_enter, last_enter, set_overflow},
             wheel::BUDGET,
         },
         storage::{hold::Hold, iouring::Shared},
@@ -3497,20 +3481,14 @@ pub mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Enters on a registered and then a raw ring descriptor run task work,
-    /// time out a timed wait without an error, and return from a wait with
-    /// its completion. Errors are covered by `test_enter_classifies_errors`
-    /// and `test_ring_keeps_staged_entries_when_enter_fails`.
+    /// Enters run task work, time out a timed wait without an error, and
+    /// return from a wait with its completion. Errors are covered by
+    /// `test_enter_classifies_errors` and
+    /// `test_ring_keeps_staged_entries_when_enter_fails`.
     #[test]
-    fn test_enter_waits_on_raw_and_registered_rings() {
+    fn test_enter_runs_task_work_and_waits() {
         let mut harness = Harness::new(1);
-        assert!(harness.driver.ring.slot().is_some());
-
-        for registered in [true, false] {
-            if !registered {
-                harness.driver.ring.unregister_ring_fd().unwrap();
-            }
-
+        {
             // The empty ring cannot produce a CQE. The enters that never wait
             // and a wait whose deadline already passed succeed.
             for enter in [
@@ -3522,8 +3500,6 @@ pub mod tests {
                 },
             ] {
                 Driver::enter(&mut harness.driver.ring, enter).unwrap();
-                let (_, flags) = last_enter().unwrap();
-                assert_eq!(flags.contains(REGISTERED_RING), registered);
             }
 
             // A timed wait sleeps until its timeout, which is no error. A
@@ -3560,7 +3536,6 @@ pub mod tests {
                 assert_eq!(harness.driver.ring.completion().count(), 1);
                 let (min_complete, flags) = last_enter().unwrap();
                 assert_eq!(min_complete, 1);
-                assert_eq!(flags.contains(REGISTERED_RING), registered);
                 assert_eq!(flags.contains(EXT_ARG), deadline.is_some());
                 assert!(harness.driver.ring.submission().is_empty());
             }
@@ -4052,16 +4027,13 @@ pub mod tests {
         assert!(!raised, "the send raised SIGPIPE");
     }
 
-    /// A driver registers its ring with the creating thread, enters through
-    /// the slot, and releases the slot when dropped, also while unwinding, so
-    /// the next driver on the thread takes the same slot.
+    /// A driver's ring releases its slot when dropped, also while unwinding,
+    /// so the next driver on the thread takes the same slot.
     #[test]
     fn test_ring_registration_is_released_on_drop() {
         let mut first = Harness::new(1);
         let slot = first.driver.ring.slot().expect("registered ring");
         assert!(first.park(0, Some(Instant::now() + TIMED_WAIT)).unwrap());
-        let (_, flags) = last_enter().unwrap();
-        assert!(flags.contains(REGISTERED_RING));
         complete_receive(&mut first);
         drop(first);
 
@@ -4077,45 +4049,9 @@ pub mod tests {
         assert_eq!(Harness::new(1).driver.ring.slot(), Some(slot));
     }
 
-    /// A thread registers at most sixteen rings. A further driver enters
-    /// through its raw descriptor and still completes requests. Dropping a
-    /// registered driver frees only its own slot, which the next driver takes,
-    /// while the other drivers keep theirs and keep working.
-    #[test]
-    fn test_full_registration_table_falls_back_to_the_raw_descriptor() {
-        let mut registered = Vec::new();
-        let mut fallback = loop {
-            let harness = Harness::new(1);
-            if harness.driver.ring.slot().is_none() {
-                break harness;
-            }
-            registered.push(harness);
-            assert!(registered.len() <= 16, "more than sixteen registered rings");
-        };
-        assert_eq!(registered.len(), 16);
-        complete_receive(&mut fallback);
-        let (_, flags) = last_enter().unwrap();
-        assert!(!flags.contains(REGISTERED_RING));
-        drop(fallback);
-
-        // The freed slot is the lowest free one, so a new driver takes it.
-        let freed = registered.remove(5);
-        let slot = freed.driver.ring.slot().unwrap();
-        drop(freed);
-        let mut reused = Harness::new(1);
-        assert_eq!(reused.driver.ring.slot(), Some(slot));
-        complete_receive(&mut reused);
-        for harness in &mut registered {
-            assert_ne!(harness.driver.ring.slot(), Some(slot));
-            complete_receive(harness);
-            let (_, flags) = last_enter().unwrap();
-            assert!(flags.contains(REGISTERED_RING));
-        }
-    }
-
     /// A driver dropped off its owner thread cannot release the slot of a
     /// ring the receiving thread registered, even at the same index, so that
-    /// ring keeps entering through its slot.
+    /// ring keeps working.
     #[test]
     fn test_off_owner_drop_keeps_the_receiving_threads_slot() {
         let moved = Harness::new(1);
@@ -4127,8 +4063,6 @@ pub mod tests {
             assert_eq!(local.driver.ring.slot(), Some(slot));
             drop(moved);
             complete_receive(&mut local);
-            let (_, flags) = last_enter().unwrap();
-            assert!(flags.contains(REGISTERED_RING));
         })
         .join()
         .unwrap();

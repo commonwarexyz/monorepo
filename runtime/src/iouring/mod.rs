@@ -53,14 +53,13 @@
 //!
 //! The runtime requires Linux 7.0 or newer. Each worker's ring uses
 //! single-issuer mode with deferred task work and rewinds its submission queue
-//! on every enter, which older kernels reject at startup. Task polls must
-//! return so their worker can service I/O and deadlines. I/O stays registered
-//! on the worker that first polled it, so a poll that blocks one worker also
-//! delays its results for tasks that have moved elsewhere. Sleeps stay
-//! registered there too, but a busy pool peer expires a blocked pool worker's
-//! sleeps once they are about a millisecond overdue. No peer expires a
-//! dedicated worker's sleeps, and while every other pool worker is parked, none
-//! expires a pool worker's either.
+//! on every enter. Task polls must return so their worker can service I/O and
+//! deadlines. I/O stays registered on the worker that first polled it, so a
+//! poll that blocks one worker also delays its results for tasks that have
+//! moved elsewhere. Sleeps stay registered there too, but a busy pool peer
+//! expires a blocked pool worker's sleeps once they are about a millisecond
+//! overdue. No peer expires a dedicated worker's sleeps, and while every other
+//! pool worker is parked, none expires a pool worker's either.
 //!
 //! Each worker limits in-flight I/O according to [`RingConfig::size`]. A receive
 //! can occupy the last slot while a send needed to satisfy it waits to be

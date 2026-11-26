@@ -4,8 +4,7 @@
 //! SQ_REWIND, maps its shared rings and SQE array, and owns the submission
 //! queue writer, the completion queue reader, and the `io_uring_enter` and
 //! `io_uring_register` calls. This module also defines the kernel ABI they
-//! use, including [`SqueueEntry`] and its encoders. Type names follow the
-//! `io-uring` crate.
+//! use, including [`SqueueEntry`] and its encoders.
 //!
 //! # Entries
 //!
@@ -86,6 +85,28 @@ const IORING_SQ_CQ_OVERFLOW: u32 = 1 << 1;
 
 /// Fsync flag that syncs data and only the metadata needed to read it back.
 const IORING_FSYNC_DATASYNC: u32 = 1;
+
+/// Write flag that makes a write to a socket whose peer has closed fail with
+/// `EPIPE` instead of raising `SIGPIPE` (Linux 6.18).
+const RWF_NOSIGNAL: i32 = 0x100;
+
+/// The largest length a read, write, send, or receive entry carries.
+///
+/// Sends and receives store the length as a signed `int` and reject larger
+/// values with `EINVAL`, and reads and writes transfer at most `MAX_RW_COUNT`,
+/// which is below `i32::MAX`, per call anyway.
+const MAX_LEN: usize = i32::MAX as usize;
+
+/// Return `len` capped at [`MAX_LEN`]. The caller sees the rest as a short
+/// transfer.
+#[inline]
+const fn capped_len(len: usize) -> u32 {
+    if len > MAX_LEN {
+        MAX_LEN as u32
+    } else {
+        len as u32
+    }
+}
 
 /// CQE flag of a completion that more completions of the same request follow.
 #[cfg(all(test, not(feature = "loom")))]
@@ -432,35 +453,32 @@ impl SqueueEntry {
         Self::zeroed(Self::NOP, -1)
     }
 
-    /// Encode a read of `len` bytes at `offset` of `fd` into `buf`, with
-    /// `RWF_*` flags.
+    /// Encode a read of up to `len` bytes at `offset` of `fd` into `buf`, with
+    /// `RWF_*` flags. Lengths above [`MAX_LEN`] read [`MAX_LEN`] bytes.
     #[inline]
-    pub fn read(fd: RawFd, buf: *mut u8, len: u32, offset: u64, rw_flags: i32) -> Self {
+    pub fn read(fd: RawFd, buf: *mut u8, len: usize, offset: u64, rw_flags: i32) -> Self {
         let mut sqe = Self::zeroed(Self::READ, fd);
         sqe.off = offset;
         sqe.addr = buf as usize as u64;
-        sqe.len = len;
+        sqe.len = capped_len(len);
         sqe.op_flags = rw_flags.cast_unsigned();
         sqe
     }
 
-    /// Encode a write of `len` bytes from `buf` at `offset` of `fd`, with
-    /// `RWF_*` flags.
+    /// Encode a write of up to `len` bytes from `buf` at `offset` of `fd`,
+    /// with `RWF_*` flags. Lengths above [`MAX_LEN`] write [`MAX_LEN`] bytes.
     #[inline]
-    pub fn write(fd: RawFd, buf: *const u8, len: u32, offset: u64, rw_flags: i32) -> Self {
+    pub fn write(fd: RawFd, buf: *const u8, len: usize, offset: u64, rw_flags: i32) -> Self {
         let mut sqe = Self::zeroed(Self::WRITE, fd);
         sqe.off = offset;
         sqe.addr = buf as usize as u64;
-        sqe.len = len;
+        sqe.len = capped_len(len);
         sqe.op_flags = rw_flags.cast_unsigned();
         sqe
     }
 
     /// Encode a vectored write of `count` iovecs at `offset` of `fd`, with
     /// `RWF_*` flags.
-    ///
-    /// Sockets pass a zero offset and `RWF_NOSIGNAL`, so a peer that has
-    /// closed fails the write with `EPIPE` instead of raising `SIGPIPE`.
     #[inline]
     pub fn writev(
         fd: RawFd,
@@ -477,22 +495,32 @@ impl SqueueEntry {
         sqe
     }
 
-    /// Encode a send of `len` bytes from `buf` on the connected socket `fd`.
+    /// Encode a vectored send of `count` iovecs on the connected socket `fd`.
+    ///
+    /// This is a socket write with `RWF_NOSIGNAL`, so a peer that has closed
+    /// fails it with `EPIPE` instead of raising `SIGPIPE`, as a send does.
     #[inline]
-    pub fn send(fd: RawFd, buf: *const u8, len: u32) -> Self {
+    pub fn send_vectored(fd: RawFd, iovecs: *const libc::iovec, count: u32) -> Self {
+        Self::writev(fd, iovecs, count, 0, RWF_NOSIGNAL)
+    }
+
+    /// Encode a send of up to `len` bytes from `buf` on the connected socket
+    /// `fd`. Lengths above [`MAX_LEN`] send at most [`MAX_LEN`] bytes.
+    #[inline]
+    pub fn send(fd: RawFd, buf: *const u8, len: usize) -> Self {
         let mut sqe = Self::zeroed(Self::SEND, fd);
         sqe.addr = buf as usize as u64;
-        sqe.len = len;
+        sqe.len = capped_len(len);
         sqe
     }
 
     /// Encode a receive of at most `len` bytes into `buf` from the socket
-    /// `fd`.
+    /// `fd`. Lengths above [`MAX_LEN`] receive at most [`MAX_LEN`] bytes.
     #[inline]
-    pub fn recv(fd: RawFd, buf: *mut u8, len: u32) -> Self {
+    pub fn recv(fd: RawFd, buf: *mut u8, len: usize) -> Self {
         let mut sqe = Self::zeroed(Self::RECV, fd);
         sqe.addr = buf as usize as u64;
-        sqe.len = len;
+        sqe.len = capped_len(len);
         sqe
     }
 
@@ -1091,7 +1119,7 @@ pub struct IoUring {
     /// CQ reader over the rings mapping.
     cq: CompletionQueueInner,
     /// The ring's slot in the owner thread's ring table, which enters name
-    /// the ring by when present.
+    /// the ring by, until the slot is released.
     slot: Option<u32>,
     /// SQE array mapping, unmapped after the queues are gone.
     _sqes: Mmap,
@@ -1104,10 +1132,14 @@ pub struct IoUring {
 }
 
 impl IoUring {
-    /// Create a ring of at least `entries` SQ slots and map its memory.
+    /// Create a ring of at least `entries` SQ slots, map its memory, and
+    /// register its descriptor with the calling thread.
     ///
     /// The kernel rounds the SQ size up to a power of two and sizes the CQ at
-    /// twice that.
+    /// twice that. Every enter names the ring by its registered slot. A
+    /// thread's table holds 16 rings, so a seventeenth ring live on one
+    /// thread, as only deeply nested runtimes create, fails with
+    /// [`io::ErrorKind::ResourceBusy`].
     pub fn new(entries: u32) -> io::Result<Self> {
         let mut params = Parameters {
             flags: IORING_SETUP_SINGLE_ISSUER
@@ -1156,7 +1188,7 @@ impl IoUring {
         // after the queues, which the ring owns alongside them. The ring is
         // the only user-side writer.
         let (sq, cq) = unsafe { queues(&params, rings.ptr, rings.len, sqes.ptr.cast()) }?;
-        Ok(Self {
+        let mut ring = Self {
             sq,
             cq,
             slot: None,
@@ -1164,10 +1196,15 @@ impl IoUring {
             _rings: rings,
             fd,
             _owner: PhantomData,
-        })
+        };
+
+        // Register last. A failure drops the ring with nothing registered,
+        // and from here on the ring's drop releases the slot.
+        ring.slot = Some(ring.register_ring_fd()?);
+        Ok(ring)
     }
 
-    /// The ring's slot in the owner thread's ring table, if registered.
+    /// The ring's slot in the owner thread's ring table, until released.
     #[inline]
     pub const fn slot(&self) -> Option<u32> {
         self.slot
@@ -1195,9 +1232,10 @@ impl IoUring {
     /// Submit every pushed, unconsumed SQE and then do what `flags` ask.
     ///
     /// `timeout`, when present, bounds a wait for `min_complete` completions
-    /// through EXT_ARG. A registered ring enters through its slot. Returns the
-    /// number of SQEs the kernel consumed, which falls short of the pushed
-    /// count when the kernel stopped early, and then GETEVENTS was skipped.
+    /// through EXT_ARG. Returns the number of SQEs the kernel consumed, which
+    /// falls short of the pushed count when the kernel stopped early, and
+    /// then GETEVENTS was skipped. Fails with `EBADF` once the ring's slot is
+    /// released.
     #[inline]
     pub fn enter(
         &mut self,
@@ -1221,13 +1259,10 @@ impl IoUring {
                 mem::size_of::<GeteventsArg>(),
             )
         });
-        if self.slot.is_some() {
-            flags |= EnterFlags::REGISTERED_RING;
-        }
-        let fd = self.slot.map_or_else(
-            || c_long::from(self.as_raw_fd()),
-            |slot| c_long::from(slot.cast_signed()),
-        );
+        let Some(slot) = self.slot else {
+            return Err(io::Error::from_raw_os_error(libc::EBADF));
+        };
+        flags |= EnterFlags::REGISTERED_RING;
 
         #[cfg(test)]
         {
@@ -1237,8 +1272,8 @@ impl IoUring {
             }
         }
 
-        // SAFETY: `fd` names this ring, by its slot in this thread's table
-        // when REGISTERED_RING is set. Pushing guaranteed that the staged
+        // SAFETY: `slot` names this ring in this thread's table, as
+        // REGISTERED_RING tells the kernel. Pushing guaranteed that the staged
         // SQEs' resources outlive their completions. `arg_ptr` is null
         // exactly when EXT_ARG is unset, and otherwise points to an
         // `io_uring_getevents_arg` of `arg_size` bytes whose timespec pointer
@@ -1246,7 +1281,7 @@ impl IoUring {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_io_uring_enter,
-                fd,
+                c_long::from(slot.cast_signed()),
                 c_long::from(to_submit.cast_signed()),
                 c_long::from(min_complete.cast_signed()),
                 c_long::from(flags.0.cast_signed()),
@@ -1264,13 +1299,8 @@ impl IoUring {
     }
 
     /// Register the ring descriptor with the calling thread and return its
-    /// slot, which later enters name the ring by.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the ring is already registered.
-    pub fn register_ring_fd(&mut self) -> io::Result<u32> {
-        assert!(self.slot.is_none(), "ring already registered");
+    /// slot.
+    fn register_ring_fd(&self) -> io::Result<u32> {
         let mut update = RsrcUpdate {
             offset: u32::MAX,
             resv: 0,
@@ -1289,11 +1319,17 @@ impl IoUring {
             )
         };
         match result {
-            1 => {
-                self.slot = Some(update.offset);
-                Ok(update.offset)
+            1 => Ok(update.offset),
+            result if result < 0 => {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EBUSY) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ResourceBusy,
+                        "this thread already registers 16 io_uring rings",
+                    ));
+                }
+                Err(error)
             }
-            result if result < 0 => Err(io::Error::last_os_error()),
             _ => Err(io::Error::other(
                 "ring descriptor registration was not applied",
             )),
@@ -1301,10 +1337,10 @@ impl IoUring {
     }
 
     /// Release the ring's registered slot, if any, through the raw
-    /// descriptor. After a success, later enters use the raw descriptor.
+    /// descriptor. After a success the ring can no longer be entered.
     ///
-    /// A failure keeps the slot, which later enters keep using, and the ring's
-    /// drop tries again to release it.
+    /// A failure keeps the slot, and the ring's drop tries again to release
+    /// it.
     pub fn unregister_ring_fd(&mut self) -> io::Result<()> {
         let Some(slot) = self.slot else {
             return Ok(());
@@ -1487,6 +1523,29 @@ pub mod tests {
                 libc::SYS_io_uring_register,
                 c_long::from(ring.as_raw_fd()),
                 IORING_UNREGISTER_RING_FDS,
+                &raw const update,
+                1 as c_long,
+            )
+        };
+        assert_eq!(result, 1, "{}", io::Error::last_os_error());
+    }
+
+    /// Register `ring`'s descriptor again at the slot it names, after
+    /// [`release_slot`].
+    fn restore_slot(ring: &IoUring) {
+        let update = RsrcUpdate {
+            offset: ring.slot.expect("registered ring"),
+            resv: 0,
+            data: u64::from(ring.as_raw_fd().cast_unsigned()),
+        };
+
+        // SAFETY: `update` is one `io_uring_rsrc_update`, which the kernel
+        // reads during the call.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_io_uring_register,
+                c_long::from(ring.as_raw_fd()),
+                IORING_REGISTER_RING_FDS,
                 &raw const update,
                 1 as c_long,
             )
@@ -1976,32 +2035,32 @@ pub mod tests {
         assert_eq!(LIVE_MAPPINGS.get(), 0);
     }
 
-    /// A real ring submits through its raw descriptor and its registered
-    /// slot, and its CQ yields each completion once.
+    /// A real ring submits through its registered slot, its CQ yields each
+    /// completion once, and it cannot be entered once the slot is released.
     #[test]
     fn test_ring_submits_and_completes() {
         let mut ring = IoUring::new(4).unwrap();
-        for registered in [false, true] {
-            if registered {
-                ring.register_ring_fd().unwrap();
-            }
-            for user_data in 0..4 {
-                // SAFETY: A NOP refers to no resources.
-                unsafe { ring.submission().push(&nop(user_data)) };
-            }
-            assert!(ring.submission().is_full());
-            assert_eq!(ring.enter(4, EnterFlags::GETEVENTS, None).unwrap(), 4);
-            let (min_complete, flags) = last_enter().unwrap();
-            assert_eq!(min_complete, 4);
-            assert_eq!(flags.contains(REGISTERED_RING), registered);
-            assert!(ring.submission().is_empty());
-            let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
-            completed.sort_unstable();
-            assert_eq!(completed, [0, 1, 2, 3]);
-            assert!(ring.completion().is_empty());
+        assert!(ring.slot().is_some());
+        for user_data in 0..4 {
+            // SAFETY: A NOP refers to no resources.
+            unsafe { ring.submission().push(&nop(user_data)) };
         }
+        assert!(ring.submission().is_full());
+        assert_eq!(ring.enter(4, EnterFlags::GETEVENTS, None).unwrap(), 4);
+        let (min_complete, flags) = last_enter().unwrap();
+        assert_eq!(min_complete, 4);
+        assert!(flags.contains(REGISTERED_RING));
+        assert!(ring.submission().is_empty());
+        let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
+        completed.sort_unstable();
+        assert_eq!(completed, [0, 1, 2, 3]);
+        assert!(ring.completion().is_empty());
+
+        // A released slot cannot be entered.
         ring.unregister_ring_fd().unwrap();
         assert_eq!(ring.slot(), None);
+        let error = ring.enter(0, EnterFlags::GETEVENTS, None).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
     }
 
     /// A submission that stops at an SQE the kernel rejects consumes exactly
@@ -2102,7 +2161,6 @@ pub mod tests {
     #[test]
     fn test_ring_keeps_staged_entries_when_enter_fails() {
         let mut ring = IoUring::new(4).unwrap();
-        ring.register_ring_fd().unwrap();
         // SAFETY: NOPs refer to no resources.
         unsafe {
             let mut sq = ring.submission();
@@ -2117,8 +2175,8 @@ pub mod tests {
         assert_eq!(ring.submission().len(), 2);
         assert!(ring.completion().is_empty());
 
-        // The raw descriptor submits both.
-        ring.unregister_ring_fd().unwrap();
+        // Once the slot names the ring again, the next enter submits both.
+        restore_slot(&ring);
         assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), 2);
         let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
         completed.sort_unstable();
@@ -2130,7 +2188,7 @@ pub mod tests {
     #[test]
     fn test_ring_drop_releases_a_slot_whose_unregistration_failed() {
         let mut ring = IoUring::new(1).unwrap();
-        let slot = ring.register_ring_fd().unwrap();
+        let slot = ring.slot().unwrap();
 
         // The kernel rejects an unregistration through a descriptor that is
         // not a ring.
@@ -2142,8 +2200,32 @@ pub mod tests {
         assert_eq!(ring.slot(), Some(slot));
 
         drop(ring);
-        let mut next = IoUring::new(1).unwrap();
-        assert_eq!(next.register_ring_fd().unwrap(), slot);
+        assert_eq!(IoUring::new(1).unwrap().slot(), Some(slot));
+    }
+
+    /// A thread registers at most sixteen rings, so a seventeenth fails to
+    /// set up. A dropped ring frees only its own slot, which the next ring
+    /// takes, and the others keep entering through theirs.
+    #[test]
+    fn test_seventeenth_ring_on_a_thread_fails() {
+        let mut rings: Vec<_> = (0..16).map(|_| IoUring::new(1).unwrap()).collect();
+        let error = IoUring::new(1)
+            .err()
+            .expect("a seventeenth ring registered");
+        assert_eq!(error.kind(), io::ErrorKind::ResourceBusy);
+        assert!(error.to_string().contains("16 io_uring rings"), "{error}");
+
+        let freed = rings.remove(5);
+        let slot = freed.slot();
+        drop(freed);
+        rings.push(IoUring::new(1).unwrap());
+        assert_eq!(rings.last().unwrap().slot(), slot);
+        for ring in &mut rings {
+            // SAFETY: A NOP refers to no resources.
+            unsafe { ring.submission().push(&nop(1)) };
+            assert_eq!(ring.enter(1, EnterFlags::GETEVENTS, None).unwrap(), 1);
+            assert_eq!(ring.completion().count(), 1);
+        }
     }
 
     /// A timed wait on an empty ring times out after its timeout.
@@ -2173,6 +2255,9 @@ mod squeue_entry_tests {
     const USER_DATA: u64 = 0xA1A2_A3A4_A5A6_A7A8;
     /// Distinctive length.
     const LEN: u32 = 0x1112_1314;
+
+    /// [`LEN`] as an encoder argument.
+    const LEN_ARG: usize = LEN as usize;
     /// Distinctive offset.
     const OFFSET: u64 = 0x2122_2324_2526_2728;
     /// Distinctive `RWF_*` flags.
@@ -2257,7 +2342,9 @@ mod squeue_entry_tests {
             .addr(ADDR as u64)
             .len(LEN)
             .op_flags(0x31)
-            .check(SqueueEntry::read(FD, ptr(), LEN, OFFSET, RW_FLAGS).with_user_data(USER_DATA));
+            .check(
+                SqueueEntry::read(FD, ptr(), LEN_ARG, OFFSET, RW_FLAGS).with_user_data(USER_DATA),
+            );
     }
 
     #[test]
@@ -2267,7 +2354,9 @@ mod squeue_entry_tests {
             .addr(ADDR as u64)
             .len(LEN)
             .op_flags(0x31)
-            .check(SqueueEntry::write(FD, ptr(), LEN, OFFSET, RW_FLAGS).with_user_data(USER_DATA));
+            .check(
+                SqueueEntry::write(FD, ptr(), LEN_ARG, OFFSET, RW_FLAGS).with_user_data(USER_DATA),
+            );
     }
 
     #[test]
@@ -2281,11 +2370,45 @@ mod squeue_entry_tests {
     }
 
     #[test]
+    fn test_send_vectored() {
+        // A socket write at offset zero with RWF_NOSIGNAL.
+        Expected::new(2, FD, USER_DATA)
+            .addr(ADDR as u64)
+            .len(7)
+            .op_flags(0x100)
+            .check(SqueueEntry::send_vectored(FD, ptr(), 7).with_user_data(USER_DATA));
+    }
+
+    /// Reads, writes, sends, and receives carry at most `i32::MAX` bytes,
+    /// since sends and receives reject larger lengths.
+    #[test]
+    fn test_lengths_are_capped() {
+        let max = i32::MAX as usize;
+        for (len, encoded) in [
+            (max - 1, i32::MAX as u32 - 1),
+            (max, i32::MAX as u32),
+            (max + 1, i32::MAX as u32),
+            (u32::MAX as usize, i32::MAX as u32),
+            (u32::MAX as usize + 1, i32::MAX as u32),
+            (usize::MAX, i32::MAX as u32),
+        ] {
+            for sqe in [
+                SqueueEntry::read(FD, ptr(), len, 0, 0),
+                SqueueEntry::write(FD, ptr(), len, 0, 0),
+                SqueueEntry::send(FD, ptr(), len),
+                SqueueEntry::recv(FD, ptr(), len),
+            ] {
+                assert_eq!(sqe.len(), encoded, "length {len}");
+            }
+        }
+    }
+
+    #[test]
     fn test_send() {
         Expected::new(26, FD, USER_DATA)
             .addr(ADDR as u64)
             .len(LEN)
-            .check(SqueueEntry::send(FD, ptr(), LEN).with_user_data(USER_DATA));
+            .check(SqueueEntry::send(FD, ptr(), LEN_ARG).with_user_data(USER_DATA));
     }
 
     #[test]
@@ -2293,7 +2416,7 @@ mod squeue_entry_tests {
         Expected::new(27, FD, USER_DATA)
             .addr(ADDR as u64)
             .len(LEN)
-            .check(SqueueEntry::recv(FD, ptr(), LEN).with_user_data(USER_DATA));
+            .check(SqueueEntry::recv(FD, ptr(), LEN_ARG).with_user_data(USER_DATA));
     }
 
     #[test]

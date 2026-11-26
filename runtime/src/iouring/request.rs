@@ -514,21 +514,6 @@ impl CqeResult {
     }
 }
 
-/// Return the byte count capped at the largest length every scalar opcode
-/// accepts.
-///
-/// Sends and receives store the length as a signed `int` and reject larger
-/// values with `EINVAL`, and reads and writes transfer at most
-/// `MAX_RW_COUNT`, which is below `i32::MAX`, per call anyway. Partial
-/// progress then covers the rest.
-fn scalar_len(remaining: usize) -> u32 {
-    remaining.min(i32::MAX as usize) as u32
-}
-
-/// `RWF_NOSIGNAL` (Linux 6.18), which makes a write to a socket whose peer
-/// has closed fail with `EPIPE` instead of raising `SIGPIPE`.
-const RWF_NOSIGNAL: i32 = 0x100;
-
 /// Logical network send request and its in-loop state.
 pub struct SendRequest {
     /// Socket used by the current send SQE.
@@ -548,7 +533,7 @@ impl SendRequest {
                 let bytes = &buf.as_ref()[*offset..];
                 let ptr = bytes.as_ptr();
                 let remaining = bytes.len();
-                SqueueEntry::send(fd, ptr, scalar_len(remaining))
+                SqueueEntry::send(fd, ptr, remaining)
             }
             WriteBuffers::Vectored {
                 bufs,
@@ -559,12 +544,10 @@ impl SendRequest {
             } => {
                 let iovecs_len = fill_iovecs(bufs, *chunk, *offset, iovecs);
 
-                // `Writev` is sufficient here because network sends only need
-                // ordered byte delivery. This layer does not need sendmsg
-                // ancillary data or zerocopy completion management. Unlike
-                // SEND, which the kernel always marks MSG_NOSIGNAL, a socket
-                // WRITEV raises SIGPIPE unless the SQE asks otherwise.
-                SqueueEntry::writev(fd, iovecs.as_ptr(), iovecs_len, 0, RWF_NOSIGNAL)
+                // Network sends only need ordered byte delivery, so this
+                // layer needs no sendmsg ancillary data or zerocopy completion
+                // management.
+                SqueueEntry::send_vectored(fd, iovecs.as_ptr(), iovecs_len)
             }
         }
     }
@@ -616,7 +599,7 @@ impl RecvRequest {
         // offset <= len <= capacity.
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.offset) };
         let remaining = self.len - self.offset;
-        SqueueEntry::recv(fd, ptr, scalar_len(remaining))
+        SqueueEntry::recv(fd, ptr, remaining)
     }
 
     /// Classify one recv CQE and decide whether the logical request completes
@@ -752,12 +735,12 @@ impl ReadAtRequest {
                     && offset.is_multiple_of(DIRECT_ALIGN as u64),
                 "a direct read must be nonempty and aligned"
             );
-            return SqueueEntry::read(direct.fd, ptr, scalar_len(len), offset, 0);
+            return SqueueEntry::read(direct.fd, ptr, len, offset, 0);
         }
 
         // A buffered read submits its unread suffix with the request's cache policy.
         let rw_flags = self.cache.rw_flag(&self.file.dont_cache_supported);
-        SqueueEntry::read(fd, ptr, scalar_len(remaining), offset, rw_flags)
+        SqueueEntry::read(fd, ptr, remaining, offset, rw_flags)
     }
 
     /// Classify one read CQE and decide whether the logical request completes
@@ -958,7 +941,7 @@ impl WriteAtRequest {
             WriteBuffers::Single { buf, offset } => {
                 let bytes = &buf.as_ref()[*offset..];
                 let ptr = bytes.as_ptr();
-                SqueueEntry::write(fd, ptr, scalar_len(bytes.len()), self.offset, rw_flags)
+                SqueueEntry::write(fd, ptr, bytes.len(), self.offset, rw_flags)
             }
             WriteBuffers::Vectored {
                 bufs,
@@ -1580,23 +1563,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_length_prefix_boundary() {
-        for len in [0, 1, i32::MAX as usize - 1, i32::MAX as usize] {
-            assert_eq!(scalar_len(len), len as u32);
-        }
-
-        // Sends and receives reject lengths with the sign bit set.
-        for len in [
-            i32::MAX as usize + 1,
-            u32::MAX as usize,
-            u32::MAX as usize + 1,
-            usize::MAX,
-        ] {
-            assert_eq!(scalar_len(len), i32::MAX as u32);
-        }
-    }
-
-    #[test]
     fn test_scalar_builders_preserve_partial_progress() {
         let deadline = Some(Instant::now());
         let mut send = SendRequest {
@@ -1643,8 +1609,6 @@ mod tests {
         let mut bufs = IoBufs::from(IoBuf::from(b"abc"));
         bufs.append(IoBuf::from(b"de"));
         send.write = bufs.into();
-        let (opcode, _, _, _, _, flags) = read_fields(&send.build_sqe());
-        assert_eq!((opcode, flags), (SqueueEntry::WRITEV, RWF_NOSIGNAL));
         let mut request = Request::Send(send);
         assert!(request.on_cqe(ACTIVE, 3).is_none());
         assert!(matches!(
