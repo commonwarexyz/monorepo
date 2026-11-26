@@ -950,6 +950,9 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         // The faulty participants that run Byzantine code. One that runs its
         // normal engine below is checked as correct.
         let mut byzantine = HashSet::new();
+        // Raw reporters of faulty slots that run a normal engine. They observe
+        // for the per-signer vote invariants only.
+        let mut observers = Vec::new();
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
@@ -968,9 +971,13 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 // Byzantine-led view reliably has a well-formed proposal. Its
                 // application always certifies its own proposal, while all
                 // correct applications consistently reject it. Its raw reporter
-                // is intentionally excluded from the correct audit set below.
+                // is excluded from the correct application audit below, but it
+                // is checked as a correct signer, so its reporter joins the
+                // per-signer vote invariants: it alone may hold the vote that
+                // proves its own entry (e.g. the predecessor notarize of a
+                // pipelined handoff that no audited peer received).
                 let (pending, recovered, resolver) = channels;
-                let _ = spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
+                observers.push(spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
                     ctx,
                     &oracle,
                     &participants,
@@ -988,7 +995,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     CertifyChoice::Always,
                     input.handoff,
                     ReporterWiring::Solo,
-                );
+                ));
             } else {
                 spawn_disrupter_with_relay::<P>(
                     ctx,
@@ -1193,7 +1200,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         if byzantine.is_empty() {
             invariants::check_no_invalid_reports(&summary_reporters);
         }
-        invariants::check_recorded_vote_invariants_with_byzantine(
+        invariants::check_recorded_vote_invariants_with_observers(
             &byzantine,
             P::elector(term_length, input.optimistic_views),
             Epoch::new(EPOCH),
@@ -1201,6 +1208,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             input.optimistic_views,
             input.handoff,
             &reporter_only,
+            &observers,
         );
         invariants::check::<P>(
             config,
@@ -2688,6 +2696,25 @@ mod tests {
             );
             assert!(audit.is_some(), "run with {certify:?} produced no audit");
         }
+    }
+
+    /// Under rejected certification the faulty slot runs a correct engine and
+    /// leads view 3. With rotating leaders and `Handoff::Vote` it casts its
+    /// view-3 notarize from view 2 on its own view-2 notarize. The network is
+    /// partitioned in view 2, so view 2 never certifies or nullifies and no
+    /// audited peer records the slot's one-shot view-2 notarize: only the
+    /// slot's own reporter, which the audit leaves out, holds the vote that
+    /// exempts its handoff vote.
+    #[cfg(feature = "mocks")]
+    #[test]
+    fn rejected_view_handoff_vote_is_exempt() {
+        let bytes = [
+            0x61, 0x00, 0x61, 0x00, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c,
+        ];
+        let input =
+            <FuzzInput as arbitrary::Arbitrary>::arbitrary_take_rest(Unstructured::new(&bytes))
+                .unwrap();
+        fuzz_audit::<simplex::SimplexCertificateMock>(input);
     }
 
     #[test]
