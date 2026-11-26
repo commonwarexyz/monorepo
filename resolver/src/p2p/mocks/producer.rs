@@ -4,10 +4,18 @@ use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use std::collections::HashMap;
 
 /// A producer that can be used for testing
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Producer<K: Span, V> {
     /// The data that the producer produces upon request
     data: HashMap<K, V>,
+}
+
+impl<K: Span, V> Default for Producer<K, V> {
+    fn default() -> Self {
+        Self {
+            data: HashMap::new(),
+        }
+    }
 }
 
 impl<K: Span, V> Producer<K, V> {
