@@ -2733,9 +2733,11 @@ where
         // advances three cursors in a sorted merge instead of three binary searches per key.
         let changes_membership = !created.is_empty() || !deleted.is_empty();
         if changes_membership {
-            // An updated key is a predecessor candidate without a rewrite source, because its own
-            // operation carries its link. Pushed after the candidates read above, it is the one
-            // kept for its key. A deleted key is never a predecessor.
+            // List each key this batch updates as a possible predecessor, without the value and
+            // location a rewrite needs: the update emitted below already names the key's new
+            // successor. Pushed after the candidates read above, it is the one kept for its key.
+            // A created key is not listed, having no earlier operation to rewrite, and a deleted
+            // key is never a predecessor.
             neighbors
                 .prev
                 .extend(updated.iter().map(|(key, ..)| (key.clone(), None)));
@@ -2818,9 +2820,8 @@ where
         if !neighbors.prev.is_empty() {
             // The create/delete ranges stay fixed as predecessor rewrites are appended.
             for idx in created_range.chain(deleted_range) {
-                // A predecessor this batch updates has no source to claim, because its own
-                // operation carries its link. Creates have no active operation before this batch,
-                // and deletes are excluded from candidates.
+                // `claim` never returns a key this batch writes, as arranged where the candidates
+                // are listed, so the rewrite below cannot repeat one of its operations.
                 let Some((prev_key, (prev_value, prev_loc), prev_next_key)) =
                     neighbors.claim(&walked.diff[idx].0)
                 else {
