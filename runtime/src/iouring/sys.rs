@@ -121,31 +121,28 @@ const IORING_UNREGISTER_RING_FDS: c_long = 21;
 const IORING_REGISTER_SYNC_CANCEL: c_long = 24;
 
 /// Flags of `io_uring_enter`.
-///
-/// [`IoUring::enter`] derives EXT_ARG and REGISTERED_RING itself, so only it
-/// can name them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EnterFlags(u32);
+struct EnterFlags(u32);
 
 impl EnterFlags {
     /// Run deferred task work and wait for `min_complete` completions.
-    pub const GETEVENTS: Self = Self(1 << 0);
+    const GETEVENTS: Self = Self(1 << 0);
     /// The argument is an `io_uring_getevents_arg` instead of a signal mask.
     const EXT_ARG: Self = Self(1 << 3);
     /// The descriptor argument is a slot in the calling thread's ring table.
     const REGISTERED_RING: Self = Self(1 << 4);
     /// A blocking wait does not count as iowait.
-    pub const NO_IOWAIT: Self = Self(1 << 7);
+    const NO_IOWAIT: Self = Self(1 << 7);
 
     /// No flags.
     #[inline]
-    pub const fn empty() -> Self {
+    const fn empty() -> Self {
         Self(0)
     }
 
     /// Whether every flag in `other` is set.
     #[cfg(test)]
-    pub const fn contains(self, other: Self) -> bool {
+    const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 }
@@ -157,34 +154,19 @@ impl BitOrAssign for EnterFlags {
     }
 }
 
-/// The kernel's `__kernel_timespec`, two 64-bit fields on every target.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Timespec {
-    /// Whole seconds.
-    tv_sec: i64,
-    /// Nanoseconds below one second.
-    tv_nsec: i64,
-}
-
+// The kernel reads timeouts as `__kernel_timespec`, two 64-bit fields, which
+// `libc::timespec` matches on the 64-bit Linux targets the runtime supports.
 const _: () = {
-    assert!(mem::size_of::<Timespec>() == 16);
-    assert!(mem::offset_of!(Timespec, tv_sec) == 0);
-    assert!(mem::offset_of!(Timespec, tv_nsec) == 8);
+    assert!(mem::size_of::<libc::timespec>() == 16);
+    assert!(mem::offset_of!(libc::timespec, tv_sec) == 0);
+    assert!(mem::offset_of!(libc::timespec, tv_nsec) == 8);
 };
 
-impl From<Duration> for Timespec {
-    /// Convert `duration`, saturating at `i64::MAX` seconds.
-    ///
-    /// The kernel adds a relative timeout to the current time without an
-    /// overflow check, so callers bound timeouts well below its range of
-    /// about 292 years. The runtime caps them at 30 years.
-    #[inline]
-    fn from(duration: Duration) -> Self {
-        Self {
-            tv_sec: i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
-            tv_nsec: i64::from(duration.subsec_nanos()),
-        }
+/// Convert `duration` to a kernel timeout, saturating at `i64::MAX` seconds.
+fn timespec(duration: Duration) -> libc::timespec {
+    libc::timespec {
+        tv_sec: i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(duration.subsec_nanos()),
     }
 }
 
@@ -197,7 +179,7 @@ struct GeteventsArg {
     sigmask_sz: u32,
     /// Minimum wait in microseconds before returning fewer completions.
     min_wait_usec: u32,
-    /// Pointer to the wait's [`Timespec`].
+    /// Pointer to the wait's timeout.
     ts: u64,
 }
 
@@ -705,7 +687,7 @@ struct SyncCancelReg {
     /// Cancel flags, zero to match by `user_data`.
     flags: u32,
     /// How long to wait for the cancelled requests, all ones for no limit.
-    timeout: Timespec,
+    timeout: libc::timespec,
     /// Opcode to match, unused without the matching cancel flag.
     opcode: u8,
     /// Must be zero.
@@ -831,18 +813,6 @@ impl Word {
     }
 }
 
-/// Check that a ring's mask and entry count words match `entries`, which
-/// must be a power of two.
-fn check_ring_size(mask: Word, ring_entries: Word, entries: u32) -> io::Result<()> {
-    if !entries.is_power_of_two()
-        || mask.load(Ordering::Relaxed) != entries - 1
-        || ring_entries.load(Ordering::Relaxed) != entries
-    {
-        return Err(invalid("ring size mismatch"));
-    }
-    Ok(())
-}
-
 /// The submission queue writer's state.
 struct SubmissionQueueInner {
     /// First SQE slot.
@@ -857,6 +827,51 @@ struct SubmissionQueueInner {
 }
 
 impl SubmissionQueueInner {
+    /// Build the SQ writer over ring memory laid out as `params` describes.
+    ///
+    /// # Safety
+    ///
+    /// `rings` must be valid for atomic reads and writes of `rings_len`
+    /// bytes, and `sqes` for reads and writes of `params.sq_entries` SQEs, as
+    /// long as the writer is used. No other user-side writer may access the
+    /// queue.
+    unsafe fn new(
+        params: &Parameters,
+        rings: NonNull<u8>,
+        rings_len: usize,
+        sqes: NonNull<SqueueEntry>,
+    ) -> io::Result<Self> {
+        let off = &params.sq_off;
+        let entries = params.sq_entries;
+
+        // SAFETY: The caller guarantees `rings_len` bytes at `rings`, and each
+        // word is checked against them.
+        let word = |offset| unsafe { Word::new(rings, rings_len, offset) };
+        if !entries.is_power_of_two()
+            || word(off.ring_mask)?.load(Ordering::Relaxed) != entries - 1
+            || word(off.ring_entries)?.load(Ordering::Relaxed) != entries
+        {
+            return Err(invalid("SQ size mismatch"));
+        }
+        if !sqes.is_aligned() {
+            return Err(invalid("SQEs misaligned"));
+        }
+        Ok(Self {
+            sqes,
+            kflags: word(off.flags)?,
+            entries,
+            staged: 0,
+        })
+    }
+
+    /// Whether the kernel holds completions that did not fit in the CQ.
+    #[inline]
+    fn cq_overflow(&self) -> bool {
+        // The flag only decides whether a flush also asks for events, and no
+        // data is read through it, so a relaxed load suffices, as in liburing.
+        self.kflags.load(Ordering::Relaxed) & IORING_SQ_CQ_OVERFLOW != 0
+    }
+
     /// Drop the first `consumed` staged SQEs, which an enter consumed, and
     /// move the rest to the first slots in order.
     #[inline]
@@ -910,14 +925,6 @@ impl SubmissionQueue<'_> {
         self.sq.staged == self.sq.entries
     }
 
-    /// Whether the kernel holds completions that did not fit in the CQ.
-    #[inline]
-    pub fn cq_overflow(&self) -> bool {
-        // The flag only decides whether a flush also asks for events, and no
-        // data is read through it, so a relaxed load suffices, as in liburing.
-        self.sq.kflags.load(Ordering::Relaxed) & IORING_SQ_CQ_OVERFLOW != 0
-    }
-
     /// Write `sqe` into the next free slot. The next enter submits it.
     ///
     /// # Safety
@@ -963,6 +970,51 @@ struct CompletionQueueInner {
 }
 
 impl CompletionQueueInner {
+    /// Build the CQ reader over ring memory laid out as `params` describes.
+    ///
+    /// # Safety
+    ///
+    /// `rings` must be valid for atomic reads and writes of `rings_len` bytes
+    /// as long as the reader is used. No other user-side reader may access
+    /// the queue.
+    unsafe fn new(params: &Parameters, rings: NonNull<u8>, rings_len: usize) -> io::Result<Self> {
+        let off = &params.cq_off;
+        let entries = params.cq_entries;
+
+        // SAFETY: The caller guarantees `rings_len` bytes at `rings`, and each
+        // word is checked against them.
+        let word = |offset| unsafe { Word::new(rings, rings_len, offset) };
+        if !entries.is_power_of_two()
+            || word(off.ring_mask)?.load(Ordering::Relaxed) != entries - 1
+            || word(off.ring_entries)?.load(Ordering::Relaxed) != entries
+        {
+            return Err(invalid("CQ size mismatch"));
+        }
+
+        let cqes_offset = off.cqes as usize;
+        if (entries as usize)
+            .checked_mul(mem::size_of::<CqueueEntry>())
+            .and_then(|size| size.checked_add(cqes_offset))
+            .is_none_or(|end| end > rings_len)
+        {
+            return Err(invalid("CQEs outside their mapping"));
+        }
+
+        // SAFETY: The CQE array ends within the `rings_len` bytes at `rings`.
+        let cqes = unsafe { rings.add(cqes_offset) }.cast::<CqueueEntry>();
+        if !cqes.is_aligned() {
+            return Err(invalid("CQEs misaligned"));
+        }
+        Ok(Self {
+            cqes,
+            khead: word(off.head)?,
+            ktail: word(off.tail)?,
+            koverflow: word(off.overflow)?,
+            mask: entries - 1,
+            head: 0,
+        })
+    }
+
     /// A view of the CQEs posted so far.
     #[inline]
     fn completion(&mut self) -> CompletionQueue<'_> {
@@ -1050,68 +1102,6 @@ impl Drop for CompletionQueue<'_> {
     }
 }
 
-/// Build the SQ writer and CQ reader over ring memory laid out as `params`
-/// describes.
-///
-/// # Safety
-///
-/// `rings` must be valid for atomic reads and writes of `rings_len` bytes,
-/// and `sqes` for reads and writes of `params.sq_entries` SQEs, as long as
-/// the queues are used. No other user-side writer may access the queues.
-unsafe fn queues(
-    params: &Parameters,
-    rings: NonNull<u8>,
-    rings_len: usize,
-    sqes: NonNull<SqueueEntry>,
-) -> io::Result<(SubmissionQueueInner, CompletionQueueInner)> {
-    let (sq_off, cq_off) = (&params.sq_off, &params.cq_off);
-
-    // SAFETY: The caller guarantees `rings_len` bytes at `rings`, and each
-    // word is checked against them.
-    let word = |offset| unsafe { Word::new(rings, rings_len, offset) };
-    check_ring_size(
-        word(sq_off.ring_mask)?,
-        word(sq_off.ring_entries)?,
-        params.sq_entries,
-    )?;
-    check_ring_size(
-        word(cq_off.ring_mask)?,
-        word(cq_off.ring_entries)?,
-        params.cq_entries,
-    )?;
-
-    let cqes_offset = cq_off.cqes as usize;
-    if (params.cq_entries as usize)
-        .checked_mul(mem::size_of::<CqueueEntry>())
-        .and_then(|size| size.checked_add(cqes_offset))
-        .is_none_or(|end| end > rings_len)
-    {
-        return Err(invalid("CQEs outside their mapping"));
-    }
-
-    // SAFETY: The CQE array ends within the `rings_len` bytes at `rings`.
-    let cqes = unsafe { rings.add(cqes_offset) }.cast::<CqueueEntry>();
-    if !cqes.is_aligned() || !sqes.is_aligned() {
-        return Err(invalid("entries misaligned"));
-    }
-
-    let sq = SubmissionQueueInner {
-        sqes,
-        kflags: word(sq_off.flags)?,
-        entries: params.sq_entries,
-        staged: 0,
-    };
-    let cq = CompletionQueueInner {
-        cqes,
-        khead: word(cq_off.head)?,
-        ktail: word(cq_off.tail)?,
-        koverflow: word(cq_off.overflow)?,
-        mask: params.cq_entries - 1,
-        head: 0,
-    };
-    Ok((sq, cq))
-}
-
 /// An io_uring instance and its shared memory, owned by the creating thread.
 pub struct IoUring {
     /// SQ writer over the mappings.
@@ -1119,8 +1109,8 @@ pub struct IoUring {
     /// CQ reader over the rings mapping.
     cq: CompletionQueueInner,
     /// The ring's slot in the owner thread's ring table, which enters name
-    /// the ring by, until the slot is released.
-    slot: Option<u32>,
+    /// the ring by. The ring's drop releases it.
+    slot: u32,
     /// SQE array mapping, unmapped after the queues are gone.
     _sqes: Mmap,
     /// Shared rings mapping, unmapped after the queues are gone.
@@ -1187,26 +1177,28 @@ impl IoUring {
         // SAFETY: Both mappings span the lengths passed and are unmapped only
         // after the queues, which the ring owns alongside them. The ring is
         // the only user-side writer.
-        let (sq, cq) = unsafe { queues(&params, rings.ptr, rings.len, sqes.ptr.cast()) }?;
-        let mut ring = Self {
+        let sq =
+            unsafe { SubmissionQueueInner::new(&params, rings.ptr, rings.len, sqes.ptr.cast()) }?;
+        // SAFETY: As for the SQ, over the rings mapping alone.
+        let cq = unsafe { CompletionQueueInner::new(&params, rings.ptr, rings.len) }?;
+
+        // Register last, so a failure leaves nothing registered, and nothing
+        // can fail between the registration and the ring owning its slot.
+        let slot = Self::register_ring_fd(&fd)?;
+        Ok(Self {
             sq,
             cq,
-            slot: None,
+            slot,
             _sqes: sqes,
             _rings: rings,
             fd,
             _owner: PhantomData,
-        };
-
-        // Register last. A failure drops the ring with nothing registered,
-        // and from here on the ring's drop releases the slot.
-        ring.slot = Some(ring.register_ring_fd()?);
-        Ok(ring)
+        })
     }
 
-    /// The ring's slot in the owner thread's ring table, until released.
-    #[inline]
-    pub const fn slot(&self) -> Option<u32> {
+    /// The ring's slot in the owner thread's ring table.
+    #[cfg(test)]
+    pub const fn slot(&self) -> u32 {
         self.slot
     }
 
@@ -1229,24 +1221,68 @@ impl IoUring {
         self.cq.overflow()
     }
 
-    /// Submit every pushed, unconsumed SQE and then do what `flags` ask.
+    /// Submit every staged SQE.
+    ///
+    /// While the CQ has overflowed, the enter also passes GETEVENTS, so the
+    /// kernel moves its overflow backlog into the CQ. Returns the number of
+    /// SQEs the kernel consumed.
+    #[inline]
+    pub fn submit(&mut self) -> io::Result<u32> {
+        let flags = if self.sq.cq_overflow() {
+            EnterFlags::GETEVENTS
+        } else {
+            EnterFlags::empty()
+        };
+        self.enter(0, flags, None)
+    }
+
+    /// Submit every staged SQE, then run a batch of deferred task work, which
+    /// posts the completions it finishes, without waiting, as liburing's
+    /// `io_uring_submit_and_get_events` does.
+    ///
+    /// Returns the number of SQEs the kernel consumed. Newer kernels bound
+    /// the batch and leave the rest for a later enter.
+    #[inline]
+    pub fn submit_and_get_events(&mut self) -> io::Result<u32> {
+        self.enter(0, EnterFlags::GETEVENTS, None)
+    }
+
+    /// Submit every staged SQE, then wait until at least one completion is
+    /// posted, for at most `timeout` when given, which then fails with
+    /// `ETIME`.
+    ///
+    /// The wait counts as iowait only when `iowait` is set. Returns the
+    /// number of SQEs the kernel consumed. If that falls short of the staged
+    /// count, the kernel returns without waiting. `timeout` saturates at
+    /// `i64::MAX` seconds, and the kernel adds it to the current time without
+    /// an overflow check, so callers bound it well below about 292 years.
+    #[inline]
+    pub fn submit_and_wait(&mut self, timeout: Option<Duration>, iowait: bool) -> io::Result<u32> {
+        let mut flags = EnterFlags::GETEVENTS;
+        if !iowait {
+            flags |= EnterFlags::NO_IOWAIT;
+        }
+        self.enter(1, flags, timeout)
+    }
+
+    /// Submit every staged SQE and then do what `flags` ask.
     ///
     /// `timeout`, when present, bounds a wait for `min_complete` completions
     /// through EXT_ARG. Returns the number of SQEs the kernel consumed, which
-    /// falls short of the pushed count when the kernel stopped early, and
-    /// then GETEVENTS was skipped. Fails with `EBADF` once the ring's slot is
-    /// released.
+    /// falls short of the staged count when the kernel stopped early, and
+    /// then GETEVENTS was skipped.
     #[inline]
-    pub fn enter(
+    fn enter(
         &mut self,
         min_complete: u32,
         mut flags: EnterFlags,
-        timeout: Option<&Timespec>,
+        timeout: Option<Duration>,
     ) -> io::Result<u32> {
         let to_submit = self.sq.staged;
 
         // No signal mask. EXT_ARG bounds the wait without a timeout SQE.
-        let arg = timeout.map(|timeout| GeteventsArg {
+        let timeout = timeout.map(timespec);
+        let arg = timeout.as_ref().map(|timeout| GeteventsArg {
             sigmask: 0,
             sigmask_sz: 0,
             min_wait_usec: 0,
@@ -1259,9 +1295,6 @@ impl IoUring {
                 mem::size_of::<GeteventsArg>(),
             )
         });
-        let Some(slot) = self.slot else {
-            return Err(io::Error::from_raw_os_error(libc::EBADF));
-        };
         flags |= EnterFlags::REGISTERED_RING;
 
         #[cfg(test)]
@@ -1272,7 +1305,7 @@ impl IoUring {
             }
         }
 
-        // SAFETY: `slot` names this ring in this thread's table, as
+        // SAFETY: The slot names this ring in this thread's table, as
         // REGISTERED_RING tells the kernel. Pushing guaranteed that the staged
         // SQEs' resources outlive their completions. `arg_ptr` is null
         // exactly when EXT_ARG is unset, and otherwise points to an
@@ -1281,7 +1314,7 @@ impl IoUring {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_io_uring_enter,
-                c_long::from(slot.cast_signed()),
+                c_long::from(self.slot.cast_signed()),
                 c_long::from(to_submit.cast_signed()),
                 c_long::from(min_complete.cast_signed()),
                 c_long::from(flags.0.cast_signed()),
@@ -1298,13 +1331,13 @@ impl IoUring {
         Ok(consumed)
     }
 
-    /// Register the ring descriptor with the calling thread and return its
-    /// slot.
-    fn register_ring_fd(&self) -> io::Result<u32> {
+    /// Register the ring descriptor `fd` with the calling thread and return
+    /// its slot.
+    fn register_ring_fd(fd: &OwnedFd) -> io::Result<u32> {
         let mut update = RsrcUpdate {
             offset: u32::MAX,
             resv: 0,
-            data: u64::from(self.as_raw_fd().cast_unsigned()),
+            data: u64::from(fd.as_raw_fd().cast_unsigned()),
         };
 
         // SAFETY: `update` is one writable `io_uring_rsrc_update`, which the
@@ -1312,7 +1345,7 @@ impl IoUring {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_io_uring_register,
-                c_long::from(self.as_raw_fd()),
+                c_long::from(fd.as_raw_fd()),
                 IORING_REGISTER_RING_FDS,
                 &raw mut update,
                 1 as c_long,
@@ -1336,44 +1369,6 @@ impl IoUring {
         }
     }
 
-    /// Release the ring's registered slot, if any, through the raw
-    /// descriptor. After a success the ring can no longer be entered.
-    ///
-    /// A failure keeps the slot, and the ring's drop tries again to release
-    /// it.
-    pub fn unregister_ring_fd(&mut self) -> io::Result<()> {
-        let Some(slot) = self.slot else {
-            return Ok(());
-        };
-        let update = RsrcUpdate {
-            offset: slot,
-            resv: 0,
-            data: 0,
-        };
-
-        // SAFETY: `update` is one `io_uring_rsrc_update`, which the kernel
-        // reads during the call.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_io_uring_register,
-                c_long::from(self.as_raw_fd()),
-                IORING_UNREGISTER_RING_FDS,
-                &raw const update,
-                1 as c_long,
-            )
-        };
-        match result {
-            1 => {
-                self.slot = None;
-                Ok(())
-            }
-            result if result < 0 => Err(io::Error::last_os_error()),
-            _ => Err(io::Error::other(
-                "ring descriptor unregistration was not applied",
-            )),
-        }
-    }
-
     /// Synchronously cancel a request with `user_data`.
     ///
     /// Without cancel flags, the kernel cancels only the first match. On
@@ -1387,7 +1382,7 @@ impl IoUring {
             addr: user_data,
             fd: -1,
             flags: 0,
-            timeout: Timespec {
+            timeout: libc::timespec {
                 tv_sec: -1,
                 tv_nsec: -1,
             },
@@ -1422,11 +1417,30 @@ impl AsRawFd for IoUring {
 }
 
 impl Drop for IoUring {
+    /// Release the ring's slot through the raw descriptor, before the
+    /// mappings and the descriptor go.
+    ///
+    /// The slot holds a reference that keeps the ring open. Only the owner
+    /// thread can release it, so a ring dropped elsewhere keeps its slot, and
+    /// so the ring, until that thread exits.
     fn drop(&mut self) {
-        // A ring dropped while registered releases its slot before the
-        // mappings and the descriptor go. An owner that reports failures
-        // unregisters first.
-        let _ = self.unregister_ring_fd();
+        let update = RsrcUpdate {
+            offset: self.slot,
+            resv: 0,
+            data: 0,
+        };
+
+        // SAFETY: `update` is one `io_uring_rsrc_update`, which the kernel
+        // reads during the call. A failure leaves only the slot behind.
+        unsafe {
+            libc::syscall(
+                libc::SYS_io_uring_register,
+                c_long::from(self.fd.as_raw_fd()),
+                IORING_UNREGISTER_RING_FDS,
+                &raw const update,
+                1 as c_long,
+            )
+        };
     }
 }
 
@@ -1455,8 +1469,8 @@ pub mod tests {
     use std::cell::Cell;
 
     thread_local! {
-        /// Minimum completion count and flags of this thread's latest enter.
-        static LAST_ENTER: Cell<Option<(u32, EnterFlags)>> = const { Cell::new(None) };
+        /// What this thread's latest enter asked of the kernel.
+        static LAST_ENTER: Cell<Option<EnterRecord>> = const { Cell::new(None) };
 
         /// Error the next enter on this thread returns instead of entering.
         static FAIL_ENTER: Cell<Option<i32>> = const { Cell::new(None) };
@@ -1470,20 +1484,38 @@ pub mod tests {
     }
 
     /// Remember an enter's arguments for assertions on the calling thread.
-    pub fn record_enter(min_complete: u32, flags: EnterFlags) {
-        LAST_ENTER.set(Some((min_complete, flags)));
+    pub(super) fn record_enter(min_complete: u32, flags: EnterFlags) {
+        assert!(flags.contains(EnterFlags::REGISTERED_RING));
+        LAST_ENTER.set(Some(EnterRecord {
+            min_complete,
+            getevents: flags.contains(EnterFlags::GETEVENTS),
+            no_iowait: flags.contains(EnterFlags::NO_IOWAIT),
+            timed: flags.contains(EnterFlags::EXT_ARG),
+        }));
     }
 
-    /// Minimum completion count and flags of this thread's latest enter.
-    pub fn last_enter() -> Option<(u32, EnterFlags)> {
+    /// What an enter asked of the kernel.
+    #[derive(Clone, Copy, Debug)]
+    pub struct EnterRecord {
+        /// Minimum completion count to wait for.
+        pub min_complete: u32,
+        /// Whether it ran task work and posted completions (GETEVENTS).
+        pub getevents: bool,
+        /// Whether a blocking wait would not count as iowait (NO_IOWAIT).
+        pub no_iowait: bool,
+        /// Whether a timeout bounded the wait (EXT_ARG).
+        pub timed: bool,
+    }
+
+    /// What this thread's latest enter asked of the kernel.
+    pub fn last_enter() -> Option<EnterRecord> {
         LAST_ENTER.get()
     }
 
-    /// The flag [`IoUring::enter`] sets for an enter bounded by a timeout.
-    pub const EXT_ARG: EnterFlags = EnterFlags::EXT_ARG;
-
-    /// The flag [`IoUring::enter`] sets for an enter through a registered slot.
-    pub const REGISTERED_RING: EnterFlags = EnterFlags::REGISTERED_RING;
+    /// Whether the kernel holds completions that did not fit in `ring`'s CQ.
+    pub fn cq_overflow(ring: &IoUring) -> bool {
+        ring.sq.cq_overflow()
+    }
 
     /// Fail this thread's next enter with `errno`, as a kernel that rejects
     /// the enter before submitting does.
@@ -1511,7 +1543,7 @@ pub mod tests {
     /// slot the calling thread no longer holds.
     pub fn release_slot(ring: &IoUring) {
         let update = RsrcUpdate {
-            offset: ring.slot.expect("registered ring"),
+            offset: ring.slot,
             resv: 0,
             data: 0,
         };
@@ -1534,7 +1566,7 @@ pub mod tests {
     /// [`release_slot`].
     fn restore_slot(ring: &IoUring) {
         let update = RsrcUpdate {
-            offset: ring.slot.expect("registered ring"),
+            offset: ring.slot,
             resv: 0,
             data: u64::from(ring.as_raw_fd().cast_unsigned()),
         };
@@ -1748,8 +1780,12 @@ pub mod tests {
             // SAFETY: The allocations span `RINGS_LEN` bytes and
             // `SQ_ENTRIES` SQEs, and the returned value frees them only
             // when it drops along with the queues.
-            let (sq, cq) =
-                unsafe { queues(&params, kernel.rings, RINGS_LEN, kernel.sqes) }.unwrap();
+            let sq =
+                unsafe { SubmissionQueueInner::new(&params, kernel.rings, RINGS_LEN, kernel.sqes) }
+                    .unwrap();
+            // SAFETY: As for the SQ.
+            let cq =
+                unsafe { CompletionQueueInner::new(&params, kernel.rings, RINGS_LEN) }.unwrap();
             Self {
                 sq,
                 cq,
@@ -1923,9 +1959,12 @@ pub mod tests {
         let fake = FakeRing::new();
         let ring = &fake.kernel;
         let check = |params: Parameters| {
-            // SAFETY: The fake ring's memory outlives the call, and no queue
-            // is returned.
-            let result = unsafe { queues(&params, ring.rings, RINGS_LEN, ring.sqes) };
+            // SAFETY: The fake ring's memory outlives the calls, and no queue
+            // is used.
+            let result = unsafe {
+                SubmissionQueueInner::new(&params, ring.rings, RINGS_LEN, ring.sqes)
+                    .and(CompletionQueueInner::new(&params, ring.rings, RINGS_LEN).map(drop))
+            };
             assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidData);
         };
         // A word past the end of the mapping, and a misaligned word.
@@ -1954,7 +1993,8 @@ pub mod tests {
         // SAFETY: The rings and `slots` outlive the call, `SQ_ENTRIES`
         // slots from the shifted pointer end within `slots`, and no queue is
         // returned.
-        let result = unsafe { queues(&params, ring.rings, RINGS_LEN, sqes.byte_add(4)) };
+        let result =
+            unsafe { SubmissionQueueInner::new(&params, ring.rings, RINGS_LEN, sqes.byte_add(4)) };
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidData);
 
         // Ring sizes that disagree with the kernel's words: the entry count
@@ -2035,32 +2075,25 @@ pub mod tests {
         assert_eq!(LIVE_MAPPINGS.get(), 0);
     }
 
-    /// A real ring submits through its registered slot, its CQ yields each
-    /// completion once, and it cannot be entered once the slot is released.
+    /// A real ring submits through its registered slot, and its CQ yields each
+    /// completion once.
     #[test]
     fn test_ring_submits_and_completes() {
         let mut ring = IoUring::new(4).unwrap();
-        assert!(ring.slot().is_some());
         for user_data in 0..4 {
             // SAFETY: A NOP refers to no resources.
             unsafe { ring.submission().push(&nop(user_data)) };
         }
         assert!(ring.submission().is_full());
-        assert_eq!(ring.enter(4, EnterFlags::GETEVENTS, None).unwrap(), 4);
-        let (min_complete, flags) = last_enter().unwrap();
-        assert_eq!(min_complete, 4);
-        assert!(flags.contains(REGISTERED_RING));
+        assert_eq!(ring.submit_and_wait(None, true).unwrap(), 4);
+        let enter = last_enter().unwrap();
+        assert_eq!(enter.min_complete, 1);
+        assert!(enter.getevents && !enter.no_iowait && !enter.timed);
         assert!(ring.submission().is_empty());
         let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
         completed.sort_unstable();
         assert_eq!(completed, [0, 1, 2, 3]);
         assert!(ring.completion().is_empty());
-
-        // A released slot cannot be entered.
-        ring.unregister_ring_fd().unwrap();
-        assert_eq!(ring.slot(), None);
-        let error = ring.enter(0, EnterFlags::GETEVENTS, None).unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
     }
 
     /// A submission that stops at an SQE the kernel rejects consumes exactly
@@ -2086,7 +2119,7 @@ pub mod tests {
                 unsafe { sq.push(&sqe) };
             }
             let consumed = rejected + 1;
-            assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), consumed);
+            assert_eq!(ring.submit().unwrap(), consumed);
             assert_eq!(ring.submission().len(), 4 - consumed as usize);
             let mut completed: Vec<_> = ring
                 .completion()
@@ -2100,7 +2133,7 @@ pub mod tests {
             // The rest goes first, then a push.
             // SAFETY: A NOP refers to no resources.
             unsafe { ring.submission().push(&nop(5)) };
-            let submitted = ring.enter(0, EnterFlags::empty(), None);
+            let submitted = ring.submit();
             assert_eq!(submitted.unwrap(), 5 - consumed);
             assert!(ring.submission().is_empty());
             let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
@@ -2123,12 +2156,8 @@ pub mod tests {
             SqueueEntry::futex_wait(WORD.as_ptr(), 0, u64::from(u32::MAX), FUTEX2_PRIVATE_U32);
         // SAFETY: The word is static.
         unsafe { ring.submission().push(&wait.with_user_data(7)) };
-        let timeout = Timespec::from(Duration::from_millis(1));
-        assert_eq!(
-            ring.enter(1, EnterFlags::GETEVENTS, Some(&timeout))
-                .unwrap(),
-            1
-        );
+        let timeout = Some(Duration::from_millis(1));
+        assert_eq!(ring.submit_and_wait(timeout, true).unwrap(), 1);
         assert!(ring.submission().is_empty());
         assert!(ring.completion().is_empty());
 
@@ -2138,16 +2167,16 @@ pub mod tests {
             ring.submission()
                 .push(&SqueueEntry::async_cancel(7).with_user_data(8))
         };
-        let timeout = Timespec::from(Duration::from_secs(10));
-        assert_eq!(
-            ring.enter(2, EnterFlags::GETEVENTS, Some(&timeout))
-                .unwrap(),
-            1
-        );
-        let mut completed: Vec<_> = ring
-            .completion()
-            .map(|cqe| (cqe.user_data(), cqe.result()))
-            .collect();
+        let timeout = Some(Duration::from_secs(10));
+        assert_eq!(ring.submit_and_wait(timeout, true).unwrap(), 1);
+        let mut completed = Vec::new();
+        loop {
+            completed.extend(ring.completion().map(|cqe| (cqe.user_data(), cqe.result())));
+            if completed.len() >= 2 {
+                break;
+            }
+            ring.submit_and_wait(timeout, true).unwrap();
+        }
         completed.sort_unstable();
         assert_eq!(completed.len(), 2);
         assert_eq!(completed[0], (7, -libc::ECANCELED));
@@ -2170,37 +2199,17 @@ pub mod tests {
 
         // A slot released behind the ring fails the enter before submission.
         release_slot(&ring);
-        let error = ring.enter(0, EnterFlags::empty(), None).unwrap_err();
+        let error = ring.submit().unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EBADF));
         assert_eq!(ring.submission().len(), 2);
         assert!(ring.completion().is_empty());
 
         // Once the slot names the ring again, the next enter submits both.
         restore_slot(&ring);
-        assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), 2);
+        assert_eq!(ring.submit().unwrap(), 2);
         let mut completed: Vec<_> = ring.completion().map(|cqe| cqe.user_data()).collect();
         completed.sort_unstable();
         assert_eq!(completed, [1, 2]);
-    }
-
-    /// A failed unregistration keeps the slot, and dropping the ring then
-    /// releases it, so the next ring on the thread takes the same slot.
-    #[test]
-    fn test_ring_drop_releases_a_slot_whose_unregistration_failed() {
-        let mut ring = IoUring::new(1).unwrap();
-        let slot = ring.slot().unwrap();
-
-        // The kernel rejects an unregistration through a descriptor that is
-        // not a ring.
-        let null = std::fs::File::open("/dev/null").unwrap().into();
-        let fd = mem::replace(&mut ring.fd, null);
-        let failed = ring.unregister_ring_fd();
-        ring.fd = fd;
-        assert!(failed.is_err());
-        assert_eq!(ring.slot(), Some(slot));
-
-        drop(ring);
-        assert_eq!(IoUring::new(1).unwrap().slot(), Some(slot));
     }
 
     /// A thread registers at most sixteen rings, so a seventeenth fails to
@@ -2223,7 +2232,7 @@ pub mod tests {
         for ring in &mut rings {
             // SAFETY: A NOP refers to no resources.
             unsafe { ring.submission().push(&nop(1)) };
-            assert_eq!(ring.enter(1, EnterFlags::GETEVENTS, None).unwrap(), 1);
+            assert_eq!(ring.submit_and_wait(None, true).unwrap(), 1);
             assert_eq!(ring.completion().count(), 1);
         }
     }
@@ -2234,13 +2243,11 @@ pub mod tests {
         let mut ring = IoUring::new(4).unwrap();
         let timeout = Duration::from_millis(20);
         let start = std::time::Instant::now();
-        let error = ring
-            .enter(1, EnterFlags::GETEVENTS, Some(&timeout.into()))
-            .unwrap_err();
+        let error = ring.submit_and_wait(Some(timeout), false).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ETIME));
         assert!(start.elapsed() >= timeout);
-        let (_, flags) = last_enter().unwrap();
-        assert!(flags.contains(EXT_ARG));
+        let enter = last_enter().unwrap();
+        assert!(enter.timed && enter.no_iowait);
     }
 }
 

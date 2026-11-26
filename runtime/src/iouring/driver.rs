@@ -65,9 +65,7 @@ use super::{
     park::{Parker, RING_WAIT_USER_DATA, Unparker},
     request::{Request, RequestOutput},
     runtime::{Deferred, RingConfig},
-    sys::{
-        CompletionQueue, EnterFlags, IoUring, SqueueEntry, SqueueFlags, SubmissionQueue, Timespec,
-    },
+    sys::{CompletionQueue, IoUring, SqueueEntry, SqueueFlags, SubmissionQueue},
     waiter::{CompletionOutcome, Observer, UserData, WaiterId, Waiters},
 };
 use crate::Error;
@@ -449,44 +447,22 @@ impl Driver {
 
         // The ring asks the kernel to submit exactly the staged SQEs. The
         // kernel skips GETEVENTS if it submits fewer, so a later service or
-        // retry must still run the task work.
-        let mut flags = EnterFlags::empty();
-        let mut min_complete = 0;
-        let mut timespec = None;
-        match mode {
-            // GETEVENTS also moves the kernel's overflow backlog into the CQ,
-            // which a flush needs only after the CQ has overflowed. Only a
-            // flush reads the overflow flag, since every other mode passes
-            // GETEVENTS anyway.
-            Enter::Flush => {
-                if ring.submission().cq_overflow() {
-                    flags |= EnterFlags::GETEVENTS;
-                }
-            }
-            // GETEVENTS with no minimum completion count runs a batch of
-            // deferred task work and returns, as liburing's
-            // `io_uring_submit_and_get_events` does. Newer kernels bound the
-            // batch and leave the rest for a later enter.
-            Enter::TaskWork => flags |= EnterFlags::GETEVENTS,
+        // retry must still run the task work. A timed wait is bounded through
+        // EXT_ARG, without reserving an SQE for a timeout. A deadline that
+        // already passed became a task-work enter.
+        let mut timed = false;
+        let result = match mode {
+            Enter::Flush => ring.submit(),
+            Enter::TaskWork => ring.submit_and_get_events(),
             Enter::Wait { deadline, iowait } => {
-                flags |= EnterFlags::GETEVENTS;
-                min_complete = 1;
-                if !iowait {
-                    flags |= EnterFlags::NO_IOWAIT;
-                }
-
-                // EXT_ARG bounds the wait without reserving an SQE for a
-                // timeout. A deadline that already passed became a task-work
-                // enter.
-                if deadline.is_some() {
-                    timespec = Some(Timespec::from(timeout));
-                }
+                timed = deadline.is_some();
+                ring.submit_and_wait(deadline.map(|_| timeout), iowait)
             }
-        }
+        };
 
         // The ring drops the SQEs the kernel consumed from its queue before
         // any error is normalized here.
-        if let Err(err) = ring.enter(min_complete, flags, timespec.as_ref()) {
+        if let Err(err) = result {
             match err.raw_os_error() {
                 // A transient error falls through and returns `Ok`, so the
                 // caller reaps before retrying. An immediate retry here could
@@ -495,7 +471,7 @@ impl Driver {
                 Some(libc::EINTR | libc::EAGAIN | libc::EBUSY) => {}
                 // This timeout bounds the enter. Request expiry belongs to
                 // the wheel. Only a timed wait treats it as success.
-                Some(libc::ETIME) if timespec.is_some() => {}
+                Some(libc::ETIME) if timed => {}
                 _ => return Err(err),
             }
         }
@@ -567,37 +543,14 @@ impl Driver {
             }
         }
     }
-
-    /// Release the ring's registered slot, returning the slot and the error
-    /// if that fails.
-    ///
-    /// The slot holds a reference that keeps the ring open, and only the owner
-    /// thread can release it. A failure leaves the slot until that thread
-    /// exits, when the kernel releases it.
-    fn release_ring_slot(&mut self) -> Result<(), (u32, io::Error)> {
-        let Some(slot) = self.ring.slot() else {
-            return Ok(());
-        };
-        let result = self.ring.unregister_ring_fd();
-        #[cfg(test)]
-        let result = tests::unregister_failure(&self.ring).map_or(result, Err);
-        result.map_err(|error| (slot, error))
-    }
 }
 
 impl Drop for Driver {
-    /// Cancel a live ring wait, then release the ring's registered slot.
-    ///
-    /// Both run before either failure is reported, since a tracing subscriber
-    /// can panic on the warning and skip whatever follows it.
+    /// Cancel a live ring wait. The ring's own drop then releases its slot,
+    /// also when a tracing subscriber panics on the warning.
     fn drop(&mut self) {
-        let cancelled = self.cancel_ring_wait();
-        let released = self.release_ring_slot();
-        if let Err(error) = cancelled {
+        if let Err(error) = self.cancel_ring_wait() {
             warn!(%error, "failed to cancel the ring futex wait");
-        }
-        if let Err((slot, error)) = released {
-            warn!(%error, slot, "failed to unregister the io_uring ring descriptor");
         }
     }
 }
@@ -899,11 +852,10 @@ pub mod tests {
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
                 ResizeRequest, SendRequest, SyncRequest, WriteAtRequest, WriteAtState,
             },
-            sys::tests::{EXT_ARG, cq_entries, fail_next_enter, last_enter, set_overflow},
+            sys::tests::{cq_entries, cq_overflow, fail_next_enter, last_enter, set_overflow},
             wheel::BUDGET,
         },
         storage::{hold::Hold, iouring::Shared},
-        telemetry::traces::collector::{CollectingLayer, TraceStorage},
     };
     use commonware_utils::{TestRng, channel::oneshot};
     use off_owner::OffOwner;
@@ -924,7 +876,6 @@ pub mod tests {
         task::Wake,
         thread,
     };
-    use tracing::Level;
     use tracing_subscriber::layer::SubscriberExt as _;
 
     /// Bound of a timed wait that times out. It leaves the deadline in the
@@ -945,8 +896,6 @@ pub mod tests {
         FailCancel,
         /// A signal interrupts the cancel of the ring futex wait.
         InterruptCancel,
-        /// The kernel refuses to release the ring's registered slot.
-        FailUnregister,
     }
 
     thread_local! {
@@ -1022,13 +971,6 @@ pub mod tests {
             return Some(io::Error::from_raw_os_error(libc::EINTR));
         }
         take_fault(ring, Fault::FailCancel).then(|| io::Error::from_raw_os_error(libc::EIO))
-    }
-
-    /// Record an unregistration and model its refusal. The real call still
-    /// releases the slot, so the test thread's table stays clean.
-    pub fn unregister_failure(ring: &IoUring) -> Option<io::Error> {
-        teardown_step("unregister");
-        take_fault(ring, Fault::FailUnregister).then(|| io::Error::from_raw_os_error(libc::EBUSY))
     }
 
     /// Fail service when retired resources are awaiting deferred cleanup, and
@@ -2015,11 +1957,7 @@ pub mod tests {
                     None,
                     &mut harness.deferred,
                 ));
-                harness
-                    .driver
-                    .ring
-                    .enter(1, EnterFlags::GETEVENTS, None)
-                    .unwrap();
+                harness.driver.ring.submit_and_wait(None, true).unwrap();
                 assert!(matches!(
                     probe.try_lock(),
                     Err(fs::TryLockError::WouldBlock)
@@ -2054,11 +1992,7 @@ pub mod tests {
                 if consume_cancel {
                     // The cancellation finds no target, and its failure CQE is
                     // consumed without the driver seeing it.
-                    harness
-                        .driver
-                        .ring
-                        .enter(1, EnterFlags::GETEVENTS, None)
-                        .unwrap();
+                    harness.driver.ring.submit_and_wait(None, true).unwrap();
                     assert!(harness.driver.ring.submission().is_empty());
                     let cqes: Vec<_> = harness
                         .driver
@@ -3427,9 +3361,9 @@ pub mod tests {
             // SAFETY: A NOP references no memory.
             unsafe { harness.driver.ring.submission().push(&nop) };
             assert!(harness.park(0, None).unwrap());
-            let (min_complete, flags) = last_enter().unwrap();
-            assert_eq!(min_complete, 1);
-            flags.contains(EnterFlags::NO_IOWAIT)
+            let enter = last_enter().unwrap();
+            assert_eq!(enter.min_complete, 1);
+            enter.no_iowait
         };
 
         // A receive without data keeps only network I/O in flight.
@@ -3513,11 +3447,11 @@ pub mod tests {
                     iowait: false,
                 };
                 Driver::enter(&mut harness.driver.ring, wait).unwrap();
-                let (min_complete, flags) = last_enter().unwrap();
-                if min_complete == 0 {
+                let enter = last_enter().unwrap();
+                if enter.min_complete == 0 {
                     continue;
                 }
-                assert!(flags.contains(EXT_ARG));
+                assert!(enter.timed);
                 assert!(start.elapsed() >= timeout);
                 break;
             }
@@ -3534,9 +3468,9 @@ pub mod tests {
                 };
                 Driver::enter(&mut harness.driver.ring, wait).unwrap();
                 assert_eq!(harness.driver.ring.completion().count(), 1);
-                let (min_complete, flags) = last_enter().unwrap();
-                assert_eq!(min_complete, 1);
-                assert_eq!(flags.contains(EXT_ARG), deadline.is_some());
+                let enter = last_enter().unwrap();
+                assert_eq!(enter.min_complete, 1);
+                assert_eq!(enter.timed, deadline.is_some());
                 assert!(harness.driver.ring.submission().is_empty());
             }
         }
@@ -3576,8 +3510,7 @@ pub mod tests {
             ] {
                 fail_next_enter(errno);
                 let result = Driver::enter(&mut harness.driver.ring, enter);
-                let (_, flags) = last_enter().unwrap();
-                assert_eq!(flags.contains(EXT_ARG), timed);
+                assert_eq!(last_enter().unwrap().timed, timed);
                 let retried = matches!(errno, libc::EINTR | libc::EAGAIN | libc::EBUSY)
                     || (errno == libc::ETIME && timed);
                 match result {
@@ -3606,18 +3539,16 @@ pub mod tests {
             // SAFETY: A NOP references no memory.
             unsafe { harness.driver.ring.submission().push(&nop) };
             Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap();
-            let (_, flags) = last_enter().unwrap();
-            assert!(!flags.contains(EnterFlags::GETEVENTS));
+            assert!(!last_enter().unwrap().getevents);
         }
-        assert!(harness.driver.ring.submission().cq_overflow());
+        assert!(cq_overflow(&harness.driver.ring));
         assert_eq!(harness.driver.ring.completion().count(), cq_entries);
 
         // With nothing to submit, the flush still enters for the overflow.
         Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap();
         assert_eq!(harness.driver.ring.completion().count(), 1);
-        let (_, flags) = last_enter().unwrap();
-        assert!(flags.contains(EnterFlags::GETEVENTS));
-        assert!(!harness.driver.ring.submission().cq_overflow());
+        assert!(last_enter().unwrap().getevents);
+        assert!(!cq_overflow(&harness.driver.ring));
 
         harness.drain();
     }
@@ -4032,7 +3963,7 @@ pub mod tests {
     #[test]
     fn test_ring_registration_is_released_on_drop() {
         let mut first = Harness::new(1);
-        let slot = first.driver.ring.slot().expect("registered ring");
+        let slot = first.driver.ring.slot();
         assert!(first.park(0, Some(Instant::now() + TIMED_WAIT)).unwrap());
         complete_receive(&mut first);
         drop(first);
@@ -4040,13 +3971,13 @@ pub mod tests {
         // The next driver takes the released slot, and an unwind releases it
         // again.
         let second = Harness::new(1);
-        assert_eq!(second.driver.ring.slot(), Some(slot));
+        assert_eq!(second.driver.ring.slot(), slot);
         let unwound = catch_unwind(AssertUnwindSafe(move || {
             let _second = second;
             panic!("unwind with a registered ring");
         }));
         assert!(unwound.is_err());
-        assert_eq!(Harness::new(1).driver.ring.slot(), Some(slot));
+        assert_eq!(Harness::new(1).driver.ring.slot(), slot);
     }
 
     /// A driver dropped off its owner thread cannot release the slot of a
@@ -4055,12 +3986,12 @@ pub mod tests {
     #[test]
     fn test_off_owner_drop_keeps_the_receiving_threads_slot() {
         let moved = Harness::new(1);
-        let slot = moved.driver.ring.slot().expect("registered ring");
+        let slot = moved.driver.ring.slot();
         let moved = OffOwner::new(moved.driver);
 
         thread::spawn(move || {
             let mut local = Harness::new(1);
-            assert_eq!(local.driver.ring.slot(), Some(slot));
+            assert_eq!(local.driver.ring.slot(), slot);
             drop(moved);
             complete_receive(&mut local);
         })
@@ -4069,78 +4000,7 @@ pub mod tests {
 
         // The slot stays with this thread, so a new driver here takes another.
         let next = Harness::new(1);
-        assert_ne!(next.driver.ring.slot(), Some(slot));
-    }
-
-    /// A drop whose unregistration fails first cancels the live ring wait,
-    /// then warns with the error and the slot. A subscriber that panics on the
-    /// warning cannot skip the cancel.
-    #[test]
-    fn test_failed_unregistration_is_reported_after_the_cancel() {
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let handles_without_driver = handles(&parker);
-
-        // A clean drop warns about nothing.
-        let storage = TraceStorage::default();
-        let collect = || tracing_subscriber::registry().with(CollectingLayer::new(storage.clone()));
-        tracing::subscriber::with_default(collect(), || {
-            drop(Driver::new(&RingConfig::default(), unparker.clone(), Instant::now()).unwrap());
-        });
-        assert!(storage.get_by_level(Level::WARN).is_empty());
-
-        for panics in [false, true] {
-            // A park with a short deadline leaves its ring wait queued.
-            let mut driver =
-                Driver::new(&RingConfig::default(), unparker.clone(), Instant::now()).unwrap();
-            let slot = driver.ring.slot().expect("registered ring");
-            assert!(
-                driver
-                    .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
-                    .unwrap()
-            );
-
-            // The kernel consumed the wait's SQE and has not completed it.
-            assert!(driver.ring.submission().is_empty());
-            assert!(driver.ring.completion().is_empty());
-
-            // A duplicate descriptor keeps the ring alive across the drop, so
-            // only the drop's synchronous cancel can remove the wait.
-            let ring = hold_ring(&driver);
-            let fault = inject(&driver, Fault::FailUnregister);
-            teardown_steps();
-            if panics {
-                let subscriber = tracing_subscriber::registry().with(PanicOnEvent);
-                let panicked = tracing::subscriber::with_default(subscriber, || {
-                    catch_unwind(AssertUnwindSafe(|| drop(driver))).is_err()
-                });
-                assert!(panicked, "the warning did not reach the subscriber");
-                assert_eq!(teardown_steps(), ["cancel", "unregister", "warn"]);
-            } else {
-                tracing::subscriber::with_default(collect(), || drop(driver));
-                assert_eq!(teardown_steps(), ["cancel", "unregister"]);
-                let warnings = storage.get_by_level(Level::WARN);
-                assert_eq!(warnings.len(), 1);
-                warnings
-                    .expect_message_contains("failed to unregister the io_uring ring descriptor")
-                    .unwrap();
-                warnings[0]
-                    .metadata
-                    .expect_field_contains("error", "os error 16")
-                    .unwrap();
-                warnings[0]
-                    .metadata
-                    .expect_field_exact("slot", &slot.to_string())
-                    .unwrap();
-            }
-            assert!(FAULT.get().is_none(), "unregistration did not run");
-            drop(fault);
-
-            // The cancel removed the wait, and the drop kept no handle.
-            assert_eq!(wake(&unparker, 2), 0, "driver left its ring wait queued");
-            assert_eq!(handles(&parker), handles_without_driver);
-            drop(ring);
-        }
+        assert_ne!(next.driver.ring.slot(), slot);
     }
 
     /// An interrupted cancel at drop retries instead of keeping the word and
@@ -4163,21 +4023,21 @@ pub mod tests {
         let subscriber = tracing_subscriber::registry().with(PanicOnEvent);
         tracing::subscriber::with_default(subscriber, || drop(driver));
         assert!(FAULT.get().is_none(), "cancel did not run");
-        assert_eq!(teardown_steps(), ["cancel", "cancel", "unregister"]);
+        assert_eq!(teardown_steps(), ["cancel", "cancel"]);
         assert_eq!(handles(&parker), handles_without_driver);
         drop(fault);
     }
 
-    /// A drop whose cancel fails still releases the ring's registered slot
-    /// before it warns, so a subscriber that panics on the warning cannot leave
-    /// the slot, and the ring it holds open, with the owner thread.
+    /// A drop whose cancel fails warns, and a subscriber that panics on the
+    /// warning still leaves the ring's drop to release its slot, so the slot,
+    /// and the ring it holds open, does not stay with the owner thread.
     #[test]
     fn test_failed_cancel_releases_the_slot_if_the_warning_panics() {
         // A park with a short deadline leaves its ring wait queued.
         let parker = Parker::new();
         let mut driver =
             Driver::new(&RingConfig::default(), parker.unparker(), Instant::now()).unwrap();
-        let slot = driver.ring.slot().expect("registered ring");
+        let slot = driver.ring.slot();
         assert!(
             driver
                 .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
@@ -4192,11 +4052,11 @@ pub mod tests {
         });
         assert!(panicked, "the warning did not reach the subscriber");
         assert!(FAULT.get().is_none(), "cancel did not run");
-        assert_eq!(teardown_steps(), ["cancel", "unregister", "warn"]);
+        assert_eq!(teardown_steps(), ["cancel", "warn"]);
         drop(fault);
 
         // The next driver on this thread takes the released slot.
         let next = Driver::new(&RingConfig::default(), parker.unparker(), Instant::now()).unwrap();
-        assert_eq!(next.ring.slot(), Some(slot));
+        assert_eq!(next.ring.slot(), slot);
     }
 }

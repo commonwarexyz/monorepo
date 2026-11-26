@@ -1064,7 +1064,7 @@ pub mod tests {
     #[cfg(not(feature = "loom"))]
     pub mod native {
         use super::*;
-        use crate::iouring::sys::{CqueueEntry, EnterFlags, IoUring, Timespec};
+        use crate::iouring::sys::{CqueueEntry, IoUring};
 
         /// Build a ring with the driver's flags. With deferred task work, a ring
         /// wait's completion waits until the owner next runs the ring's task
@@ -1081,7 +1081,7 @@ pub mod tests {
             let arm = parker.arm_ring(parker.observe());
             assert!(arm.still_idle());
             arm.install(&mut ring.submission());
-            assert_eq!(ring.enter(0, EnterFlags::empty(), None).unwrap(), 1);
+            assert_eq!(ring.submit().unwrap(), 1);
             drop(arm);
 
             // A wait whose compare failed would have completed during the submit.
@@ -1091,14 +1091,13 @@ pub mod tests {
         /// Run deferred task work without waiting, which posts the completion
         /// of a ring wait that a wake released.
         fn run_task_work(ring: &mut IoUring) {
-            assert_eq!(ring.enter(0, EnterFlags::GETEVENTS, None).unwrap(), 0);
+            assert_eq!(ring.submit_and_get_events().unwrap(), 0);
         }
 
         /// Submit queued SQEs and wait for the ring wait's completion, failing
         /// by the test timeout instead of blocking forever.
         fn ring_wait_completion(ring: &mut IoUring) -> CqueueEntry {
-            let timeout = Timespec::from(TEST_TIMEOUT);
-            if let Err(error) = ring.enter(1, EnterFlags::GETEVENTS, Some(&timeout)) {
+            if let Err(error) = ring.submit_and_wait(Some(TEST_TIMEOUT), true) {
                 assert_eq!(error.raw_os_error(), Some(libc::ETIME), "{error}");
             }
 
