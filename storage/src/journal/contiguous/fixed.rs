@@ -1958,7 +1958,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             scratch.resize(need, 0);
         }
         let buf = &mut scratch[..need];
-        let mut blob_offsets = Vec::new();
+        let mut blob_offsets = Vec::with_capacity(valid.len());
         let mut hits = 0u64;
         let mut group_base = start;
         for group in valid.chunk_by(|a, b| {

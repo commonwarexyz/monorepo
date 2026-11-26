@@ -764,18 +764,22 @@ where
     V: Clone + Send + Sync,
 {
     let mut results = vec![None; keys.len()];
-    let mut resolved = vec![false; keys.len()];
     let mut pending = Vec::with_capacity(keys.len());
 
     for (i, key) in keys.iter().enumerate() {
         let key = key.borrow();
         if let Some(value) = local(key) {
             results[i] = value;
-            resolved[i] = true;
         } else {
             pending.push((i, key));
         }
     }
+
+    // With no diff to consult, every pending slot still needs a database read.
+    if diffs.is_empty() {
+        return (results, pending);
+    }
+    let mut resolved = vec![false; keys.len()];
     resolve_pending_from_diffs(
         &pending,
         diffs,
@@ -2661,8 +2665,9 @@ where
             created.push((key, value, base_old_loc));
         }
 
-        // Look up prev_translated_key for created/deleted keys, including staged deletes.
-        let mut prev_locations = Vec::new();
+        // Look up prev_translated_key for created/deleted keys, including staged deletes. The
+        // bucket before a key usually holds one location.
+        let mut prev_locations = Vec::with_capacity(deleted.len() + created.len());
         for key in deleted
             .iter()
             .map(|(k, _)| k)
@@ -2690,6 +2695,7 @@ where
 
         // Those updates may precede the created and deleted keys, and their successors may
         // follow the created keys.
+        neighbors.prev.reserve(prev_locations.len());
         for (update, old_loc) in m.read_live(&prev_locations, &db.log).await? {
             neighbors.next.push(update.next_key);
             neighbors

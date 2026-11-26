@@ -891,15 +891,17 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O
     {
         let db = self.bounds.compatible(db, db.commitment())?;
         let base = db.merkle.mem();
-        F::nodes_to_pin(self.bounds.base.size)
-            .map(|pos| {
-                self.merkle_batch
-                    .get_node(pos)
-                    .or_else(|| base.get_node(pos))
-                    .ok_or(merkle::Error::ElementPruned(pos))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let start = self.bounds.base.size;
+        let mut nodes = Vec::with_capacity(F::nodes_to_pin(start).count());
+        for pos in F::nodes_to_pin(start) {
+            let node = self
+                .merkle_batch
+                .get_node(pos)
+                .or_else(|| base.get_node(pos))
+                .ok_or(merkle::Error::ElementPruned(pos))?;
+            nodes.push(node);
+        }
+        Ok(nodes)
     }
 
     /// Create a new speculative batch with this one as its parent.

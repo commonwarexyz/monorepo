@@ -170,7 +170,17 @@ fn plan_hashes<F: Family>(
                 .get(height as usize)
                 .is_some_and(|nodes| nodes.binary_search(&pos).is_ok())
     };
-    let mut dirty = Vec::new();
+
+    // A level holds at most one dirty node per updated leaf, and no more nodes than the structure
+    // has at that height. Leaves are not dirty nodes, so level 0 stays empty.
+    let leaf_count = *Location::<F>::try_from(size).expect("invalid size");
+    let updated = updated_leaves.len();
+    let mut dirty: Vec<Vec<Position<F>>> = (0..u64::BITS)
+        .map(|height| match height {
+            0 => Vec::new(),
+            _ => Vec::with_capacity(updated.min((leaf_count >> height) as usize)),
+        })
+        .collect();
     let mut leaves = updated_leaves.into_iter().peekable();
     let mut first_leaf = Location::new(0);
     for (pos, height) in F::peaks(size) {
@@ -199,7 +209,12 @@ fn plan_hashes<F: Family>(
         unhashed.resize_with(dirty.len(), Vec::new);
     }
     for (nodes, dirty) in unhashed.iter_mut().zip(dirty) {
-        nodes.extend(dirty);
+        // A level with nothing unhashed takes the dirty list whole.
+        if nodes.is_empty() {
+            *nodes = dirty;
+        } else {
+            nodes.extend(dirty);
+        }
     }
     unhashed
 }
@@ -634,8 +649,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             .sum();
         self.overwrites.reserve(overwritten);
 
-        // Every level computes its digests into the same buffer.
-        let mut digests = Vec::new();
+        // Every level computes its digests into the same buffer, sized for the longest level.
+        let longest = levels.iter().map(Vec::len).max().unwrap_or(0);
+        let mut digests = Vec::with_capacity(longest);
         for (height, positions) in levels.iter().enumerate() {
             if positions.is_empty() {
                 continue;

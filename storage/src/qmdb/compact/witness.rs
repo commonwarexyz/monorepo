@@ -241,9 +241,8 @@ where
     let last_commit_loc = size - 1;
     let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
     let root = mem.root(&hasher, inactive_peaks)?;
-    let pinned_nodes = F::nodes_to_pin(last_commit_loc)
-        .map(|pos| *mem.get_node_unchecked(pos))
-        .collect::<Vec<_>>();
+    let mut pinned_nodes = Vec::with_capacity(F::nodes_to_pin(last_commit_loc).count());
+    pinned_nodes.extend(F::nodes_to_pin(last_commit_loc).map(|pos| *mem.get_node_unchecked(pos)));
     let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
     Ok(VerifiedWitness {
         witness: Witness {

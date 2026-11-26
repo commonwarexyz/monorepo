@@ -731,7 +731,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         let extents = self.cached_frame_extents(positions, &lookups, &offsets);
         let mut buf = BytesMut::new();
-        let mut ranges: Vec<(u64, usize)> = Vec::new();
+        let mut ranges: Vec<(u64, usize)> = Vec::with_capacity(extents.len());
         let mut hits = 0u64;
 
         // Serve the resolved extents with one batched cache read per data blob.
