@@ -1775,14 +1775,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             };
 
             // Convert batch-relative starts into absolute offsets within the data blob.
-            let absolute_offsets = item_starts[written..written + batch_count]
-                .iter()
-                .map(|&start| {
-                    base_offset
-                        .checked_add((start - batch_start) as u64)
-                        .ok_or(Error::OffsetOverflow)
-                })
-                .collect::<Result<Vec<u64>, _>>()?;
+            let mut absolute_offsets = Vec::with_capacity(batch_count);
+            for &start in &item_starts[written..written + batch_count] {
+                let offset = base_offset
+                    .checked_add((start - batch_start) as u64)
+                    .ok_or(Error::OffsetOverflow)?;
+                absolute_offsets.push(offset);
+            }
 
             // Append the offsets for this blob batch to the offsets journal.
             let (offsets, last_offsets_pos) = self

@@ -327,13 +327,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         &self.parent.strategy
     }
 
-    /// Retain the live parent chain up to the first dropped weak link.
+    /// Retain the live ancestors past the parent, up to the first dropped weak link.
     ///
-    /// Nodes beyond that link are read from committed state.
+    /// The batch holds its parent itself. Nodes beyond the dropped link are read from committed
+    /// state.
     #[cfg(feature = "std")]
     pub(crate) fn retain_ancestors(&self) -> Vec<Arc<MerkleizedBatch<F, D, S>>> {
         let mut ancestors = Vec::new();
-        let mut current = Some(Arc::clone(&self.parent));
+        let mut current = self.parent.parent.as_ref().and_then(Weak::upgrade);
         while let Some(batch) = current {
             current = batch.parent.as_ref().and_then(Weak::upgrade);
             ancestors.push(batch);
@@ -619,11 +620,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             .map(|level| level.iter().filter(|pos| **pos < parent_size).count())
             .sum();
         self.overwrites.reserve(overwritten);
+
+        // Every level computes its digests into the same buffer.
+        let mut digests = Vec::new();
         for (height, positions) in levels.iter().enumerate() {
             if positions.is_empty() {
                 continue;
             }
-            self.merkleize_level(base, hasher, positions, height as u32);
+            self.merkleize_level(base, hasher, positions, height as u32, &mut digests);
         }
 
         // Record the peaks of the state this batch represents. A batch without changes shares
@@ -667,32 +671,33 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Compute the digests of `positions` two at a time so the hasher can make progress on both
-    /// concurrently, appending `(position, digest)` results to `output`.
+    /// concurrently, writing each to its position's place in `digests`.
     fn zip_nodes(
         &self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         positions: &[Position<F>],
         height: u32,
-        output: &mut Vec<(Position<F>, D)>,
+        digests: &mut [D],
     ) {
         let (pairs, remainder) = positions.as_chunks::<2>();
-        for pair in pairs {
+        let (pair_digests, remainder_digest) = digests.as_chunks_mut::<2>();
+        for (pair, digests) in pairs.iter().zip(pair_digests) {
             let (left, right) = (pair[0], pair[1]);
             let (ll, lr) = self.child_digests(base, left, height);
             let (rl, rr) = self.child_digests(base, right, height);
             let (left_digest, right_digest) =
                 hasher.node_digest_pair([(left, &ll, &lr), (right, &rl, &rr)]);
-            output.push((left, left_digest));
-            output.push((right, right_digest));
+            *digests = [left_digest, right_digest];
         }
-        if let [pos] = remainder {
+        if let ([pos], [digest]) = (remainder, remainder_digest) {
             let (left, right) = self.child_digests(base, *pos, height);
-            output.push((*pos, hasher.node_digest(*pos, &left, &right)));
+            *digest = hasher.node_digest(*pos, &left, &right);
         }
     }
 
-    /// Compute digests for one height's dirty nodes via the configured strategy.
+    /// Compute digests for one height's dirty nodes via the configured strategy, using `digests`
+    /// as the buffer they are computed into.
     ///
     /// The strategy splits the positions into batches of adjacent pairs, so every pair reaches
     /// [`Hasher::node_digest_pair`] together and only the last batch can end in a lone node.
@@ -702,27 +707,32 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         positions: &[Position<F>],
         height: u32,
+        digests: &mut Vec<D>,
     ) {
+        digests.clear();
+        digests.resize(positions.len(), D::EMPTY);
         let pairs = positions.len().div_ceil(2);
-        let computed: Vec<Vec<(Position<F>, D)>> =
-            self.parent
-                .strategy
-                .run_batches(pairs, NonZeroUsize::MIN, 2, |batches| {
-                    batches.map_collect_vec(
-                        |ranges| ranges,
-                        |range| {
+        self.parent
+            .strategy
+            .run_batches(pairs, NonZeroUsize::MIN, 2, |batches| {
+                // The ranges cover the pairs in order, so each takes its digests off the front.
+                let mut rest = digests.as_mut_slice();
+                batches.map_collect_vec(
+                    |ranges| {
+                        ranges.into_iter().map(move |range| {
                             let positions =
                                 &positions[2 * range.start..positions.len().min(2 * range.end)];
-                            let mut computed = Vec::with_capacity(positions.len());
-                            self.zip_nodes(base, hasher, positions, height, &mut computed);
-                            computed
-                        },
-                    )
-                });
-        for nodes in computed {
-            for (pos, digest) in nodes {
-                self.store_node(pos, digest);
-            }
+                            let digests = rest
+                                .split_off_mut(..positions.len())
+                                .expect("range ends within the level");
+                            (positions, digests)
+                        })
+                    },
+                    |(positions, digests)| self.zip_nodes(base, hasher, positions, height, digests),
+                );
+            });
+        for (pos, digest) in positions.iter().zip(digests.iter()) {
+            self.store_node(*pos, *digest);
         }
     }
 }

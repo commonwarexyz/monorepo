@@ -1418,6 +1418,47 @@ commonware_macros::stability_scope!(BETA {
             iter.into_iter().try_fold(identity(), fold_op)
         }
 
+        // The maps below size their output from the iterator's size hint. The provided methods
+        // fold into an empty `Vec`, which regrows as it fills.
+
+        fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> T + Send + Sync,
+            T: Send,
+        {
+            iter.into_iter().map(map_op).collect()
+        }
+
+        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
+            T: Send,
+            E: Send,
+        {
+            let iter = iter.into_iter();
+            let mut mapped = Vec::with_capacity(iter.size_hint().0);
+            for item in iter {
+                mapped.push(map_op(item)?);
+            }
+            Ok(mapped)
+        }
+
+        fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            let mut init_val = init();
+            iter.into_iter()
+                .map(|item| map_op(&mut init_val, item))
+                .collect()
+        }
+
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
@@ -5347,6 +5388,22 @@ mod test {
 
         assert_eq!(result, Err(3));
         assert_eq!(calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn sequential_maps_size_their_output() {
+        // An output sized from the input's length has no spare capacity, where one grown from
+        // empty to 100 elements would.
+        let mapped = Sequential.map_collect_vec(0..100usize, |i| i);
+        assert_eq!(mapped.capacity(), mapped.len());
+
+        let mapped: Vec<usize> = Sequential
+            .try_map_collect_vec(0..100usize, Ok::<_, ()>)
+            .unwrap();
+        assert_eq!(mapped.capacity(), mapped.len());
+
+        let mapped = Sequential.map_init_collect_vec(0..100usize, || (), |_, i| i);
+        assert_eq!(mapped.capacity(), mapped.len());
     }
 
     fn fixed_strategy(parallelism: usize) -> Rayon {

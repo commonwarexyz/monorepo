@@ -44,8 +44,8 @@ where
     /// Authenticated journal batch for computing the speculative Merkle root.
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, V>, S>,
 
-    /// Pending appends.
-    appends: Vec<V::Value>,
+    /// Pending appends, held as the operations the batch records for them.
+    appends: Vec<Operation<F, V>>,
 
     /// Parent batch in the chain. `None` for batches created directly from the DB.
     parent: Option<MerkleizedParent<F, H, V, S>>,
@@ -208,7 +208,7 @@ where
 
     /// Append a value.
     pub fn append(mut self, value: V::Value) -> Self {
-        self.appends.push(value);
+        self.appends.push(Operation::Append(value));
         self
     }
 
@@ -245,7 +245,7 @@ where
         // Check this batch's pending appends.
         if loc_val >= self.base.size {
             let idx = (loc_val - *self.base.size) as usize;
-            return Ok(Some(self.appends[idx].clone()));
+            return Ok(self.appends[idx].clone().into_value());
         }
         check_floor(loc, self.floor(&*db))?;
 
@@ -296,7 +296,7 @@ where
             // Check this batch's pending appends.
             if loc_val >= self.base.size {
                 let idx = (loc_val - *self.base.size) as usize;
-                results.push(Some(self.appends[idx].clone()));
+                results.push(self.appends[idx].clone().into_value());
                 continue;
             }
 
@@ -361,9 +361,8 @@ where
         let db = chain::merkleizable(db, db.commitment(), boundary, ancestors.iter().copied())?;
         let start_floor = self.floor(&*db);
 
-        // Build operations: one Append per value, then Commit.
-        let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
-        ops.extend(self.appends.into_iter().map(Operation::Append));
+        // The Commit follows the appends.
+        let mut ops = self.appends;
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = self.base.size + ops.len() as u64;

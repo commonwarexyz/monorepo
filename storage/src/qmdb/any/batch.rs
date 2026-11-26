@@ -765,7 +765,7 @@ where
 {
     let mut results = vec![None; keys.len()];
     let mut resolved = vec![false; keys.len()];
-    let mut pending = Vec::new();
+    let mut pending = Vec::with_capacity(keys.len());
 
     for (i, key) in keys.iter().enumerate() {
         let key = key.borrow();
@@ -1092,7 +1092,7 @@ where
         } else {
             // Keys whose committed locations still matter, each with the one location (if any) to
             // leave out of its own, probed together below.
-            let mut probes = Vec::new();
+            let mut probes = Vec::with_capacity(mutations.len());
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
             for key in mutations.keys() {
                 match ancestors.resolve(key) {
@@ -1306,15 +1306,10 @@ where
                 }
             };
 
-            // In-memory candidates, in the ancestors or this batch, resolve by reference, and
-            // their operations follow those read from the database.
+            // Candidates from `split` on are in memory, in the ancestors or this batch.
             let split = round
                 .candidates
                 .partition_point(|loc| *loc < self.db_state.size);
-            let memory: Vec<&Operation<F, U>> = round.candidates[split..]
-                .iter()
-                .map(|loc| self.peek_uncommitted(*loc, &walked.ops))
-                .collect();
 
             // Classification is the first consumer of the sorted diff. By now the sort has
             // overlapped the fill and read above.
@@ -1323,8 +1318,13 @@ where
             }
 
             // Classify each candidate, as a [`Move`], against the state after the writes. A
-            // Commit has no key and is inactive.
+            // Commit has no key and is inactive. In-memory candidates resolve by reference, and
+            // their operations follow those read from the database.
             let diff = &walked.diff;
+            let ops = &walked.ops;
+            let memory = round.candidates[split..]
+                .iter()
+                .map(|loc| self.peek_uncommitted(*loc, ops));
             let moves: Vec<Option<Move<F>>> = strategy.map_collect_vec(
                 zip_eq(
                     round.candidates.iter(),
@@ -2433,8 +2433,8 @@ where
 
         // Database locations superseded by this batch, which the floor walk passes without reading.
         // Emission order is ascending in `base_old_loc` except for entries resolved through
-        // ancestor diffs, so the walk usually skips sorting them.
-        let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(walked.diff.capacity());
+        // ancestor diffs, so the walk usually skips sorting them. The walk appends one location.
+        let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(walked.diff.capacity() + 1);
 
         // Write a user mutation at the next batch location, preserving the previous committed
         // location of the key it supersedes.
@@ -2620,10 +2620,13 @@ where
         }
 
         // Classify mutations into deleted, created, updated, collecting the successor and
-        // predecessor candidates the link rewrites consult once they are sorted below.
+        // predecessor candidates the link rewrites consult once they are sorted below. Each read
+        // location and staged record contributes at most one update and one successor candidate.
+        let existing = locations.len() + staged_updates.len();
         let mut neighbors: Neighbors<K, (Cow<'_, V::Value>, Location<F>)> = Neighbors::new();
+        neighbors.next.reserve(existing);
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
-        let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
+        let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::with_capacity(existing);
         for (update, old_loc) in m.read_live(&locations, &db.log).await? {
             let update::Ordered {
                 key,
@@ -2631,21 +2634,15 @@ where
                 next_key,
             } = update;
             neighbors.next.push(next_key);
-            neighbors
-                .prev
-                .push((key.clone(), Some((Cow::Owned(value), old_loc))));
-
-            let Some(mutation) = mutations.remove(&key) else {
-                // Index collision: this operation's key does not match
-                // the mutation key (the index uses a compressed translated key
-                // that can collide). The mutation will be handled as a create below.
-                continue;
-            };
-
-            if let Some(new_value) = mutation {
-                updated.push((key, new_value, old_loc));
-            } else {
-                deleted.push((key, old_loc));
+            match mutations.remove(&key) {
+                // Index collision: this operation's key does not match the mutation key (the
+                // index uses a compressed translated key that can collide). The mutation will be
+                // handled as a create below, which this key may precede.
+                None => neighbors
+                    .prev
+                    .push((key, Some((Cow::Owned(value), old_loc)))),
+                Some(Some(new_value)) => updated.push((key, new_value, old_loc)),
+                Some(None) => deleted.push((key, old_loc)),
             }
         }
 
@@ -2699,10 +2696,6 @@ where
         // read would have. The cached successor is the key's successor at the parent's tip, because
         // a create or delete next to the key rewrites the key's update in the batch that makes it.
         //
-        // An update is a predecessor candidate without a rewrite source: its own operation carries
-        // its link, and the predecessor rewrites skip every key present in `updated`. A deleted
-        // key is never a predecessor.
-        //
         // An ancestor-resolved record's superseded base is re-resolved through the reachable
         // ancestors' diffs when its operation is emitted below. If none of them holds the key, its
         // resolving ancestor is applied and unreachable, and the resolved location is the key's
@@ -2711,7 +2704,6 @@ where
             let loc = sloc.loc();
             neighbors.next.push(old_next);
             if let Some(value) = value {
-                neighbors.prev.push((key.clone(), None));
                 updated.push((key, value, loc));
             } else {
                 deleted.push((key, loc));
@@ -2729,6 +2721,13 @@ where
         // advances three cursors in a sorted merge instead of three binary searches per key.
         let changes_membership = !created.is_empty() || !deleted.is_empty();
         if changes_membership {
+            // An updated key is a predecessor candidate without a rewrite source, because its own
+            // operation carries its link. Pushed after the candidates read above, it is the one
+            // kept for its key. A deleted key is never a predecessor.
+            neighbors
+                .prev
+                .extend(updated.iter().map(|(key, ..)| (key.clone(), None)));
+
             let mut shadow = Shadow::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
             for batch in &m.ancestors {
                 let (mut ui, mut ci, mut di) = (0, 0, 0);
@@ -2771,7 +2770,6 @@ where
         let deleted_range = 0..walked.diff.len();
 
         // Process updates of existing keys.
-        let updated_range = walked.diff.len()..walked.diff.len() + updated.len();
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut next_idx = 0;
         for (key, value, old_loc) in updated {
@@ -2808,18 +2806,14 @@ where
         if !neighbors.prev.is_empty() {
             // The create/delete ranges stay fixed as predecessor rewrites are appended.
             for idx in created_range.chain(deleted_range) {
+                // A predecessor this batch updates has no source to claim, because its own
+                // operation carries its link. Creates have no active operation before this batch,
+                // and deletes are excluded from candidates.
                 let Some((prev_key, (prev_value, prev_loc), prev_next_key)) =
                     neighbors.claim(&walked.diff[idx].0)
                 else {
                     continue;
                 };
-
-                // Only updated mutation keys can be candidates: creates have no active
-                // operation before this batch, and deletes are excluded from candidates. An
-                // update's own operation carries its link.
-                if lookup_sorted(&walked.diff[updated_range.clone()], prev_key).is_some() {
-                    continue;
-                }
                 let prev_value = prev_value.into_owned();
 
                 // Preserve the ordered links across creates and deletes by rewriting the
@@ -2840,12 +2834,15 @@ where
         // Release the candidate keys and values before the remaining phases run.
         drop(neighbors);
 
-        // Database locations superseded by this batch, which the floor walk sorts itself.
-        let superseded_locs: Vec<_> = walked
-            .diff
-            .iter()
-            .filter_map(|(_, entry)| entry.base_old_loc())
-            .collect();
+        // Database locations superseded by this batch, which the floor walk sorts itself. The walk
+        // appends one location.
+        let mut superseded_locs = Vec::with_capacity(walked.diff.len() + 1);
+        superseded_locs.extend(
+            walked
+                .diff
+                .iter()
+                .filter_map(|(_, entry)| entry.base_old_loc()),
+        );
 
         // Remaining phases: floor walk, its decisions and link repairs, Commit, journal, diff
         // merge.

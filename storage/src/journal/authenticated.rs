@@ -560,17 +560,21 @@ where
         let strategy = self.strategy();
         let journal = &self.journal;
 
-        // Each shard yields its hits densely plus the shard-local indices it declined.
+        // Each shard yields its hits densely plus the shard-local indices it declined. Collecting
+        // the hits out of the probe's own vector lets them reuse its buffer.
         let probe = |positions: &[u64]| -> (Vec<C::Item>, Vec<usize>) {
-            let probed = journal.try_read_many_sync(positions);
-            let mut hits = Vec::with_capacity(probed.len());
             let mut missed = Vec::new();
-            for (idx, item) in probed.into_iter().enumerate() {
-                match item {
-                    Some(item) => hits.push(item),
-                    None => missed.push(idx),
-                }
-            }
+            let hits = journal
+                .try_read_many_sync(positions)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, item)| {
+                    if item.is_none() {
+                        missed.push(idx);
+                    }
+                    item
+                })
+                .collect();
             (hits, missed)
         };
         let shards: Vec<(Vec<C::Item>, Vec<usize>)> =

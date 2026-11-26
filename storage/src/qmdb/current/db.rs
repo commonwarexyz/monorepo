@@ -1034,8 +1034,9 @@ fn compute_grafted_root<F: merkle::Graftable, H: Hasher>(
     let leaves = Location::try_from(size)?;
 
     // Collect peak digests of the grafted structure.
-    let mut peaks: Vec<H::Digest> = Vec::new();
-    for (peak_pos, _) in F::peaks(size) {
+    let peak_positions = F::peaks(size);
+    let mut peaks: Vec<H::Digest> = Vec::with_capacity(peak_positions.size_hint().0);
+    for (peak_pos, _) in peak_positions {
         let digest = storage
             .get_node(peak_pos)
             .ok_or_else(|| merkle::Error::<F>::MissingNode(peak_pos))?;
