@@ -1418,9 +1418,10 @@ commonware_macros::stability_scope!(BETA {
             iter.into_iter().try_fold(identity(), fold_op)
         }
 
-        // The infallible maps below size their output from the iterator's size hint. The provided
-        // methods fold into an empty `Vec`, which regrows as it fills. The fallible map keeps the
-        // provided method, so an early error reserves nothing for the items after it.
+        // `map_collect_vec` and `map_init_collect_vec` size their output from the iterator's size
+        // hint, where the provided methods fold into an empty `Vec` that regrows as it fills.
+        // `try_map_collect_vec` is not overridden: its closure returns a `Result`, and an error
+        // from an early item would leave the room reserved for the rest unused.
 
         fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
         where
