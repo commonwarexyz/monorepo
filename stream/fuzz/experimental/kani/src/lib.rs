@@ -15,10 +15,10 @@
 //!   none.
 //! - "Bounds": the input sizes and loop bounds the proof holds for.
 //!
-//! `kani::cover!` checks show that the paths a proof talks about are reachable. A harness
-//! whose name ends with `_panics` proves that every input of a class panics; its one cover
-//! check must be unreachable, and its `_panics_control` partner shows that the same check is
-//! reachable when the class holds an input that returns (see `README.md`).
+//! `kani::cover!` checks show that the paths a proof talks about are reachable, and every one
+//! of them must be satisfied. A harness whose name ends with `_panics` shows with Kani's
+//! `should_panic` that inputs of a class panic; its `_panics_control` partner shows that the
+//! class boundary returns (see `README.md`).
 //!
 //! The harnesses call the public API of `commonware-stream` only. The name of every harness
 //! starts with `kani_`. Nothing here is compiled outside `cargo kani`: under `cargo build`

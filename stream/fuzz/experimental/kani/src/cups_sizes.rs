@@ -28,21 +28,24 @@
 //! 2. `kani_cups_record_len`: for `len <= limit`, `record_len(len)` returns the header size of item
 //!    1 plus `len + t`, with no overflow. stream/src/cups/protocol.rs, `Cups::record_len`: "Returns
 //!    the encoded size of a record carrying `len` payload bytes."
-//! 3. `kani_cups_header_len_panics`: for every `len > limit`, `header_len(len)` panics.
+//! 3. `kani_cups_header_len_panics`: inputs with `len > limit` make `header_len(len)` panic
+//!    (`should_panic`; see below for what that shows).
 //!    stream/src/cups/protocol.rs, `Cups::header_len`: "Panics if `len` exceeds the largest record
 //!    payload, `u32::MAX` minus the tag size."; the test
 //!    `test_header_len_rejects_oversized_payload` (stream/src/cups/protocol.rs) expects the panic
 //!    at `len = u32::MAX`.
-//! 4. `kani_cups_record_len_panics`: for every `len > limit`, `record_len(len)` panics.
+//! 4. `kani_cups_record_len_panics`: inputs with `len > limit` make `record_len(len)` panic
+//!    (`should_panic`; see below for what that shows).
 //!    stream/src/cups/protocol.rs, `Cups::record_len`: "Panics if `len` exceeds the largest record
 //!    payload, `u32::MAX` minus the tag size, or if the record size does not fit in a `usize`."
 //!
-//! Items 3 and 4 use Kani's `should_panic`: the harness passes when some check related to a
-//! panic fails, which alone would not show that EVERY input of the class panics. So a cover
-//! check follows the call. Kani cuts a path at a panic, so that cover is reachable only if
-//! some input of the class returns: it must be unreachable. Each has a `_control` harness over
-//! a class that also holds `len = limit`, which returns; its cover must be satisfied, so the
-//! method is not blind. The method shows that every input panics, not which panic fires.
+//! Items 3 and 4 use Kani's `should_panic`: the harness passes when a check related to a panic
+//! fails and no other check fails. That shows that inputs of the class panic, not that EVERY
+//! input of the class panics: a path that returns fails no check. Decision, 2026-11-26: these
+//! harnesses carry no cover check that must stay unreachable, because the scheduled run counts
+//! every unsatisfied cover as a failure. Each has a `_control` harness over a class that also
+//! holds `len = limit`, which returns; its cover must be satisfied, so the boundary is where the
+//! contract puts it.
 //!
 //! # Implementation consistency (asserted only with `--features consistency`; not a gate)
 //!
@@ -147,7 +150,6 @@ fn kani_cups_header_len_panics() {
     let len: usize = kani::any();
     kani::assume(len > LIMIT);
     let _ = TestCups::new((), any_version()).header_len(len);
-    kani::cover!(true, "an oversized payload returned (must be unreachable)");
 }
 
 #[kani::proof]
@@ -165,7 +167,6 @@ fn kani_cups_record_len_panics() {
     let len: usize = kani::any();
     kani::assume(len > LIMIT);
     let _ = TestCups::new((), any_version()).record_len(len);
-    kani::cover!(true, "an oversized payload returned (must be unreachable)");
 }
 
 #[kani::proof]

@@ -60,31 +60,23 @@ Check two more things, because the exit status does not cover them:
 
 1. **The count.** The total equals `harnesses` in the marker. A harness that is no longer
    compiled is missing from the run without any error.
-2. **The cover checks.** For every harness whose name does not end with `_panics`, every line
-   `** n of m cover properties satisfied` has `n` equal to `m`. Kani reports a harness as
+2. **The cover checks.** For every harness, every line `** n of m cover properties satisfied`
+   has `n` equal to `m`. Kani reports a harness as
    `SUCCESSFUL` also when a cover check is unsatisfied, and then the harness may prove less
    than it says.
 
 ### Harnesses that must panic
 
-`kani_cups_header_len_panics` and `kani_cups_record_len_panics` prove that every input of a
-class panics. Kani's `#[kani::should_panic]` alone shows only that some input panics, so each
-of these harnesses has one cover check right after the call: Kani cuts a path at a panic, so
-the check is reachable only if some input of the class returns. Such a harness passes when
-Kani prints both
-
-```text
- ** 0 of 1 cover properties satisfied (1 unreachable)
-VERIFICATION:- SUCCESSFUL (encountered one or more panics as expected)
-```
-
-A satisfied cover there means that an input of the class returned: the harness fails, although
-Kani's summary counts it as verified. Each has a partner `<name>_control` over a class that
-also holds an input that returns. The partner passes when its cover is satisfied (`1 of 1`) and
-Kani prints the same `SUCCESSFUL (encountered one or more panics as expected)`: it shows that the
-cover check can see a returning input. The method shows that every input of the class panics,
-not which panic fires. The line `Failed Checks: This is a placeholder message` that Kani prints
-for these four harnesses is the expected panic.
+`kani_cups_header_len_panics` and `kani_cups_record_len_panics` use Kani's
+`#[kani::should_panic]`: they pass when a check related to a panic fails and no other check
+fails, and Kani prints `VERIFICATION:- SUCCESSFUL (encountered one or more panics as expected)`.
+That shows that inputs of the class panic, not that every input of the class panics: a path
+that returns fails no check. Decision, 2026-11-26: they carry no cover check that must stay
+unreachable, because the scheduled run counts every unsatisfied cover as a failure. Each has a
+partner `<name>_control` over a class that also holds the boundary input, which returns; the
+partner passes when its cover is satisfied (`1 of 1`) and Kani prints the same `SUCCESSFUL`
+line. The line `Failed Checks: This is a placeholder message` that Kani prints for these four
+harnesses is the expected panic.
 
 A harness that runs out of time is printed as `VERIFICATION:- FAILED` with the line
 `CBMC timed out`: that is no answer, not a failed check. A failed check prints
@@ -111,7 +103,7 @@ in the header of each module in `src/`.
 | Module | Harnesses | What is proven | Time |
 | ------ | --------- | -------------- | ---- |
 | `cups_sizes` | `kani_cups_header_len`, `kani_cups_record_len` | For both versions and every payload length up to `u32::MAX` minus the tag size: `header_len` is the size of the canonical varint of the length plus the tag (V0) or the 4 bytes of the length plus the tag (V1), as the record layout gives it; `record_len` is that header plus the payload plus the tag, with no overflow; `Cups::MAX_SIZE` is `u32::MAX` minus the tag size. | under 1 s each |
-| `cups_sizes` | `kani_cups_header_len_panics`, `kani_cups_record_len_panics`, each with `_control` | For both versions and every length above `u32::MAX` minus the tag size (any `usize`): both functions panic. | under 1 s each |
+| `cups_sizes` | `kani_cups_header_len_panics`, `kani_cups_record_len_panics`, each with `_control` | For both versions, lengths above `u32::MAX` minus the tag size (any `usize`) make both functions panic (`should_panic`: some inputs, not every input; see "Harnesses that must panic"). | under 1 s each |
 
 All harnesses use the cipher `ChaCha20Poly1305` (tag of 16 bytes). Times are Kani's
 verification time on a 16-core laptop; the build adds a few minutes on the first run.
