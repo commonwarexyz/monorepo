@@ -8,7 +8,7 @@ Commonware is a Rust workspace of high-performance distributed-systems primitive
 - Correctness is the top priority. Maintainability and style are important, but should not be detrimental to performance.
 - Protocol primitives must remain runtime-agnostic. Do not introduce direct `tokio` usage outside runtime-owning code, runtime utilities, command-line paths, benches, or tests. Use the traits in `runtime/src/lib.rs` instead.
 - Use `commonware_macros::select!` for concurrent operations. Async trait methods return `impl Future<Output = Result<T, Error>> + Send`; add `Send + 'static` bounds where required.
-- Implement core mechanisms and algorithms inside the workspace rather than adding a dependency for them. On hot paths, prefer `Bytes`, cheap `Arc` clones, and static dispatch over allocations and dynamic dispatch.
+- Implement core mechanisms and algorithms inside the workspace rather than adding a dependency for them (see [contribution scope](CONTRIBUTING.md#setting-expectations)). On hot paths, prefer `Bytes`, cheap `Arc` clones, and static dispatch over allocations and dynamic dispatch.
 - Use `commonware_codec::Buf` for generic readers of serialized values and their decoding helpers, including fixed-size reads and length or padding validation. Use `Input` at input-conversion entry points, then preserve codec `Buf` internally. Decode owned buffers by value. Use `Viewing` to borrow `Bytes` while preserving shared storage for retained fields. Use `Copying` for borrowed byte slices. Retained byte fields decoded through it allocate and copy.
 - Use `bytes::Buf` for raw buffer implementations and byte-stream inputs to I/O, encoding, or hashing. Import it as `Buf as _` when its cursor methods must be in scope alongside codec `Buf`.
 - Follow the Size Bounds policy in [the codec docs](codec/src/lib.rs). Scalars and length prefixes contribute their encoded types' maximum widths even when validation restricts their values. Caller-supplied limits bound variable contents.
@@ -45,8 +45,11 @@ just test -p <crate> <test_name>  # focused iteration
 just test -p <crate>              # changed crate
 just clippy -p <crate>            # changed crate linting
 just lint                         # workspace-wide lint, docs, and stability checks
+just fix-fmt                      # apply formatting fixes
 just pre-pr                       # before opening a PR
 ```
+
+The `just` recipes use the pinned toolchains; [Development workflow](CONTRIBUTING.md#development-workflow) explains how to override them or run without rustup.
 
 Avoid a workspace build or test unless the change needs it. For platform-specific runtime changes, also run the applicable io_uring checks on Linux. Run `just udeps` after dependency changes, the WASM build after cryptography/utils/storage changes, and `just test-no-std` after changes to crates with a `std` feature. After adding unsafe code, place its tests in the `miri` test group (`#[commonware_macros::test_group("miri")]` on the test module or function) and run `just miri -p <crate>`.
 
@@ -58,7 +61,6 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 - Use `thiserror` for error types.
 - Label runtime actors with `context.child(...)`; use `context.shared(true).spawn()` for CPU-intensive work in async code.
 - Per-peer gauges report current state, so remove a peer's entry when that state ends, such as when it leaves the tracked set, disconnects, or is unblocked. Per-peer counters record history and keep their entries.
-- Benchmark names use `module_path!()` and the format `module::operation/key=value key=value`.
 - When diagnosing a bug, add a failing test before claiming the cause. Mutable storage-operation failures are fatal: do not keep using that database instance or report its inconsistent state as a defect.
 - Storage handles and runtime writers take `self` on asynchronous methods that mutate storage and return it on success, so an error or a dropped future destroys it. A method may borrow instead when a failure leaves its receiver unchanged or permanently failed. Synchronous methods that perform no I/O borrow.
 - Write PR descriptions in DRY [Simplified Technical English](https://www.asd-ste100.org/): short sentences, active voice, one meaning per word, and each fact stated once. Link generously to source code, pinned to a commit, for concepts unique to this repository.
@@ -68,7 +70,7 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 Read the relevant guide only when the task needs it:
 
 - [Contributor workflow](CONTRIBUTING.md#development-workflow)
-- [Benchmark authoring](CONTRIBUTING.md#benchmark-authoring)
+- [Benchmark authoring and naming](CONTRIBUTING.md#benchmark-authoring)
 - [Tracing spans](CONTRIBUTING.md#tracing-spans)
 - [Deterministic runtime and recovery tests](runtime/TESTING.md)
 - [Simulated network tests](p2p/TESTING.md)
