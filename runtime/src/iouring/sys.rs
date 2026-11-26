@@ -459,7 +459,8 @@ impl SqueueEntry {
     /// Encode a vectored write of `count` iovecs at `offset` of `fd`, with
     /// `RWF_*` flags.
     ///
-    /// Sockets pass a zero offset and no flags.
+    /// Sockets pass a zero offset and `RWF_NOSIGNAL`, so a peer that has
+    /// closed fails the write with `EPIPE` instead of raising `SIGPIPE`.
     #[inline]
     pub fn writev(
         fd: RawFd,
@@ -1027,8 +1028,8 @@ impl Drop for CompletionQueue<'_> {
 /// # Safety
 ///
 /// `rings` must be valid for atomic reads and writes of `rings_len` bytes,
-/// and `sqes` for writes of `params.sq_entries` SQEs, as long as the queues
-/// are used. No other user-side writer may access the queues.
+/// and `sqes` for reads and writes of `params.sq_entries` SQEs, as long as
+/// the queues are used. No other user-side writer may access the queues.
 unsafe fn queues(
     params: &Parameters,
     rings: NonNull<u8>,
