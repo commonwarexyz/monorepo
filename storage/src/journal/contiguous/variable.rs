@@ -702,17 +702,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     }
 
     /// Fill `out[i]` for each readable position whose offset and frame are already in the page
-    /// cache or the in-memory tail and whose frame decodes. Reports a `Miss` to `on_miss` for
-    /// every other position, in order, carrying the offsets the pass found so completion can skip
-    /// those lookups.
+    /// cache or the in-memory tail and whose frame decodes. Returns the positions looked up in the
+    /// offsets journal and the offset found for each. Every position is listed, directly followed
+    /// by its same-blob successor if it has one.
     fn read_many_sync_pass(
         &self,
         positions: &[u64],
         out: &mut [Option<V>],
-        mut on_miss: impl FnMut(Miss),
-    ) {
+    ) -> (Vec<u64>, Vec<Option<u64>>) {
         if positions.is_empty() {
-            return;
+            return (Vec::new(), Vec::new());
         }
 
         // A frame at position p spans [off(p), off(p + 1)), or [off(p), blob size) when p is the
@@ -784,18 +783,27 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
+        (lookups, offsets)
+    }
+
+    /// Run the sync pass over strictly increasing `positions`, returning one item slot per
+    /// position and the misses.
+    fn probe_parts(&self, positions: &[u64]) -> (Vec<Option<V>>, Vec<Miss>) {
+        let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        let (lookups, offsets) = self.read_many_sync_pass(positions, &mut items);
 
         // Each unserved position becomes a miss carrying the offsets found above, so completion
         // only looks up the rest.
         let mut lookup_idx = 0;
+        let mut misses = Vec::new();
         for (idx, &position) in positions.iter().enumerate() {
-            if out[idx].is_some() {
+            if items[idx].is_some() {
                 continue;
             }
             while lookups[lookup_idx] != position {
                 lookup_idx += 1;
             }
-            on_miss(Miss {
+            misses.push(Miss {
                 position,
                 offset: offsets[lookup_idx],
                 end: self
@@ -803,6 +811,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                     .and_then(|_| offsets[lookup_idx + 1]),
             });
         }
+        (items, misses)
     }
 }
 
@@ -841,15 +850,6 @@ async fn complete<E: Context, V: CodecShared>(
 }
 
 impl<E: Context, V: CodecShared> Reader<'_, E, V> {
-    /// Run the sync pass over strictly increasing `positions`, returning one item slot per
-    /// position and the misses.
-    fn probe_parts(&self, positions: &[u64]) -> (Vec<Option<V>>, Vec<Miss>) {
-        let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        let mut misses = Vec::new();
-        self.read_many_sync_pass(positions, &mut items, |miss| misses.push(miss));
-        (items, misses)
-    }
-
     /// Read the items for `misses` (strictly increasing by position) and return them in order,
     /// grouped by data blob. Offsets the sync pass didn't find come from one batched read of the
     /// offsets journal. Each data blob's frames then come from one batched read, and the blobs
@@ -1062,10 +1062,8 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             positions.is_sorted_by(|a, b| a < b),
             "positions must be strictly increasing"
         );
-
-        // The empty slots are the misses, so none are collected.
         let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        self.read_many_sync_pass(positions, &mut items, |_| {});
+        self.read_many_sync_pass(positions, &mut items);
         items
     }
 

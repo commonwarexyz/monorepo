@@ -108,6 +108,7 @@ use crate::merkle::{
 use ahash::RandomState;
 use alloc::{
     sync::{Arc, Weak},
+    vec,
     vec::Vec,
 };
 #[cfg(feature = "std")]
@@ -639,14 +640,16 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             .sum();
         self.overwrites.reserve(overwritten);
 
-        // Every level computes its digests into the same buffer, sized for the longest level.
+        // Every level computes its digests into the front of the same buffer, sized for the
+        // longest level.
         let longest = levels.iter().map(Vec::len).max().unwrap_or(0);
-        let mut digests = Vec::with_capacity(longest);
+        let mut digests = vec![D::EMPTY; longest];
         for (height, positions) in levels.iter().enumerate() {
             if positions.is_empty() {
                 continue;
             }
-            self.merkleize_level(base, hasher, positions, height as u32, &mut digests);
+            let digests = &mut digests[..positions.len()];
+            self.merkleize_level(base, hasher, positions, height as u32, digests);
         }
 
         // Record the peaks of the state this batch represents. A batch without changes shares
@@ -713,8 +716,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Compute digests for one height's dirty nodes via the configured strategy, using `digests`
-    /// as the buffer they are computed into.
+    /// Compute digests for one height's dirty nodes via the configured strategy, overwriting
+    /// `digests`, which holds one slot per position, with each position's digest.
     ///
     /// The strategy splits the positions into batches of adjacent pairs, so every pair reaches
     /// [`Hasher::node_digest_pair`] together and only the last batch can end in a lone node.
@@ -724,16 +727,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         positions: &[Position<F>],
         height: u32,
-        digests: &mut Vec<D>,
+        digests: &mut [D],
     ) {
-        // The workers overwrite every slot, so digests left by the previous level need no clearing.
-        digests.resize(positions.len(), D::EMPTY);
         let pairs = positions.len().div_ceil(2);
         self.parent
             .strategy
             .run_batches(pairs, NonZeroUsize::MIN, 2, |batches| {
                 // The ranges cover the pairs in order, so each takes its digests off the front.
-                let mut rest = digests.as_mut_slice();
+                let mut rest = &mut *digests;
                 batches.map_collect_vec(
                     |ranges| {
                         ranges.into_iter().map(move |range| {
@@ -891,6 +892,29 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             }
         }
         None
+    }
+
+    /// The digests of the nodes [`Family::nodes_to_pin`] names for `start`, in its order, each
+    /// resolved from this batch or else from `base`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ElementPruned`] if a node is in neither.
+    #[cfg(feature = "std")]
+    pub(crate) fn pinned_nodes_at(
+        &self,
+        base: &Mem<F, D>,
+        start: Location<F>,
+    ) -> Result<Vec<D>, Error<F>> {
+        let mut nodes = Vec::with_capacity(F::nodes_to_pin(start).count());
+        for pos in F::nodes_to_pin(start) {
+            let node = self
+                .get_node(pos)
+                .or_else(|| base.get_node(pos))
+                .ok_or(Error::ElementPruned(pos))?;
+            nodes.push(node);
+        }
+        Ok(nodes)
     }
 
     /// Iterate the nodes this batch appended or overwrote relative to its parent batch.

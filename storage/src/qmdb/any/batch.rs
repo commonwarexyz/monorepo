@@ -775,8 +775,9 @@ where
         }
     }
 
-    // With no diff to consult, every pending slot still needs a database read.
-    if diffs.is_empty() {
+    // With no pending slot or no diff to consult, the diffs resolve nothing, and every pending
+    // slot still needs a database read.
+    if pending.is_empty() || diffs.is_empty() {
         return (results, pending);
     }
     let mut resolved = vec![false; keys.len()];

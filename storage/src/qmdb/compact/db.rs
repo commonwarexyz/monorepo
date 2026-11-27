@@ -890,18 +890,9 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O
         H: Hasher<Digest = D>,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
-        let base = db.merkle.mem();
-        let start = self.bounds.base.size;
-        let mut nodes = Vec::with_capacity(F::nodes_to_pin(start).count());
-        for pos in F::nodes_to_pin(start) {
-            let node = self
-                .merkle_batch
-                .get_node(pos)
-                .or_else(|| base.get_node(pos))
-                .ok_or(merkle::Error::ElementPruned(pos))?;
-            nodes.push(node);
-        }
-        Ok(nodes)
+        self.merkle_batch
+            .pinned_nodes_at(db.merkle.mem(), self.bounds.base.size)
+            .map_err(Into::into)
     }
 
     /// Create a new speculative batch with this one as its parent.

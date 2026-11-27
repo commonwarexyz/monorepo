@@ -447,16 +447,10 @@ where
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
     ) -> Result<Vec<H::Digest>, Error<F>> {
         let start = Location::new(batch.size() - batch.items().len() as u64);
-        let mem = self.merkle.mem();
-        let mut nodes = Vec::with_capacity(F::nodes_to_pin(start).count());
-        for pos in F::nodes_to_pin(start) {
-            let node = batch
-                .get_node(pos)
-                .or_else(|| mem.get_node(pos))
-                .ok_or(Error::Merkle(merkle::Error::ElementPruned(pos)))?;
-            nodes.push(node);
-        }
-        Ok(nodes)
+        batch
+            .inner
+            .pinned_nodes_at(self.merkle.mem(), start)
+            .map_err(Error::Merkle)
     }
 
     /// Generate a historical proof with respect to the state of the Merkle structure when it had
