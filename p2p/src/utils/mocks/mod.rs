@@ -126,6 +126,8 @@ pub fn inert_channel<P: PublicKey>(peers: impl AsRef<[P]>) -> (InertSender<P>, I
 }
 
 /// Blocker that accepts every request without blocking anyone.
+///
+/// Its blocked-set subscription is closed from the start and never yields a set.
 #[derive(Clone, Debug)]
 pub struct NoopBlocker<P> {
     _phantom: PhantomData<P>,

@@ -683,21 +683,23 @@ pub mod test_suites {
         Ok(())
     }
 
-    fn check_hash_to_field<F: HashToField>(data: [[u8; 4]; 4]) {
-        let (dst0, m0, dst1, m1) = (&data[0], &data[1], &data[2], &data[3]);
+    fn check_hash_to_field<F: HashToField>(domain_separator: &[u8], message: &[u8]) {
         assert_eq!(
-            (dst0, m0) == (dst1, m1),
-            F::hash_to_field(dst0, m0) == F::hash_to_field(dst1, m1)
+            F::hash_to_field(domain_separator, message),
+            F::hash_to_field(domain_separator, message),
+            "hash_to_field must be deterministic"
         );
     }
 
     /// Fuzz the [`HashToField`] trait properties.
     ///
-    /// Takes arbitrary data and checks that the hash function is deterministic.
+    /// Takes an arbitrary domain separator and message and checks that hashing them twice gives
+    /// the same element. Distinct inputs may collide, so this doesn't compare them.
     /// This doesn't check any properties related to [`Field`].
     pub fn fuzz_hash_to_field<F: HashToField>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-        let data: [[u8; 4]; 4] = u.arbitrary()?;
-        check_hash_to_field::<F>(data);
+        let domain_separator: Vec<u8> = u.arbitrary()?;
+        let message: Vec<u8> = u.arbitrary()?;
+        check_hash_to_field::<F>(&domain_separator, &message);
         Ok(())
     }
 
@@ -858,3 +860,25 @@ commonware_macros::stability_scope!(ALPHA {
         }
     }
 });
+
+#[cfg(test)]
+mod tests {
+    use super::{HashToField, test_suites::fuzz_hash_to_field};
+    use crate::test::F;
+    use commonware_invariants::minifuzz;
+
+    // Hashes to the combined length of the inputs. This is deterministic, and inputs of equal
+    // length collide.
+    impl HashToField for F {
+        fn hash_to_field(domain_separator: &[u8], message: &[u8]) -> Self {
+            Self::from((domain_separator.len() + message.len()) as u64)
+        }
+    }
+
+    #[test]
+    fn test_fuzz_hash_to_field() {
+        minifuzz::Builder::default()
+            .with_search_limit(64)
+            .test(fuzz_hash_to_field::<F>);
+    }
+}

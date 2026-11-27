@@ -79,7 +79,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// A hint that a finalized block may be available at a given height.
     ///
-    /// This triggers a network fetch if the finalization is not available locally.
+    /// This triggers a network fetch if
+    /// [`store::Certificates`](crate::marshal::store::Certificates) holds no finalization at
+    /// that height.
     /// This is fire-and-forget. A valid response enters the normal finalization
     /// flow, and a hint at or below the processed height is ignored.
     ///
@@ -762,7 +764,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Hints that a finalized block may be available at the given height.
     ///
     /// This method will request the finalization from the network via the resolver
-    /// if it is not available locally.
+    /// if [`store::Certificates`](crate::marshal::store::Certificates) holds no finalization at
+    /// that height.
     ///
     /// Targets are required because this is typically called when a peer claims to be
     /// ahead. By targeting only those peers, we limit who we ask. If a target returns

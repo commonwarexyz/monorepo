@@ -45,10 +45,11 @@
 //! until its CQE is reaped. See [`super::idle`] for how pool worker
 //! selection fits with this wait.
 //!
-//! A park counts as iowait while storage requests are in flight. Otherwise it
-//! passes NO_IOWAIT, so waiting only on network requests is not iowait. A
-//! request still waiting for its durability permit does not count, since the
-//! request holding the permit already counts on the worker that staged it.
+//! A park counts as iowait while a storage SQE is in flight, from its staging
+//! to its operation CQE. Otherwise it passes NO_IOWAIT, so waiting only on
+//! network requests is not iowait. A request waiting for its durability
+//! permit, or holding it with no SQE staged, has nothing in flight and does
+//! not count.
 //!
 //! # Cleanup
 //!
@@ -902,7 +903,6 @@ pub mod tests {
         storage::{hold::Hold, iouring::Shared},
     };
     use commonware_utils::{TestRng, channel::oneshot};
-    use io_uring::opcode::Nop;
     use rand::RngExt as _;
     use std::{
         cell::Cell,
@@ -1214,13 +1214,19 @@ pub mod tests {
             self.service_at(Instant::now(), false);
         }
 
-        /// Fill the one-slot SQ with a control SQE that uses no operation slot.
+        /// Stage a control SQE that uses no operation slot, which fills a
+        /// one-slot SQ. It is a cancellation aimed at the cancel token, which
+        /// no operation carries, so once submitted it fails with ENOENT.
         fn fill_with_control(&mut self) {
-            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+            let cancel = AsyncCancel::new(CANCEL_USER_DATA)
+                .build()
+                .flags(SqeFlags::SKIP_SUCCESS)
+                .user_data(CANCEL_USER_DATA);
 
-            // SAFETY: Nop references no memory that the kernel could access.
+            // SAFETY: AsyncCancel carries only a user_data identity, so it
+            // references no memory that the kernel could access.
             unsafe {
-                self.driver.ring.submission().push(&nop).unwrap();
+                self.driver.ring.submission().push(&cancel).unwrap();
             }
         }
 
@@ -2543,12 +2549,15 @@ pub mod tests {
         let mut harness = Harness::new(1);
 
         // A live ring wait must not make a CPU-only turn enter the kernel.
+        // An enter would submit the control SQE staged after the park.
         assert!(harness.park(0, Some(Instant::now())).unwrap());
+        harness.fill_with_control();
         harness.service();
 
         assert!(harness.driver.is_empty());
         assert!(!harness.driver.has_pending_submissions());
         assert!(!harness.driver.state.ring_wait_needed);
+        assert_eq!(harness.driver.ring.submission().len(), 1);
 
         harness.drain();
     }
@@ -3346,13 +3355,11 @@ pub mod tests {
         let mut harness = Harness::new(4);
         let (directory, file) = make_file("iowait");
 
-        // Return whether an unbounded park passed NO_IOWAIT. A NOP the park
-        // submits ends its wait, so the check depends on no deadline.
+        // Return whether an unbounded park passed NO_IOWAIT. A control SQE
+        // the park submits posts its failure and ends the wait, so the check
+        // depends on no deadline.
         let no_iowait = |harness: &mut Harness| {
-            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
-
-            // SAFETY: A NOP references no memory.
-            unsafe { harness.driver.ring.submission().push(&nop).unwrap() };
+            harness.fill_with_control();
             assert!(harness.park(0, None).unwrap());
 
             LAST_WAIT.take().unwrap().contains(EnterFlags::NO_IOWAIT)

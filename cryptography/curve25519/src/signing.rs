@@ -327,7 +327,7 @@ impl Read for VerifyingKey {
         _: &Self::Cfg,
     ) -> Result<Vec<Self>, commonware_codec::Error> {
         at_least_items(buf, len, Self::SIZE)?;
-        core::read_points(buf, len, |bytes, point| Self { bytes, point }).ok_or(Self::NOT_A_POINT)
+        core::read_points(buf, len).ok_or(Self::NOT_A_POINT)
     }
 }
 

@@ -276,8 +276,7 @@ impl Request {
             Self::Recv(r) => r.on_cqe(state, result),
             Self::ReadAt(r) => r.on_cqe(state, result),
             Self::WriteAt(w) => w.on_cqe(state, result),
-            Self::Sync(s) => s.on_cqe(state, result),
-            Self::Resize(t) => t.on_cqe(state, result),
+            Self::Sync(_) | Self::Resize(_) => on_status_cqe(state, result),
             Self::Connect(r) => r.on_cqe(state, result),
             Self::Poll(r) => r.on_cqe(state, result),
         }
@@ -1034,12 +1033,6 @@ impl SyncRequest {
     fn build_sqe(&self) -> SqueueEntry {
         build_datasync_sqe(&self.file)
     }
-
-    /// Classify one fsync CQE and decide whether the logical request completes
-    /// or needs another SQE.
-    fn on_cqe(&self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
-        on_status_cqe(state, result)
-    }
 }
 
 /// Logical file resize request and its in-loop state.
@@ -1059,12 +1052,6 @@ impl ResizeRequest {
     /// Build the ftruncate SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
         opcode::Ftruncate::new(Fd(self.file.as_raw_fd()), self.len).build()
-    }
-
-    /// Classify one ftruncate CQE and decide whether the logical request completes
-    /// or needs another SQE.
-    fn on_cqe(&self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
-        on_status_cqe(state, result)
     }
 }
 

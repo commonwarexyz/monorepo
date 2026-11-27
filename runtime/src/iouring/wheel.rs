@@ -49,12 +49,14 @@ use std::time::{Duration, Instant};
 /// Most budget units per expiry pass of one wheel: one per slot fired, one
 /// per [`REFILES_PER_UNIT`] slots refiled. It bounds the work of one pass, so
 /// a storm of simultaneous deadlines keeps its worker from polling tasks for
-/// about one budget of wakes or cancellations at a time, and a backlog drains
-/// at most one budget per pass. A pool worker's pass over its own sleeps
+/// about one budget of wakes or cancellations at a time, and one pass takes
+/// at most one budget from a backlog. A pool worker's pass over its own sleeps
 /// fires no more of them than its run queue has room for, while its refiles
 /// keep the full budget (see [`Wheel::expire_capped`]). A worker's service
 /// runs one pass over its sleeps and one over its request deadlines, and a
 /// pool worker runs one more over each stalled peer's sleeps that it expires.
+/// A request that its driver finds due at admission, registration or staging
+/// times out there without consuming the budget.
 pub const BUDGET: u32 = 256;
 
 /// Refiles that cost one unit of an expiry budget. A refile only moves a slot

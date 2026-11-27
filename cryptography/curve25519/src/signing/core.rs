@@ -3,6 +3,7 @@
 mod msm;
 mod scalar;
 
+use super::VerifyingKey;
 use crate::curve::{
     Backend, G, GAffine, LANES, ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH, WithBackend, with_backend,
 };
@@ -669,29 +670,20 @@ pub(super) fn verify_batch_bytes(
 /// [`DECOMPRESS_BATCH_MIN`](crate::curve::FBackend::DECOMPRESS_BATCH_MIN) encodings with the
 /// identity encoding, and decompresses a shorter one an encoding at a time.
 ///
-/// Returns `map(encoding, point)` for every encoding in order, or `None` if any encoding is not
+/// Returns a key holding each encoding and its point, in order, or `None` if any encoding is not
 /// a curve point.
-pub(super) fn read_points<T>(
-    buf: &mut impl Buf,
-    len: usize,
-    map: impl Fn(VerifyingKeyBytes, GAffine) -> T,
-) -> Option<Vec<T>> {
-    with_backend(ReadPoints { buf, len, map })
+pub(super) fn read_points(buf: &mut impl Buf, len: usize) -> Option<Vec<VerifyingKey>> {
+    with_backend(ReadPoints { buf, len })
 }
 
 /// The inputs of [`read_points`].
-struct ReadPoints<'a, R, M> {
+struct ReadPoints<'a, R> {
     buf: &'a mut R,
     len: usize,
-    map: M,
 }
 
-impl<R, M, T> WithBackend for ReadPoints<'_, R, M>
-where
-    R: Buf,
-    M: Fn(VerifyingKeyBytes, GAffine) -> T,
-{
-    type Output = Option<Vec<T>>;
+impl<R: Buf> WithBackend for ReadPoints<'_, R> {
+    type Output = Option<Vec<VerifyingKey>>;
 
     // Inlined so the decompression compiles inside the backend's target-feature entry.
     #[inline(always)]
@@ -707,12 +699,18 @@ where
             if count < B::DECOMPRESS_BATCH_MIN {
                 for encoding in &encodings[..count] {
                     let point = GAffine::decompress(encoding)?;
-                    values.push((self.map)(VerifyingKeyBytes::new(*encoding), point));
+                    values.push(VerifyingKey {
+                        bytes: VerifyingKeyBytes::new(*encoding),
+                        point,
+                    });
                 }
             } else {
                 let points = GAffine::decompress_batch(backend, &encodings);
                 for (encoding, point) in encodings.iter().zip(points).take(count) {
-                    values.push((self.map)(VerifyingKeyBytes::new(*encoding), point?));
+                    values.push(VerifyingKey {
+                        bytes: VerifyingKeyBytes::new(*encoding),
+                        point: point?,
+                    });
                 }
             }
             remaining -= count;

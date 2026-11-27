@@ -195,6 +195,10 @@ fn parse_single_command(line: &str) -> Command {
         if let Some(eq_pos) = arg.find('=') {
             let key = arg[..eq_pos].trim().to_string();
             let value = arg[eq_pos + 1..].trim().to_string();
+            assert!(
+                !parsed_args.contains_key(&key),
+                "argument {key} must appear at most once"
+            );
             parsed_args.insert(key, value);
         } else {
             panic!("Invalid argument format (expected key=value): {arg}");
@@ -1052,6 +1056,24 @@ mod tests {
     #[should_panic(expected = "resilience applies only to fault thresholds")]
     fn test_parse_percent_threshold_rejects_resilience() {
         parse_task("collect{0, threshold=80%, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "argument threshold must appear at most once")]
+    fn test_parse_rejects_duplicate_threshold_fault_last() {
+        parse_task("wait{0, threshold=1, threshold=n-f, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "argument threshold must appear at most once")]
+    fn test_parse_rejects_duplicate_threshold_fault_first() {
+        parse_task("wait{0, threshold=n-f, threshold=1, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "argument resilience must appear at most once")]
+    fn test_parse_rejects_duplicate_resilience() {
+        parse_task("wait{0, threshold=n-f, resilience=3, resilience=5}");
     }
 
     #[test]

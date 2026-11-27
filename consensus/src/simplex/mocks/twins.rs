@@ -1,12 +1,11 @@
 //! Simplex leader election for [Twins](crate::twins) scenarios.
 //!
 //! [`Elector`] makes each scripted round's view elect the scenario's leader and hands later views
-//! to a fallback elector. The scenario generator and routing helpers are re-exported from
-//! [`crate::twins`].
+//! to a fallback elector. The scenario generator and routing helpers live in [`crate::twins`].
 
-pub use crate::twins::*;
 use crate::{
     simplex::elector::{self, Input, Terms},
+    twins::{Scenario, term_index},
     types::{Participant, Round},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -112,6 +111,7 @@ mod tests {
             elector::{Elector as _, RoundRobin},
             scheme::ed25519,
         },
+        twins::{Framework, Mode, RoundScenario, cases},
         types::{Epoch, TermLength, View, ViewDelta},
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};

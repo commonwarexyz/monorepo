@@ -131,7 +131,9 @@ where
     stream: Stream<E>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<A>,
-    // Height of the highest stored finalization, or zero if none
+    // Height of the highest finalization the by-height archive held at startup or marshal has
+    // written to it since, or zero if none. A store may ignore a write below its prune floor, so
+    // the archive can hold nothing at this height.
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
@@ -151,7 +153,7 @@ where
     // Finalized blocks stored by height
     finalized_blocks: FB,
 
-    // Height of the highest stored finalization
+    // Height of the tip
     finalized_height: Gauge,
     // Latest processed height
     processed_height: Gauge,
@@ -252,7 +254,7 @@ where
         // Create metrics
         let finalized_height = context.gauge(
             "finalized_height",
-            "Height of the highest stored finalization",
+            "Height of the highest finalization stored at startup or written since",
         );
         let processed_height = context.gauge("processed_height", "Processed height of application");
         if let Some(last_processed_height) = last_processed_height {
@@ -917,7 +919,7 @@ where
             Message::HintFinalized {
                 height, targets, ..
             } => {
-                // Skip if finalization is already available locally.
+                // Skip if the finalizations archive already holds this height.
                 if self.has_finalization_by_height(height).await {
                     return self;
                 }
@@ -1343,11 +1345,9 @@ where
     /// Notifies subscribers of a validated block and applies it to any
     /// pending floor transition.
     ///
-    /// Subscribers are notified before the block is persisted. This is not
-    /// observable while running because mailbox requests are only served
-    /// after the current `select_loop!` arm completes. After an unclean
-    /// shutdown, however, a subscriber may hold a block that marshal never
-    /// durably stored.
+    /// A notification does not imply that the block is persisted, and marshal
+    /// may never persist it. A subscriber can therefore hold a block that marshal
+    /// never durably stores, with or without an unclean shutdown.
     ///
     /// Subscriptions make no durability promise. [`Self::try_dispatch_blocks`]
     /// provides durable height-ordered delivery and only sends a block once
@@ -1970,14 +1970,13 @@ where
     }
 
     /// Sync both finalization archives to durable storage, blocking the actor
-    /// until they are durable.
+    /// until they are durable, then clear the [`DispatchGate`] because every
+    /// write accepted before the sync is now durable.
     ///
-    /// Must be called within the same `select_loop!` arm as any preceding
-    /// [`Self::store_finalization`] / [`Self::try_repair_gaps`] writes, before yielding back
-    /// to the loop. This is the durability barrier for application delivery:
-    /// [`Self::try_dispatch_blocks`] must run only after this sync completes.
-    /// It also ensures archives are durable before the ack handler advances
-    /// the processed floor height. See [`Self::try_dispatch_blocks`] for details.
+    /// Like [`Self::start_finalized_sync`], this must be called within the same `select_loop!`
+    /// arm as the [`Self::store_finalization`] / [`Self::try_repair_gaps`] writes it covers,
+    /// before yielding back to the loop. See [`Self::try_dispatch_blocks`] for the crash safety
+    /// invariant.
     ///
     /// Blocking the actor stalls every mailbox caller behind the sync.
     /// Prefer [`Self::start_finalized_sync`] unless work later in the same
@@ -2234,7 +2233,7 @@ where
         // hold dispatch at or above it until a sync covers it.
         self.dispatch_gate.defer(height);
 
-        // The tip is the newest stored finalization, so a block repaired without its finalization
+        // Only a finalization advances the tip, so a block repaired without its finalization
         // leaves it unchanged.
         if let Some(round) = round {
             self.advance_tip(round, height, digest, application);

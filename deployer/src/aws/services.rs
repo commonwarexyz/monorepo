@@ -1641,7 +1641,15 @@ mod tests {
         assert!(!setup.contains("docker login"));
         assert!(setup.contains("sudo tee /etc/systemd/system/promtail.service"));
         assert!(setup.contains("sudo tee /etc/systemd/system/node_exporter.service"));
-        assert!(setup.contains("--collector.ethtool"));
+        let node_exporter = setup
+            .lines()
+            .find(|line| line.starts_with("ExecStart=") && line.contains("--name node_exporter"))
+            .expect("node_exporter ExecStart line must exist");
+        assert!(
+            node_exporter
+                .split_ascii_whitespace()
+                .any(|arg| arg == "--collector.ethtool")
+        );
         assert!(setup.contains("--collector.ethtool.device-exclude="));
         assert!(setup.contains("--collector.qdisc"));
         assert!(setup.contains("ExecStartPre=-/usr/local/bin/docker rm -f promtail"));

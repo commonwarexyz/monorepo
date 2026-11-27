@@ -128,7 +128,7 @@ impl<D: Copy> Resident<D> {
     /// Make room for the nodes born by size `end`, so adding them regrows no level. Regrowing
     /// copies every digest a level holds.
     ///
-    /// A level gets the room that doubling to its new length would have left it. An exact
+    /// A level gets room up to the next power of two at or above its new length. An exact
     /// reservation would leave every level full, to regrow on the next append. A level whose room
     /// cannot be reserved is left to grow as its nodes arrive.
     fn reserve<F: Family>(&mut self, end: Position<F>) {
@@ -145,7 +145,9 @@ impl<D: Copy> Resident<D> {
             let Some(total) = len.checked_add(additional) else {
                 continue;
             };
-            let capacity = total.checked_next_power_of_two().unwrap_or(total);
+            let Some(capacity) = total.checked_next_power_of_two() else {
+                continue;
+            };
             let _ = level.nodes.try_reserve_exact(capacity - len);
         }
     }
@@ -1241,6 +1243,12 @@ mod tests {
         resident.levels.iter().map(|level| level.nodes.len()).sum()
     }
 
+    /// Digests each resident level of `tree` has room for.
+    fn capacities<F: Family>(tree: &Tree<F, D, Sequential>) -> Vec<usize> {
+        let levels = tree.resident.levels.iter();
+        levels.map(|level| level.nodes.capacity()).collect()
+    }
+
     fn config(resident_height: u32) -> Config<Sequential> {
         Config {
             partition: String::new(),
@@ -1425,7 +1433,7 @@ mod tests {
                             .await
                             .unwrap();
 
-                        // Both hold the same size, root, pins and resident nodes.
+                        // Both hold the same size, root, pins, resident nodes and room.
                         assert_eq!(subtrees.size(), batched.size(), "{case}");
                         assert_eq!(
                             subtrees.root(&hasher, 0).unwrap(),
@@ -1442,6 +1450,7 @@ mod tests {
                             resident_len(&batched.resident),
                             "{case}"
                         );
+                        assert_eq!(capacities(&subtrees), capacities(&batched), "{case}");
 
                         // Every node from the boundary on, rebuilt or resident, matches the oracle.
                         let first = *F::location_to_position(Location::new(boundary));
@@ -1475,15 +1484,11 @@ mod tests {
 
     /// Reserving for a replay leaves every level room for the nodes the replay adds, so the
     /// replay regrows none, in trees opened at boundaries on and off level edges. A level's room
-    /// stays under twice its nodes.
+    /// reaches the next power of two at or above its nodes. A replay reserves that room by itself.
     async fn replay_regrows_no_level<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let total = 513;
         let expected = oracle::<F>(&Operations::new(total), &hasher);
-        let capacities = |tree: &Tree<F, D, Sequential>| -> Vec<usize> {
-            let levels = tree.resident.levels.iter();
-            levels.map(|level| level.nodes.capacity()).collect()
-        };
         for height in [0, 2, 5] {
             for boundary in [0, 1, 31, 32, 33, 257, total] {
                 let case = format!("resident {height}, boundary {boundary}");
@@ -1491,9 +1496,14 @@ mod tests {
                     .map(|p| expected.get_node(p).unwrap())
                     .collect();
                 let ops = Operations::range(boundary..total);
-                let mut tree =
-                    Tree::<F, D, _>::new(Location::new(boundary), pins, &config(height), &context)
-                        .unwrap();
+                let config = config(height);
+                let open = || {
+                    Tree::<F, D, _>::new(Location::new(boundary), pins.clone(), &config, &context)
+                        .unwrap()
+                };
+
+                // Reserve, then replay. The replay regrows no level.
+                let mut tree = open();
                 tree.reserve(Location::new(total));
                 let reserved = capacities(&tree);
                 let tree = tree
@@ -1503,8 +1513,24 @@ mod tests {
                 assert_eq!(capacities(&tree), reserved, "{case}");
                 for level in &tree.resident.levels {
                     let (len, capacity) = (level.nodes.len(), level.nodes.capacity());
-                    assert!(len <= capacity && capacity < 2 * len.max(1), "{case}");
+                    let room = if len == 0 { 0 } else { len.next_power_of_two() };
+                    assert!(
+                        room <= capacity,
+                        "{case}: room must reach the next power of two at or above the nodes"
+                    );
                 }
+
+                // Replay without reserving first. Growing as nodes arrive would leave room for 4
+                // nodes in a level that ends with 1 or 2.
+                let tree = open()
+                    .replay(&ops, &hasher, Location::new(total), NZU64!(7))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    capacities(&tree),
+                    reserved,
+                    "{case}: a replay must reserve before it appends"
+                );
             }
         }
     }

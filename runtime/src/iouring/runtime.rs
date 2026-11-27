@@ -262,7 +262,8 @@ const BATCH_SIZE: usize = 64;
 /// repolls once a pass has reached their deadlines complete without their
 /// fires. Request deadlines, and a peer's rescue of a stalled worker's
 /// sleeps, keep a full budget per pass, and so do the refiles of later
-/// sleeps, which wake nothing.
+/// sleeps, which wake nothing. A request that the driver finds due at
+/// admission, registration or staging times out there, outside this budget.
 ///
 /// Between two passes the worker polls a batch of up to [`BATCH_SIZE`]
 /// tasks, so with long polls a full batch would hold each further budget back
@@ -1597,10 +1598,6 @@ pub struct Worker {
     inbox: Vec<Message>,
     /// The parker of this worker's word, the only handle that can wait on it.
     parker: Parker,
-    /// Sequence of the word last observed, loaded each turn before the worker
-    /// checks its sources of work, and on each pass of the cleanup loop. A wait
-    /// blocks only while the word still carries it.
-    seen_seq: u32,
     /// Calls to [`Self::next_runnable`] left until the one that looks at the
     /// pool's global queue.
     until_global: u32,
@@ -1652,7 +1649,6 @@ impl Worker {
             panics: Panics::default(),
             inbox: Vec::new(),
             parker,
-            seen_seq: 0,
             until_global: global_queue_interval,
             global_queue_interval,
             rescue_at: Instant::now(),
@@ -1951,7 +1947,7 @@ impl Worker {
         loop {
             // Observe before service checks permits and completions, so a wait
             // blocks only while nothing notified since.
-            self.seen_seq = self.parker.observe();
+            let seen = self.parker.observe();
 
             // A retained write may still be queued without an SQE in flight.
             // Service must stage that work before we consider waiting for a CQE.
@@ -1971,15 +1967,15 @@ impl Worker {
                 break;
             }
 
-            let deadline = local.next_deadline();
-
             // Parking only enters the kernel and invokes no user callbacks.
             // Keeping the driver in Local preserves the cleanup owner on unwind.
+            // No deadline bounds the wait. Closure cancelled every request
+            // that has one and closed the timers, and admission stays closed.
             let parked = local
                 .driver
                 .as_mut()
                 .unwrap()
-                .park(&self.parker, self.seen_seq, deadline);
+                .park(&self.parker, seen, None);
             drop(local);
             parked.expect("io_uring shutdown wait failed");
         }
@@ -2230,8 +2226,9 @@ impl Worker {
         let mut searcher = index.map(|index| Searcher::new(&shared.pool, index));
 
         // Calibrate with the spin's own condition: a spin ends once any
-        // notification moves the worker's word.
-        let mut spinner = Spinner::new(&spinner_cfg, || self.parker.moved(self.seen_seq));
+        // notification moves the worker's word. Calibration only times the
+        // check, so any observation serves.
+        let mut spinner = Spinner::new(&spinner_cfg, || self.parker.moved(0));
         let max_spin =
             Duration::from_micros(spinner_cfg.max_budget_us.try_into().unwrap_or(u64::MAX));
 
@@ -2318,7 +2315,7 @@ impl Worker {
             // completions, permits, messages, and the pool. A notification
             // after this load moves the word, so a wait against it refuses to
             // block.
-            self.seen_seq = self.parker.observe();
+            let seen = self.parker.observe();
 
             // Polls can leave cancelled observers behind. Run one batch before
             // deciding whether kernel service can wait until parking. Reentrant
@@ -2380,7 +2377,7 @@ impl Worker {
                 || pending_submissions
                 || !self.inbox.is_empty()
                 || mailbox.has_mail()
-                || self.parker.moved(self.seen_seq)
+                || self.parker.moved(seen)
             {
                 if let Some(searcher) = &mut searcher {
                     searcher.leave_search();
@@ -2441,7 +2438,7 @@ impl Worker {
             if needs_kernel {
                 let result = self.local.borrow_mut().driver.as_mut().unwrap().park(
                     &self.parker,
-                    self.seen_seq,
+                    seen,
                     deadline,
                 );
 
@@ -2468,7 +2465,6 @@ impl Worker {
                 // Spin unless it could outlast the deadline, then park against
                 // the same observation. A spin that saw the word move skips the
                 // park, which would refuse to block anyway.
-                let seen = self.seen_seq;
                 if (near_deadline || !spinner.spin(|| self.parker.moved(seen)))
                     && let Some(duration) = self.parker.park(seen, deadline)
                 {
