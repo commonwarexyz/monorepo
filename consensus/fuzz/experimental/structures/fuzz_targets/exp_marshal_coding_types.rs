@@ -319,7 +319,9 @@ fn check_shard(
         &bytes[TestCommitment::SIZE + u16::SIZE..]
     );
 
-    if commitment.config() == config {
+    // Both bounds hold only for encoder output: a decoded shard may carry more proof siblings
+    // than the tree for `config` has.
+    if bytes == honest {
         let widest = RS::max_shard_size(&config, limit.saturating_add(CodingConfig::SIZE));
         assert!(bytes.len() <= TestShard::max_encode_size(widest));
         assert!(bytes.len() <= TestVariant::max_buffer_payload_size(participants.into(), limit));
