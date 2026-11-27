@@ -1168,14 +1168,6 @@ mod tests {
     use commonware_utils::{NZU32, TestRng, test_rng};
     use std::{collections::HashSet, panic::catch_unwind};
 
-    fn round(leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
-        RoundScenario {
-            leader,
-            primary_mask,
-            secondary_mask,
-        }
-    }
-
     fn range_mask(start: usize, len: usize) -> u64 {
         if len == 0 {
             return 0;
@@ -1221,7 +1213,7 @@ mod tests {
         ) {
             if cell_idx == ranges.len() {
                 out.push((
-                    round(
+                    RoundScenario::new(
                         state.leader.expect("leader cell should assign a leader"),
                         state.primary_mask,
                         state.primary_mask,
@@ -1297,7 +1289,7 @@ mod tests {
                     return;
                 }
                 out.push((
-                    round(
+                    RoundScenario::new(
                         state.leader.expect("leader cell should assign a leader"),
                         state.primary_mask,
                         state.secondary_mask,
@@ -1463,7 +1455,7 @@ mod tests {
             }
             cells.push(1);
 
-            out.insert((round(leader, mask, mask), cells));
+            out.insert((RoundScenario::new(leader, mask, mask), cells));
         }
 
         for outside in 0..n {
@@ -1495,15 +1487,15 @@ mod tests {
                     cells.push(1);
 
                     out.insert((
-                        round(leader, primary_mask | leader_bit, secondary_mask),
+                        RoundScenario::new(leader, primary_mask | leader_bit, secondary_mask),
                         cells.clone(),
                     ));
                     out.insert((
-                        round(leader, primary_mask, secondary_mask | leader_bit),
+                        RoundScenario::new(leader, primary_mask, secondary_mask | leader_bit),
                         cells.clone(),
                     ));
                     out.insert((
-                        round(
+                        RoundScenario::new(
                             leader,
                             primary_mask | leader_bit,
                             secondary_mask | leader_bit,
@@ -1627,7 +1619,7 @@ mod tests {
     #[test]
     fn scripted_partitions_preserve_participant_order_and_overlap() {
         let scenario = Scenario {
-            rounds: vec![round(3, 0b1011, 0b0110)],
+            rounds: vec![RoundScenario::new(3, 0b1011, 0b0110)],
         };
         let participants: Vec<u32> = (0..4).collect();
         let (primary, secondary) =
@@ -1761,7 +1753,7 @@ mod tests {
     #[test]
     fn route_supports_shared_non_leaders_in_split_rounds() {
         let scenario = Scenario {
-            rounds: vec![round(4, 0b11010, 0b00110)],
+            rounds: vec![RoundScenario::new(4, 0b11010, 0b00110)],
         };
         let participants: Vec<u32> = (0..5).collect();
         assert_eq!(
@@ -1789,7 +1781,7 @@ mod tests {
     #[test]
     fn leader_visible_to_both_halves_preserves_partitions_and_route() {
         let scenario = Scenario {
-            rounds: vec![round(3, 0b1010, 0b1100)],
+            rounds: vec![RoundScenario::new(3, 0b1010, 0b1100)],
         };
         let participants: Vec<u32> = (0..4).collect();
         let (primary, secondary) =
@@ -1822,7 +1814,7 @@ mod tests {
     #[test]
     fn route_selects_correct_half() {
         let scenario = Scenario {
-            rounds: vec![round(0, 0b0011, 0b1100)],
+            rounds: vec![RoundScenario::new(0, 0b0011, 0b1100)],
         };
         let participants: Vec<u32> = (0..4).collect();
         assert_eq!(
@@ -1846,7 +1838,7 @@ mod tests {
     #[test]
     fn route_returns_both_after_scripted_rounds() {
         let scenario = Scenario {
-            rounds: vec![round(0, 0b0011, 0b1100)],
+            rounds: vec![RoundScenario::new(0, 0b0011, 0b1100)],
         };
         let participants: Vec<u32> = (0..4).collect();
 
@@ -1861,7 +1853,7 @@ mod tests {
     #[test]
     fn scenarios_fall_back_to_synchrony_after_attack_rounds() {
         let scenario = Scenario {
-            rounds: vec![round(0, 0b0011, 0b1100)],
+            rounds: vec![RoundScenario::new(0, 0b0011, 0b1100)],
         };
         let participants: Vec<u32> = (0..4).collect();
         let (primary, secondary) =
@@ -2076,7 +2068,7 @@ mod tests {
     #[test]
     fn route_returns_none_for_participants_outside_selected_partitions() {
         let scenario = Scenario {
-            rounds: vec![round(0, 0b0001, 0b0010)],
+            rounds: vec![RoundScenario::new(0, 0b0001, 0b0010)],
         };
         let participants: Vec<u32> = (0..4).collect();
         assert_eq!(
@@ -2089,7 +2081,7 @@ mod tests {
     #[should_panic(expected = "sender missing from runtime participant list")]
     fn route_panics_when_sender_is_missing_from_participants() {
         let scenario = Scenario {
-            rounds: vec![round(0, 0b0001, 0b0010)],
+            rounds: vec![RoundScenario::new(0, 0b0001, 0b0010)],
         };
         let participants: Vec<u32> = (0..4).collect();
         let _ = scenario.route(View::new(1), TermLength::ONE, &99, &participants);

@@ -577,11 +577,6 @@ macro_rules! forward_context {
     };
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-mod read_gate;
-#[cfg(any(test, feature = "test-utils"))]
-pub use read_gate::{ReadGate, ReadGateBlob, ReadGateContext};
-
 /// Forwards [Spawner] to the wrapped context for test context wrappers with one extra field
 /// (named by the second argument), which spawned tasks inherit.
 macro_rules! forward_spawner {
@@ -635,6 +630,11 @@ macro_rules! forward_remove_and_scan {
         }
     };
 }
+
+#[cfg(any(test, feature = "test-utils"))]
+mod read_gate;
+#[cfg(any(test, feature = "test-utils"))]
+pub use read_gate::{ReadGate, ReadGateBlob, ReadGateContext};
 
 /// Snapshot of the options observed by a [RecordingContext] or [RecordingBlob].
 #[cfg(any(test, feature = "test-utils"))]

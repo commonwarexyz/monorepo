@@ -2163,15 +2163,15 @@ mod tests {
         });
     }
 
-    /// Resizes dropped by their caller before any driver service finish at shutdown in
-    /// registration order, including those queued behind a full ring, and keep the file and
+    /// Resizes dropped by their caller before the driver serves them finish at shutdown in
+    /// registration order, including one queued behind a full ring, and keep the file and
     /// directory hold until they do.
     #[test]
     fn test_orphaned_resize_finishes_at_shutdown() {
         let (storage, directory) = create_test_storage();
         let (blob, _) =
             futures::executor::block_on(storage.open("partition", b"orphaned")).unwrap();
-        let raw = blob.data_offset;
+        let raw = blob.data_offset as usize;
         drop(storage);
         let contender = File::options()
             .write(true)
@@ -2182,9 +2182,14 @@ mod tests {
             iouring::Config::default().with_ring_config(iouring::RingConfig { size: 1 }),
         )
         .start(|_| async {
-            // With a ring of one, each resize waits for the one before it to complete.
+            // The first resize cuts this prefix, and later growth restores only zeros.
+            blob.write_at(0, b"orphaned", WriteOptions::default())
+                .await
+                .unwrap();
+
+            // With a ring of one, the second resize waits for the first to complete.
             let mut resizes = Vec::new();
-            for len in [50, 100, 7] {
+            for len in [3, 7] {
                 let mut resize = Box::pin(blob.resize(len));
                 assert!(futures::poll!(resize.as_mut()).is_pending());
                 resizes.push(resize);
@@ -2201,8 +2206,10 @@ mod tests {
         contender
             .try_lock()
             .expect("retired request must release its hold");
-        let path = directory.join("partition").join(hex(b"orphaned"));
-        assert_eq!(fs::metadata(path).unwrap().len(), raw + 7);
+        // The first resize kept three bytes of the prefix and the second grew the blob with
+        // zeros. In the other order the blob would end with three bytes.
+        let bytes = fs::read(directory.join("partition").join(hex(b"orphaned"))).unwrap();
+        assert_eq!(&bytes[raw..], b"orp\0\0\0\0");
         drop(contender);
         let _ = fs::remove_dir_all(directory);
     }

@@ -29,8 +29,6 @@ pub struct Slab<T> {
     slots: Vec<Slot<T>>,
     /// Head of the intrusive free list, most recently vacated first.
     free: Option<usize>,
-    /// Number of live values.
-    len: usize,
 }
 
 impl<T> Default for Slab<T> {
@@ -45,7 +43,6 @@ impl<T> Slab<T> {
         Self {
             slots: Vec::with_capacity(capacity),
             free: None,
-            len: 0,
         }
     }
 
@@ -75,7 +72,6 @@ impl<T> Slab<T> {
             slot.value = Some(value);
         }
 
-        self.len += 1;
         id
     }
 
@@ -109,7 +105,6 @@ impl<T> Slab<T> {
             return None;
         }
         let value = slot.value.take()?;
-        self.len -= 1;
         if let Some(generation) = slot.generation.checked_add(1) {
             slot.generation = generation;
             slot.next_free = self.free;
@@ -140,8 +135,11 @@ pub mod tests {
 
     impl<T> Slab<T> {
         /// Number of live values.
-        pub(crate) const fn len(&self) -> usize {
-            self.len
+        pub(crate) fn len(&self) -> usize {
+            self.slots
+                .iter()
+                .filter(|slot| slot.value.is_some())
+                .count()
         }
 
         /// Number of slots the slab has storage for.

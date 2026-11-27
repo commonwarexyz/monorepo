@@ -206,8 +206,8 @@
 //! | H-1    | stored            | stored                  |
 //! | H      | stored            | missing                 |
 //!
-//! [`Identifier::Latest`] is the block at H-1. Once the application acknowledges H, the processed
-//! height becomes H.
+//! [`Identifier::Latest`] is the block at H-1. Once the application has acknowledged every block up
+//! to H, the processed height becomes H.
 //!
 //! A block can also be stored without a finalization while marshal fills a gap. Marshal can reach
 //! an ancestor of a finalized block by following parent links, and a block stored this way may

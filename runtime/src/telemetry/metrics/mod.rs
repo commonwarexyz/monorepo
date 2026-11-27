@@ -254,7 +254,8 @@ fn named_metric_samples<'a>(
     })
 }
 
-/// Iterates over complete label pairs, decoding Prometheus label escapes.
+/// Iterates over complete label pairs, decoding the Prometheus label escapes `\\`, `\"` and `\n`.
+/// Any other backslash is kept literally with the character after it.
 #[cfg(any(test, feature = "test-utils"))]
 fn metric_labels(mut labels: &str) -> impl Iterator<Item = (&str, Cow<'_, str>)> {
     std::iter::from_fn(move || {
@@ -278,16 +279,19 @@ fn metric_labels(mut labels: &str) -> impl Iterator<Item = (&str, Cow<'_, str>)>
             let mut decoded = String::with_capacity(value.len());
             let mut chars = value.chars();
             while let Some(c) = chars.next() {
-                decoded.push(if c == '\\' {
-                    match chars.next()? {
-                        'n' => '\n',
-                        '"' => '"',
-                        '\\' => '\\',
-                        _ => return None,
+                if c != '\\' {
+                    decoded.push(c);
+                    continue;
+                }
+                match chars.next()? {
+                    'n' => decoded.push('\n'),
+                    '"' => decoded.push('"'),
+                    '\\' => decoded.push('\\'),
+                    other => {
+                        decoded.push('\\');
+                        decoded.push(other);
                     }
-                } else {
-                    c
-                });
+                }
             }
             Cow::Owned(decoded)
         } else {
@@ -301,7 +305,10 @@ fn metric_labels(mut labels: &str) -> impl Iterator<Item = (&str, Cow<'_, str>)>
 /// each `(key, value)` pair of `labels`.
 ///
 /// `name` may be either the full encoded metric name or its unprefixed suffix. Label values are
-/// compared after decoding their Prometheus escapes.
+/// compared after decoding the Prometheus escapes `\\`, `\"` and `\n`. Any other backslash is
+/// literal. Because this crate's encoder writes label values unescaped, a value containing a
+/// quote, a newline, or a backslash followed by `\`, `"` or `n` cannot be recovered, and a
+/// value ending in a backslash can hide its whole sample.
 ///
 /// # Panics
 ///
@@ -331,16 +338,19 @@ pub fn metric_sum(metrics: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
 /// but `le`. Every series must use the same bucket bounds, and buckets with the same bound are
 /// summed across series. `name` may be either the full encoded metric name or its unprefixed
 /// suffix, without the `_bucket` suffix, so every histogram ending in `name` contributes series.
+/// Label values are decoded as in [`metric_sum`]. The percentile-0 sample is the first sample.
 /// Returns `None` when the histogram is absent or holds no samples. The bound is infinite when the
-/// percentile falls beyond the largest finite bucket.
+/// percentile falls beyond the largest finite bucket. With finite bucket bounds, an observation
+/// of positive infinity lands in no bucket and is not counted.
 ///
 /// # Panics
 ///
-/// Panics if a bucket's bound or count is not a number, or if two series have different bucket
-/// bounds.
+/// Panics if `percentile` is above 100, if a bucket's bound or count is not a number, or if two
+/// series have different bucket bounds.
 #[cfg(any(test, feature = "test-utils"))]
 #[must_use]
 pub fn histogram_percentile(metrics: &str, name: &str, percentile: u64) -> Option<(f64, u64)> {
+    assert!(percentile <= 100, "percentile must be at most 100");
     let bucket = format!("{name}_bucket");
     let mut series = BTreeMap::<(&str, Vec<(&str, Cow<'_, str>)>), Vec<(f64, u64)>>::new();
     for (sample_name, labels, value) in named_metric_samples(metrics, &bucket) {
@@ -393,8 +403,10 @@ pub fn histogram_percentile(metrics: &str, name: &str, percentile: u64) -> Optio
     if samples == 0 {
         return None;
     }
-    // The product of two u64 values fits in a u128.
-    let rank = (u128::from(samples) * u128::from(percentile)).div_ceil(100);
+    // The product of two u64 values fits in a u128. The rank of the first sample is 1.
+    let rank = (u128::from(samples) * u128::from(percentile))
+        .div_ceil(100)
+        .max(1);
     buckets
         .into_iter()
         .find_map(|(bound, count)| (u128::from(count) >= rank).then_some((bound, samples)))
@@ -1083,6 +1095,35 @@ syncs_total{kind="snapshot",detail="kind=\"journal\""} 5
     }
 
     #[test]
+    fn helpers_match_encoded_label_values_with_a_backslash() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let context = context.with_attribute("path", "a\\b");
+            let items = context.counter("items", "Items.");
+            items.inc_by(3);
+            let latency = context.histogram("latency", "Latency.", [1.0, 2.0]);
+            latency.observe(1.5);
+
+            // The encoder writes label values unescaped, and `le` follows the attribute.
+            let encoded = context.encode();
+            assert!(
+                encoded.contains(r#"latency_bucket{path="a\b",le="2.0"} 1"#),
+                "{encoded}"
+            );
+            assert_eq!(
+                metric_sum(&encoded, "items_total", &[("path", "a\\b")]),
+                3.0,
+                "{encoded}"
+            );
+            assert_eq!(
+                histogram_percentile(&encoded, "latency", 50),
+                Some((2.0, 1)),
+                "{encoded}"
+            );
+        });
+    }
+
+    #[test]
     fn histogram_percentile_matches_complete_bucket_label() {
         let metrics = r#"
 latency_bucket{note="a,b}c\"d\\e\nf",role="worker",le="0.01"} 1
@@ -1194,6 +1235,23 @@ b_latency_bucket{node=\"x\",le=\"+Inf\"} 50
             histogram_percentile(metrics, "b_latency", 50),
             Some((f64::INFINITY, 50))
         );
+    }
+
+    #[test]
+    fn histogram_percentile_zero_is_the_first_sample() {
+        let metrics = "\
+latency_bucket{le=\"1\"} 0
+latency_bucket{le=\"2\"} 5
+latency_bucket{le=\"+Inf\"} 5
+";
+        assert_eq!(histogram_percentile(metrics, "latency", 0), Some((2.0, 5)));
+    }
+
+    #[test]
+    #[should_panic(expected = "percentile must be at most 100")]
+    fn histogram_percentile_rejects_percentile_above_100() {
+        let metrics = "latency_bucket{le=\"+Inf\"} 1\n";
+        let _ = histogram_percentile(metrics, "latency", 101);
     }
 
     #[test]

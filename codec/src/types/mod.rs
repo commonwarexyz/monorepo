@@ -234,6 +234,10 @@ pub(crate) mod tests {
         assert_encode_inline_size(&Some(5u32));
         assert_encode_inline_size(&None::<u32>);
         assert_encode_inline_size(&Lazy::new(values));
+        assert_encode_inline_size(&Lazy::<u32>::deferred(
+            &mut Bytes::from_static(&[0, 0, 0, 5]),
+            (),
+        ));
         assert_encode_inline_size(&BTreeMap::from([(1u32, 2u32), (3, 4)]));
         assert_encode_inline_size(&BTreeSet::from([1u32, 2, 3]));
 

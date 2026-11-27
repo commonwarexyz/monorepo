@@ -972,7 +972,22 @@ pub mod tests {
         Box::pin(async move { apply_writes(db, writes).await?.commit().await })
     }
 
-    /// Apply random operations to the database, committing periodically and at the end.
+    /// Seed of the key at history index 0. Its key shares its first three bytes with the key at
+    /// index [COLLIDING_INDEX], so every translated index holds both keys in one bucket.
+    const COLLIDING_SEED: u64 = 74149;
+
+    /// History index whose key shares its translated bucket with the key at index 0.
+    const COLLIDING_INDEX: u64 = 21;
+
+    /// Key at index `i` of the history built by [apply_random_ops].
+    fn history_key<K: TestKey>(i: u64) -> K {
+        K::from_seed(if i == 0 { COLLIDING_SEED } else { i })
+    }
+
+    /// Apply random operations to the database over the keys [history_key] maps `0..num_elements`
+    /// to, committing periodically and at the end. `num_elements` must exceed [COLLIDING_INDEX]
+    /// and stay below [COLLIDING_SEED], so the history holds both colliding keys and seed
+    /// `num_elements` is not a history key.
     #[boxed]
     pub async fn apply_random_ops<F, C>(
         num_elements: u64,
@@ -989,10 +1004,24 @@ pub mod tests {
         warn!("rng_seed={}", rng_seed);
         let mut rng = TestRng::new(rng_seed);
 
+        // Keep two distinct history keys in one translated bucket. Three bytes cover the longest
+        // translated prefix of the test configurations.
+        assert!(
+            (COLLIDING_INDEX + 1..COLLIDING_SEED).contains(&num_elements),
+            "history must hold both colliding keys and no repeated seed"
+        );
+        let first: C::Key = history_key(0);
+        let colliding: C::Key = history_key(COLLIDING_INDEX);
+        assert_eq!(
+            first[..3],
+            colliding[..3],
+            "colliding history keys must share their first three bytes"
+        );
+
         // First loop: all initial writes in one batch.
         let writes: Vec<_> = (0u64..num_elements)
             .map(|i| {
-                let k = TestKey::from_seed(i);
+                let k = history_key(i);
                 let v = TestValue::from_seed(rng.next_u64());
                 (k, Some(v))
             })
@@ -1003,7 +1032,7 @@ pub mod tests {
         // frequency. Accumulate writes and commit periodically.
         let mut pending: WriteVec<C> = Vec::new();
         for _ in 0u64..num_elements * 10 {
-            let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
+            let rand_key = history_key(rng.next_u64() % num_elements);
             if rng.next_u32().is_multiple_of(7) {
                 pending.push((rand_key, None));
                 continue;
@@ -1056,8 +1085,9 @@ pub mod tests {
     }
 
     /// Build the same random history over `num_keys` keys twice, checking each time that the root
-    /// survives a reopen, and require both runs to leave the same runtime audit hash. The second
-    /// run uses a fresh default runner, so `context` must come from one too.
+    /// survives a reopen, and require both runs to leave the same runtime audit hash. The history
+    /// puts two keys in one translated bucket (see [apply_random_ops]). The second run uses a
+    /// fresh default runner, so `context` must come from one too.
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
@@ -1128,8 +1158,10 @@ pub mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Reopen a pruned database after applying a batch without committing it, then after committing
-    /// a batch without syncing Current's bitmap metadata.
+    /// Reopen a pruned database after applying a batch without committing it, and require every
+    /// key to read as if the whole batch or none of it was committed. Then commit more history and
+    /// a last batch that deletes a key inserted by an earlier commit, reopen without syncing
+    /// Current's bitmap metadata, and compare with an uninterrupted database.
     pub async fn test_simulate_write_failures<M, C, F, Fut>(
         mut context: Context,
         mut open_db: F,
@@ -1149,7 +1181,8 @@ pub mod tests {
             .await
             .unwrap();
 
-        // Use a key outside the random histories so its value is known at both reopens.
+        // Use a key outside the random histories so its value is known at both reopens. Seed
+        // `num_keys` is not a history key (see [apply_random_ops]).
         let key = <C::Key as TestKey>::from_seed(num_keys);
         let value = C::Value::from_seed(0);
         let db = commit_writes(db, [(key, Some(value.clone()))])
@@ -1168,8 +1201,12 @@ pub mod tests {
         // log then holds however much of the batch storage took before the drop, so the reopen
         // must recover the whole batch or none of it.
         let rewrite: WriteVec<C> = core::iter::once((key, None))
-            .chain((0..num_keys).map(|i| (TestKey::from_seed(i), Some(TestValue::from_seed(i)))))
+            .chain((0..num_keys).map(|i| (history_key(i), Some(TestValue::from_seed(i)))))
             .collect();
+        let mut committed_values: WriteVec<C> = Vec::with_capacity(rewrite.len());
+        for (k, _) in &rewrite {
+            committed_values.push((*k, db.get(k).await.unwrap()));
+        }
         let db = apply_writes(db, rewrite.clone()).await.unwrap();
         let applied_root = db.root();
         let applied_end = db.bounds().end;
@@ -1189,11 +1226,35 @@ pub mod tests {
             assert_eq!(db.get(&key).await.unwrap(), Some(value.clone()));
         }
 
-        // Commit the second history and the deletion. Drop before sync or prune so the journal
-        // is durable but Current must recover using the older bitmap metadata.
+        // Check each key of the batch because the root does not cover the in-memory key index.
+        let expected = if recovered_batch {
+            &rewrite
+        } else {
+            &committed_values
+        };
+        for (k, v) in expected {
+            assert_eq!(
+                &db.get(k).await.unwrap(),
+                v,
+                "reopen must recover each key of the whole batch or none of it"
+            );
+        }
+
+        // Re-insert `key`, commit the second history, then delete `key` in the last commit. Drop
+        // before sync or prune so the journal is durable but Current must recover using the older
+        // bitmap metadata.
+        let reinserted = C::Value::from_seed(1);
+        let db = commit_writes(db, [(key, Some(reinserted.clone()))])
+            .await
+            .unwrap();
         let db = apply_random_ops::<M, C>(num_keys, rng_seed + 1, db)
             .await
             .unwrap();
+        assert_eq!(
+            db.get(&key).await.unwrap(),
+            Some(reinserted.clone()),
+            "the last commit must delete a live key"
+        );
         let db = commit_writes(db, [(key, None)]).await.unwrap();
         let committed_op_count = db.bounds().end;
         drop(db);
@@ -1217,6 +1278,7 @@ pub mod tests {
         if recovered_batch {
             db = commit_writes(db, rewrite).await.unwrap();
         }
+        let db = commit_writes(db, [(key, Some(reinserted))]).await.unwrap();
         let db = apply_random_ops::<M, C>(num_keys, rng_seed + 1, db)
             .await
             .unwrap();
@@ -1227,8 +1289,7 @@ pub mod tests {
         assert_eq!(db.root(), recovered.root());
 
         // Check each key because the root does not cover the in-memory key index.
-        for i in 0..=num_keys {
-            let k = <C::Key as TestKey>::from_seed(i);
+        for k in (0..num_keys).map(history_key::<C::Key>).chain([key]) {
             assert_eq!(recovered.get(&k).await.unwrap(), db.get(&k).await.unwrap());
         }
 

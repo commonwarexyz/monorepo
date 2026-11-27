@@ -934,11 +934,7 @@ mod tests {
                 Config as _, Elector, Random, RandomVersion, RoundRobin, RoundRobinElector,
                 Scheduled,
             },
-            mocks::{
-                scheme as scheme_mocks,
-                twins::{self, Elector as TwinsElector},
-                wrapped,
-            },
+            mocks::{scheme as scheme_mocks, twins::Elector as TwinsElector, wrapped},
             scheme::{
                 Scheme, bls12381_multisig,
                 bls12381_threshold::{
@@ -953,6 +949,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
+        twins,
         types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
     };
     use commonware_codec::{Decode, DecodeExt, Encode};

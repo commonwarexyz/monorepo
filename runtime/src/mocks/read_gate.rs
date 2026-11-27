@@ -93,35 +93,7 @@ impl<E> ReadGateContext<E> {
 
 forward_context!(ReadGateContext, gate);
 
-impl<E: Spawner> Spawner for ReadGateContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
-        self
-    }
-
-    fn dedicated(mut self) -> Self {
-        self.inner = self.inner.dedicated();
-        self
-    }
-
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let gate = self.gate;
-        self.inner.spawn(move |inner| f(Self { inner, gate }))
-    }
-
-    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
-        self.inner.stop(value, timeout).await
-    }
-
-    fn stopped(&self) -> Signal {
-        self.inner.stopped()
-    }
-}
+forward_spawner!(ReadGateContext, gate);
 
 impl<E: crate::Storage> crate::Storage for ReadGateContext<E> {
     type Blob = ReadGateBlob<E::Blob>;
@@ -145,13 +117,7 @@ impl<E: crate::Storage> crate::Storage for ReadGateContext<E> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
-    }
+    forward_remove_and_scan!();
 }
 
 /// Blob wrapper that parks selected reads before handing them to storage.
