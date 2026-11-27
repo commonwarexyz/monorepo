@@ -659,13 +659,20 @@ fn check_atomic(len: u64, threads: u8, bits: Vec<u64>) {
         bits.iter().for_each(|&bit| atomic.set(bit));
     } else {
         std::thread::scope(|scope| {
-            for stripe in 0..threads {
-                let (atomic, bits) = (&atomic, &bits);
-                scope.spawn(move || {
-                    for &bit in bits.iter().skip(stripe).step_by(threads) {
-                        atomic.set(bit);
-                    }
-                });
+            let handles: Vec<_> = (0..threads)
+                .map(|stripe| {
+                    let (atomic, bits) = (&atomic, &bits);
+                    scope.spawn(move || {
+                        for &bit in bits.iter().skip(stripe).step_by(threads) {
+                            atomic.set(bit);
+                        }
+                    })
+                })
+                .collect();
+            // The scope returns when the closures are done, which is before the threads exit.
+            // A join waits for the exit, so no thread outlives the input and its leak check.
+            for handle in handles {
+                handle.join().expect("setter thread panicked");
             }
         });
     }
