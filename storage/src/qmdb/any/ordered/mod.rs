@@ -1256,7 +1256,7 @@ mod test {
                         assert!(
                             parent_diff
                                 .iter()
-                                .any(|(key, entry)| key == &parent_key && entry.value().is_some())
+                                .any(|(key, entry)| key == &parent_key && entry.loc().is_some())
                         );
                         let (committed_index, &committed_only) = base_keys
                             .iter()

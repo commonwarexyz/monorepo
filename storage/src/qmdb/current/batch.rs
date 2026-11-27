@@ -725,16 +725,13 @@ where
 /// search back through ancestors to find the most recent active location, and if none exists, we
 /// clear the key's database location (`base_old_loc`).
 #[allow(clippy::type_complexity)]
-fn build_chunk_overlay<F: Graftable, U, B: bitmap::Readable<N>, const N: usize>(
+fn build_chunk_overlay<F: Graftable, K: Ord, B: bitmap::Readable<N>, const N: usize>(
     base: &B,
     batch_len: usize,
     batch_base: u64,
-    diff: &[(U::Key, DiffEntry<F, U::Value>)],
-    ancestor_diffs: &[Arc<Vec<(U::Key, DiffEntry<F, U::Value>)>>],
-) -> ChunkOverlay<N>
-where
-    U: update::Update,
-{
+    diff: &[(K, DiffEntry<F>)],
+    ancestor_diffs: &[Arc<Vec<(K, DiffEntry<F>)>>],
+) -> ChunkOverlay<N> {
     let total_bits = base.len() + batch_len as u64;
     let appended_chunks = (batch_len as u64).div_ceil(ChunkOverlay::<N>::CHUNK_BITS) as usize;
     let mut overlay = ChunkOverlay::new(base, total_bits, diff.len() + appended_chunks + 1);
@@ -846,7 +843,7 @@ where
     let batch_base = *inner.bounds.tip.size - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
-    let overlay = build_chunk_overlay::<F, U, _, N>(
+    let overlay = build_chunk_overlay(
         bitmap_parent,
         batch_len,
         batch_base,
@@ -1509,12 +1506,9 @@ mod tests {
 
     #[test]
     fn chunk_overlay_pushes() {
-        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
-        type V = FixedEncoding<u64>;
-        type U = crate::qmdb::any::operation::update::Unordered<K, V>;
 
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let key2 = FixedBytes::from([2, 0, 0, 0]);
@@ -1528,7 +1522,6 @@ mod tests {
             (
                 key1,
                 DiffEntry::Active {
-                    value: 100u64,
                     loc: Location::new(4), // offset 0 in batch
                     base_old_loc: None,
                 },
@@ -1536,7 +1529,6 @@ mod tests {
             (
                 key2,
                 DiffEntry::Active {
-                    value: 200u64,
                     loc: Location::new(99), // not in batch [4,8), so superseded
                     base_old_loc: None,
                 },
@@ -1544,7 +1536,7 @@ mod tests {
         ];
         diff.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 4, 4, &diff, &[]);
+        let overlay = build_chunk_overlay::<mmr::Family, K, _, N>(&base, 4, 4, &diff, &[]);
 
         // Chunk 0 should have: bits 0-3 from base (all set), bit 4 set (key1), bits 5-6 false
         // (inactive), bit 7 set (Commit at loc 7). Also bit 3 cleared (previous commit).
@@ -1558,11 +1550,9 @@ mod tests {
 
     #[test]
     fn chunk_overlay_clears() {
-        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
-        type U = crate::qmdb::any::operation::update::Unordered<K, FixedEncoding<u64>>;
 
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let key2 = FixedBytes::from([2, 0, 0, 0]);
@@ -1571,11 +1561,10 @@ mod tests {
         // Base bitmap with 64 bits, all set.
         let base = make_bitmap(&[true; 64]);
 
-        let mut diff: Vec<(K, DiffEntry<mmr::Family, u64>)> = vec![
+        let mut diff: Vec<(K, DiffEntry<mmr::Family>)> = vec![
             (
                 key1,
                 DiffEntry::Active {
-                    value: 100,
                     loc: Location::new(70),
                     base_old_loc: Some(Location::new(5)),
                 },
@@ -1589,7 +1578,6 @@ mod tests {
             (
                 key3,
                 DiffEntry::Active {
-                    value: 300,
                     loc: Location::new(71),
                     base_old_loc: None,
                 },
@@ -1598,7 +1586,7 @@ mod tests {
         diff.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Segment of 8 ops starting at 64; previous commit at loc 63.
-        let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 8, 64, &diff, &[]);
+        let overlay = build_chunk_overlay::<mmr::Family, K, _, N>(&base, 8, 64, &diff, &[]);
 
         // Verify bits 5 and 10 are cleared in chunk 0.
         let c0 = overlay.get(0).expect("chunk 0 should be dirty");
@@ -1615,11 +1603,9 @@ mod tests {
     /// partial chunk data, not zero it out.
     #[test]
     fn chunk_overlay_preserves_partial_parent_chunk() {
-        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
-        type U = crate::qmdb::any::operation::update::Unordered<K, FixedEncoding<u64>>;
 
         // Base: 20 bits set (partial chunk 0, CHUNK_SIZE_BITS=32).
         let base = make_bitmap(&[true; 20]);
@@ -1632,14 +1618,13 @@ mod tests {
         let mut diff = vec![(
             key1,
             DiffEntry::Active {
-                value: 42u64,
                 loc: Location::new(35),
                 base_old_loc: None,
             },
         )];
         diff.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 20, 20, &diff, &[]);
+        let overlay = build_chunk_overlay::<mmr::Family, K, _, N>(&base, 20, 20, &diff, &[]);
 
         // Chunk 0 should be materialized and preserve the parent's first 20 bits.
         let c0 = overlay.get(0).expect("chunk 0 should be in overlay");

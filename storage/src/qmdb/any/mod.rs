@@ -5072,10 +5072,7 @@ pub(crate) mod test {
     }
 
     /// Return each entry `diff` holds for `key`, as [`Changes::changes`] returns them.
-    fn changes<F: Family>(
-        diff: &[(Digest, batch::DiffEntry<F, Digest>)],
-        key: &Digest,
-    ) -> Vec<Change<F>> {
+    fn changes<F: Family>(diff: &[(Digest, batch::DiffEntry<F>)], key: &Digest) -> Vec<Change<F>> {
         diff.iter()
             .filter(|(k, _)| k == key)
             .map(|(_, entry)| (entry.base_old_loc(), entry.loc()))

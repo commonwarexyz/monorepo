@@ -50,11 +50,11 @@ fn probe_index<'a, F: Family, K: Key + 'a, I: UnorderedIndex<Value = Location<F>
 
 /// Apply a single diff entry to the key index and activity bitmap in lockstep:
 /// install the entry's `Active` location and clear the key's prior location.
-fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
+fn apply_diff<F: Family, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
     index: &mut I,
     bitmap: &mut bitmap::Prunable<N>,
     key: &[u8],
-    entry: &DiffEntry<F, V>,
+    entry: &DiffEntry<F>,
     old_loc: Option<Location<F>>,
 ) {
     match entry {
