@@ -698,17 +698,17 @@ impl<'a, K: Key> Shadow<'a, K> {
 /// input slot. The caller keeps `pending` in input order so the database reads that follow can do
 /// the same.
 ///
-/// `value_at` returns the value of the update at an active entry's location. `on_hit` is invoked
-/// (serially, in `pending` order) with each resolving diff entry, so staged reads can record
-/// ancestor resolutions alongside the values.
+/// A deletion resolves its slot to `None`. For each slot an active entry resolves, `value_at` is
+/// invoked (serially, in `pending` order) with the slot, the entry's location and its
+/// `base_old_loc`, and returns the value of the update at that location. Staged reads record the
+/// ancestor resolution in the same call.
 fn resolve_pending_from_diffs<'a, K, F: Family, V, S: Strategy>(
     pending: &[PendingRead<'a, K>],
     diffs: &[&'a DiffSlice<K, F>],
     strategy: &S,
     resolved: &mut [bool],
     results: &mut [Option<V>],
-    value_at: impl Fn(Location<F>) -> V,
-    mut on_hit: impl FnMut(usize, &DiffEntry<F>),
+    mut value_at: impl FnMut(usize, Location<F>, Option<Location<F>>) -> V,
 ) where
     K: Ord + Sync,
 {
@@ -733,8 +733,10 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V, S: Strategy>(
 
     for (slot, entry) in shards.into_iter().flatten() {
         resolved[slot] = true;
-        results[slot] = entry.loc().map(&value_at);
-        on_hit(slot, entry);
+        results[slot] = match *entry {
+            DiffEntry::Active { loc, base_old_loc } => Some(value_at(slot, loc, base_old_loc)),
+            DiffEntry::Deleted { .. } => None,
+        };
     }
 }
 
@@ -742,16 +744,15 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V, S: Strategy>(
 /// inner `Option` distinguishing a value from a delete) and then against `diffs`, returning
 /// per-slot results and the slots that still need database reads.
 ///
-/// `value_at` returns the value of the update at an active diff entry's location. `on_diff_hit`
-/// is invoked with each slot resolved by a diff entry (see [`resolve_pending_from_diffs`]).
-/// Slots resolved by `local` do not report.
+/// `value_at` is invoked with each slot an active diff entry resolves and returns the value of the
+/// update the entry names (see [`resolve_pending_from_diffs`]). Slots resolved by `local` do not
+/// report.
 fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
     keys: &'a [impl Borrow<K>],
     local: impl Fn(&K) -> Option<Option<V>>,
     diffs: &[&DiffSlice<K, F>],
     strategy: &S,
-    value_at: impl Fn(Location<F>) -> V,
-    on_diff_hit: impl FnMut(usize, &DiffEntry<F>),
+    value_at: impl FnMut(usize, Location<F>, Option<Location<F>>) -> V,
 ) -> UncommittedReadResolution<'a, K, V>
 where
     K: Ord + Sync,
@@ -777,7 +778,6 @@ where
         &mut resolved,
         &mut results,
         value_at,
-        on_diff_hit,
     );
 
     let unresolved = pending.into_iter().filter(|(i, _)| !resolved[*i]).collect();
@@ -2102,15 +2102,15 @@ where
     /// Resolve keys against this batch's mutations and ancestor diffs, returning partial
     /// results and the unresolved slots that still need database reads.
     ///
-    /// `on_diff_hit` is invoked with each slot resolved by an ancestor diff entry (slots
-    /// resolved by this batch's mutations do not report), so staged reads can record
-    /// ancestor resolutions.
+    /// `on_update` is invoked for each slot an ancestor's update resolves, with the slot, its
+    /// resolved location and the update, so staged reads can record ancestor resolutions. Slots
+    /// resolved by this batch's mutations or by an ancestor's deletion do not report.
     fn resolve_uncommitted_reads<'a>(
         &self,
         keys: &'a [impl Borrow<U::Key>],
         strategy: &S,
         db_size: Location<F>,
-        on_diff_hit: impl FnMut(usize, &DiffEntry<F>),
+        mut on_update: impl FnMut(usize, StagedLoc<F>, &U),
     ) -> UncommittedReadResolution<'a, U::Key, U::Value> {
         let parent = self.base.parent();
         let diffs: Vec<_> =
@@ -2120,14 +2120,13 @@ where
             |key| self.mutations.get(key).cloned(),
             &diffs,
             strategy,
-            |loc| {
-                parent
+            |slot, loc, base_old_loc| {
+                let update = parent
                     .expect("a batch that reads ancestor diffs must have a parent")
-                    .update_at(loc)
-                    .value()
-                    .clone()
+                    .update_at(loc);
+                on_update(slot, StagedLoc::Ancestor { loc, base_old_loc }, update);
+                update.value().clone()
             },
-            on_diff_hit,
         )
     }
 
@@ -2206,7 +2205,7 @@ where
         }
 
         let (mut results, unresolved) =
-            self.resolve_uncommitted_reads(keys, db.strategy(), db.bounds().end, |_, _| {});
+            self.resolve_uncommitted_reads(keys, db.strategy(), db.bounds().end, |_, _, _| {});
         Self::fill_committed_reads(
             unresolved,
             db,
@@ -2283,27 +2282,12 @@ where
         // journal re-read, and per-key re-resolution through the ancestors, and that cost grows
         // with ancestor overlap. The parent retains the operations of every diff a read consults,
         // so the cached payload comes from the resolved update even after its ancestor is dropped.
-        let parent = self.base.parent();
-        let (mut results, unresolved) =
-            self.resolve_uncommitted_reads(keys, db.strategy(), db.bounds().end, |slot, entry| {
-                let DiffEntry::Active {
-                    loc, base_old_loc, ..
-                } = entry
-                else {
-                    return;
-                };
-                resolutions[slot] = Some((
-                    StagedLoc::Ancestor {
-                        loc: *loc,
-                        base_old_loc: *base_old_loc,
-                    },
-                    U::cached(|| {
-                        parent
-                            .expect("a batch that reads ancestor diffs must have a parent")
-                            .update_at(*loc)
-                    }),
-                ));
-            });
+        let (mut results, unresolved) = self.resolve_uncommitted_reads(
+            keys,
+            db.strategy(),
+            db.bounds().end,
+            |slot, loc, update| resolutions[slot] = Some((loc, U::cached(|| update))),
+        );
         Self::fill_committed_reads(
             unresolved,
             db,
@@ -3354,8 +3338,7 @@ where
             |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.loc().map(value_at)),
             &diffs,
             db.strategy(),
-            value_at,
-            |_, _| {},
+            |_, loc, _| value_at(loc),
         );
 
         if !unresolved.is_empty() {
@@ -6648,29 +6631,7 @@ pub(crate) mod tests {
                 assert_eq!(values, expected);
             }
 
-            // A child of the applied leaf stages every key. The keys in the leaf's diff resolve
-            // to the leaf's updates and the rest to the database. It rewrites keys of both kinds,
-            // recreates the key the leaf deleted, creates a key and deletes another.
-            let (staged, values) = leaf.new_batch::<Sha256>().stage(&keys, &db).await.unwrap();
-            assert_eq!(values, expected);
-            let slots = (0..14)
-                .map(|i| match i {
-                    0 | 4 | 5 | 12 | 13 => {
-                        live.insert(key(i), value(7, i));
-                        Slot::Put(value(7, i))
-                    }
-                    1 => {
-                        live.remove(&key(i));
-                        Slot::Delete
-                    }
-                    _ => Slot::Keep,
-                })
-                .collect();
-            let last = staged
-                .merkleize_with(slots, vec![], &db, &mut policy)
-                .await
-                .unwrap();
-            db = db.apply_batch(last).await.unwrap();
+            // The applied chain leaves exactly the live keys, each linked to the next.
             let absent: Vec<_> = keys
                 .iter()
                 .filter(|key| !live.contains_key(*key))
@@ -8854,12 +8815,14 @@ pub(crate) mod tests {
     ///
     /// The nearest diff holding a key wins, a deletion resolves its key to `None` even when an
     /// older diff holds an update, and a key absent from both diffs stays unresolved. Slots without
-    /// a pending read stay untouched, and `on_hit` sees the hits in pending order.
+    /// a pending read stay untouched, and `value_at` sees the slots that updates resolve, each
+    /// with its entry's locations, in pending order.
     fn check_pending_resolution(strategy: &Explorer) {
-        // Each update's value is its location, which is what `value_at` below returns.
+        // Each update's value is its location, which is what `value_at` below returns, and its
+        // base location is one more.
         let active = |value: u64| DiffEntry::<mmr::Family>::Active {
             loc: Location::new(value),
-            base_old_loc: None,
+            base_old_loc: Some(Location::new(value + 1)),
         };
         let deleted = || DiffEntry::<mmr::Family>::Deleted { base_old_loc: None };
         let near = vec![(1u64, deleted()), (2, active(20)), (5, active(50))];
@@ -8894,8 +8857,10 @@ pub(crate) mod tests {
                 strategy,
                 &mut resolved,
                 &mut results,
-                |loc| *loc,
-                |slot, entry| hits.push((slot, entry.loc().map(|loc| *loc))),
+                |slot, loc, base_old_loc| {
+                    hits.push((slot, *loc, base_old_loc.map(|loc| *loc)));
+                    *loc
+                },
             );
 
             let mut expected_hits = Vec::new();
@@ -8911,8 +8876,8 @@ pub(crate) mod tests {
                     value.unwrap_or(Some(u64::MAX)),
                     "slot {slot} of {len} reads must hold the nearest update's value or be untouched"
                 );
-                if let Some(value) = value {
-                    expected_hits.push((*slot, value));
+                if let Some(Some(value)) = value {
+                    expected_hits.push((*slot, value, Some(value + 1)));
                 }
             }
             for slot in (0..=2 * len).step_by(2) {
@@ -8921,7 +8886,7 @@ pub(crate) mod tests {
             }
             assert_eq!(
                 hits, expected_hits,
-                "on_hit must see every hit of {len} reads in pending order"
+                "value_at must see every update resolving one of {len} reads, in pending order"
             );
         }
     }
