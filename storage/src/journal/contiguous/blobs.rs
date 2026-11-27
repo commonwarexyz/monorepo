@@ -17,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_utils::futures::try_join_all;
 use futures::{FutureExt as _, future};
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroUsize, ops::Range, sync::Arc};
 use tracing::debug;
 
 /// Metrics for a journal's blobs.
@@ -511,7 +511,7 @@ impl<B: RBlob> SealedBlobs<'_, B> {
 /// A read handle for one journal blob.
 pub(super) enum Blob<'a, B: RBlob> {
     /// Writable tail. Point reads go through the writer's cache-aware logical view, and
-    /// [`Self::replay_from`] chooses the replay path.
+    /// [`Self::replay_range`] chooses the replay path.
     Writer(&'a Writer<B>),
     /// Immutable historical blob.
     Sealed(Sealed<B>),
@@ -564,7 +564,9 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Return a sequential replay handle starting at `offset`.
+    /// Return a sequential replay handle over the bytes in `range`, which ends with the blob if
+    /// the blob is shorter. The handle reads nothing past the range, so a replay of part of a
+    /// blob does not read ahead into the rest of it.
     ///
     /// Constructing the handle is cheap. Paged replay stores prefetch settings, and writer-view
     /// replay starts with an empty buffer. Read buffers are allocated later by `Replay::ensure`.
@@ -573,21 +575,22 @@ impl<'a, B: RBlob> Blob<'a, B> {
     /// after a sync), is replayed from the blob in batches with `read_options`. A tail still
     /// holding one is replayed through a live view of the writer, which reads through its page
     /// cache without flushing it.
-    pub(super) fn replay_from(
+    pub(super) fn replay_range(
         self,
-        offset: u64,
+        range: Range<u64>,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<'a, B>, Error> {
         let sealed = match self {
             Self::Writer(writer) => match writer.try_snapshot() {
                 Some(snapshot) => snapshot,
-                None => return Replay::view(Self::Writer(writer), offset, buffer_size),
+                None => return Replay::view(Self::Writer(writer), range, buffer_size),
             },
             Self::Sealed(sealed) => sealed,
         };
         let mut replay = sealed.replay(buffer_size, read_options)?;
-        replay.seek_to(offset)?;
+        let end = range.end.min(replay.blob_size());
+        replay.seek_to_range(range.start..end)?;
         Ok(Replay::paged(replay))
     }
 
@@ -717,10 +720,14 @@ impl<'a, B: RBlob> Replay<'a, B> {
         }
     }
 
-    /// Build a replay handle over a logical blob view.
-    fn view(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+    /// Build a replay handle over the bytes of a logical blob view in `range`.
+    fn view(
+        blob: Blob<'a, B>,
+        range: Range<u64>,
+        buffer_size: NonZeroUsize,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            inner: ReplayInner::View(ViewReplay::new(blob, offset, buffer_size)?),
+            inner: ReplayInner::View(ViewReplay::new(blob, range, buffer_size)?),
         })
     }
 
@@ -779,24 +786,27 @@ struct ViewReplay<'a, B: RBlob> {
     blob: Blob<'a, B>,
     /// Next logical offset to read from `blob`.
     offset: u64,
+    /// The logical offset the replay ends at, unless the source blob ends first.
+    end: u64,
     /// Minimum read size when more bytes are needed.
     buffer_size: NonZeroUsize,
     /// Buffered logical bytes.
     buf: IoBufs,
-    /// Whether `offset` has reached the source blob's logical size.
+    /// Whether `offset` has reached `end` or the source blob's logical size.
     exhausted: bool,
 }
 
 impl<'a, B: RBlob> ViewReplay<'a, B> {
-    /// Create a view replay positioned at `offset`.
-    fn new(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
-        if offset > blob.size() {
+    /// Create a view replay of the bytes in `range`.
+    fn new(blob: Blob<'a, B>, range: Range<u64>, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+        if range.start > blob.size() {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
 
         Ok(Self {
             blob,
-            offset,
+            offset: range.start,
+            end: range.end,
             buffer_size,
             buf: IoBufs::default(),
             exhausted: false,
@@ -811,15 +821,15 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
     /// Ensure at least `n` bytes are available through the [`bytes::Buf`] implementation.
     async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.remaining() < n && !self.exhausted {
-            let blob_size = self.blob.size();
-            let remaining = blob_size.saturating_sub(self.offset);
+            let end = self.end.min(self.blob.size());
+            let remaining = end.saturating_sub(self.offset);
             if remaining == 0 {
                 self.exhausted = true;
                 break;
             }
 
             // Read enough to satisfy the request, but keep ordinary prefetch bounded by the replay
-            // budget and never ask past the current logical EOF.
+            // budget and never ask past the replay's end or the current logical EOF.
             let needed = n.saturating_sub(self.remaining());
             let read_len = self
                 .buffer_size
@@ -835,7 +845,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .checked_add(read as u64)
                 .ok_or(Error::OffsetOverflow)?;
             self.buf.append(buf.freeze());
-            if self.offset == blob_size {
+            if self.offset == end {
                 self.exhausted = true;
             }
         }
@@ -963,7 +973,7 @@ mod tests {
             let (_, snapshot) = writer.snapshot().await.unwrap();
             let source = Blob::Sealed(snapshot);
             let mut replay = source
-                .replay_from(0, NZUsize!(128), ReadOptions::default())
+                .replay_range(0..u64::MAX, NZUsize!(128), ReadOptions::default())
                 .unwrap();
 
             // A payload ending exactly at a page boundary is copied from one page.
@@ -1013,7 +1023,7 @@ mod tests {
                 (Blob::Sealed(snapshot), 0, true),
             ] {
                 let mut replay = source
-                    .replay_from(offset, NZUsize!(12), ReadOptions::default())
+                    .replay_range(offset..u64::MAX, NZUsize!(12), ReadOptions::default())
                     .unwrap();
                 assert!(replay.ensure(12).await.unwrap());
                 let first_range = replay.chunk().as_ptr_range();
@@ -1038,6 +1048,49 @@ mod tests {
         });
     }
 
+    /// A replay of a byte range yields the range's bytes and no more, through a live view of a
+    /// writer and through a paged replay alike. A range that extends past the blob ends with it.
+    #[test]
+    fn test_replay_range_ends_with_its_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(3));
+            let (blob, size) = context.open("replay-range", b"blob").await.unwrap();
+            let writer = Writer::new(blob, size, 128, cache.clone()).await.unwrap();
+            let (writer, _) = writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
+
+            // A writer holding an unwritten full page is replayed through a live view. Its
+            // page of filler precedes the same bytes.
+            let (blob, size) = context.open("replay-range", b"pending").await.unwrap();
+            let pending = Writer::new(blob, size, 128, cache).await.unwrap();
+            let (pending, _) = pending.append(&[0; 40]).await.unwrap();
+            let (pending, _) = pending.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
+            assert!(pending.try_snapshot().is_none());
+
+            for (source, offset) in [
+                (Blob::Writer(&pending), 40),
+                (Blob::Writer(&writer), 0),
+                (Blob::Sealed(snapshot), 0),
+            ] {
+                for (range, expected) in [(0..2, "ab"), (2..10, "cdefghij"), (20..100, "uvwx")] {
+                    // The replay buffer has room for more than the range holds, and a request
+                    // for one byte more than that finds exactly the range's bytes.
+                    let bytes = offset + range.start..offset + range.end;
+                    let mut replay = source
+                        .clone()
+                        .replay_range(bytes, NZUsize!(12), ReadOptions::default())
+                        .unwrap();
+                    assert!(!replay.ensure(expected.len() + 1).await.unwrap());
+                    assert!(replay.is_exhausted());
+                    assert_eq!(replay.remaining(), expected.len());
+                    let yielded = replay.copy_to_bytes(expected.len());
+                    assert_eq!(yielded.as_ref(), expected.as_bytes());
+                }
+            }
+        });
+    }
+
     /// A writer-view replay decodes an `IoBuf` item as a view of its read buffer when the frame
     /// lies within one read, and as one native copy when it spans reads; either way the item ends
     /// up as the sole owner of native storage.
@@ -1056,7 +1109,7 @@ mod tests {
 
             for (buffer_size, contiguous) in [(64, true), (4, false)] {
                 let mut replay = Blob::Writer(&pending)
-                    .replay_from(64, NZUsize!(buffer_size), ReadOptions::default())
+                    .replay_range(64..u64::MAX, NZUsize!(buffer_size), ReadOptions::default())
                     .unwrap();
                 assert!(replay.ensure(1).await.unwrap());
                 let (len, _) = replay.read_length().unwrap();
@@ -1113,7 +1166,7 @@ mod tests {
                 ] {
                     let mut replay = source
                         .clone()
-                        .replay_from(offset, NZUsize!(12), ReadOptions::default())
+                        .replay_range(offset..u64::MAX, NZUsize!(12), ReadOptions::default())
                         .unwrap();
                     let mut retained = Vec::new();
                     for _ in &items {
@@ -1140,7 +1193,11 @@ mod tests {
                         for case in 0..3 {
                             let mut replay = source
                                 .clone()
-                                .replay_from(offset, NZUsize!(12), ReadOptions::default())
+                                .replay_range(
+                                    offset..u64::MAX,
+                                    NZUsize!(12),
+                                    ReadOptions::default(),
+                                )
                                 .unwrap();
                             assert!(replay.ensure(12).await.unwrap());
                             let (len, _) = replay.read_length().unwrap();

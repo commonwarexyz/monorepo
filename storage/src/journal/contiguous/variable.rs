@@ -554,7 +554,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         })
     }
 
-    /// Build one replay state for each data blob touched by `range`.
+    /// Build one replay state for each data blob touched by `range`. Each state reads no further
+    /// than the last frame of `range` in its blob.
     async fn replay_states(
         &self,
         range: Range<u64>,
@@ -583,12 +584,24 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let end_blob = position_to_blob(range.end - 1, items_per_blob);
             let start_offset = self.offsets.read(start_pos).await?;
 
+            // The range's last frame ends where the next frame in its blob starts. A range that
+            // ends with its blob has no such frame, and its last blob is replayed to the end.
+            let end_offset = match self.next_in_blob(range.end - 1) {
+                Some(next) => self.offsets.read(next).await?,
+                None => u64::MAX,
+            };
+
             for blob in start_blob..=end_blob {
                 let blob_handle = self
                     .data
                     .get(blob)
                     .expect("positions in bounds map to a retained blob");
                 let offset = if blob == start_blob { start_offset } else { 0 };
+                let end = if blob == end_blob {
+                    end_offset
+                } else {
+                    u64::MAX
+                };
 
                 let first_pos = if blob == start_blob {
                     start_pos
@@ -601,7 +614,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 // points and cannot borrow `self`.
                 states.push(ReplayState::<E::Blob, V> {
                     blob,
-                    replay: blob_handle.replay_from(offset, buffer, read_options)?,
+                    replay: blob_handle.replay_range(offset..end, buffer, read_options)?,
                     budget: buffer.get() as u64,
                     pos: first_pos,
                     end_pos,
@@ -5970,6 +5983,81 @@ mod tests {
         });
     }
 
+    /// A replay of part of a journal reads the pages that hold that part and none after them,
+    /// however large its buffer.
+    #[test_traced]
+    fn test_variable_replay_reads_only_its_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Two blobs of 1,000 frames each, written and reopened so that the replay reads
+            // every page from storage.
+            let cfg = Config {
+                partition: "replay-reads".into(),
+                items_per_section: NZU64!(1000),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(4)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("writer"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..2000u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+            let journal = Journal::<_, u64>::init(context.child("reader"), cfg)
+                .await
+                .unwrap();
+
+            // The data pages that hold frames `[start, end)` of one blob. A frame is a length
+            // byte and the eight bytes of its item.
+            const FRAME: u64 = 9;
+            let page = PAGE_SIZE.get() as u64;
+            let physical_page = page + commonware_runtime::buffer::paged::CHECKSUM_SIZE;
+            let pages = |start: u64, end: u64| (end * FRAME).div_ceil(page) - start * FRAME / page;
+
+            // Ranges inside a blob, up to the end of a blob, and across two blobs. A replay
+            // also looks up where its first frame starts and where its last one ends, each of
+            // which reads at most two pages of the offsets journal.
+            for (range, expected) in [
+                (100..110u64, pages(100, 110)),
+                (990..1000, pages(990, 1000)),
+                (995..1010, pages(995, 1000) + pages(0, 10)),
+            ] {
+                let before = context.encode();
+                {
+                    let stream = replay_items(
+                        &journal,
+                        range.clone(),
+                        NZUsize!(1 << 16),
+                        ReadOptions::DONT_CACHE,
+                    )
+                    .await
+                    .unwrap();
+                    futures::pin_mut!(stream);
+                    for i in range.clone() {
+                        let (pos, item) = stream.next().await.unwrap().unwrap();
+                        assert_eq!(pos, i);
+                        assert_eq!(item, i * 100);
+                    }
+                    assert!(stream.next().await.is_none());
+                }
+                let after = context.encode();
+                let read =
+                    counter(&after, "storage_read_bytes") - counter(&before, "storage_read_bytes");
+                assert!(read > 0);
+                assert!(
+                    read <= (expected + 4) * physical_page,
+                    "range {range:?} read {read} bytes"
+                );
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test replay behavior for variable-length items.
     #[test_traced]
     fn test_variable_replay() {
@@ -6194,7 +6282,7 @@ mod tests {
                     states.push(ReplayState::<_, u64> {
                         blob,
                         replay: Blob::Writer(writer)
-                            .replay_from(0, NZUsize!(1024), ReadOptions::default())
+                            .replay_range(0..u64::MAX, NZUsize!(1024), ReadOptions::default())
                             .unwrap(),
                         budget: 1024,
                         pos: blob * 10,
