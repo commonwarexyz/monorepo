@@ -729,8 +729,8 @@ fn build_chunk_overlay<F: Graftable, U, B: bitmap::Readable<N>, const N: usize>(
     base: &B,
     batch_len: usize,
     batch_base: u64,
-    diff: &[(U::Key, DiffEntry<F, U::Value>)],
-    ancestor_diffs: &[Arc<Vec<(U::Key, DiffEntry<F, U::Value>)>>],
+    diff: &[(U::Key, DiffEntry<F>)],
+    ancestor_diffs: &[Arc<Vec<(U::Key, DiffEntry<F>)>>],
 ) -> ChunkOverlay<N>
 where
     U: update::Update,
@@ -1528,7 +1528,6 @@ mod tests {
             (
                 key1,
                 DiffEntry::Active {
-                    value: 100u64,
                     loc: Location::new(4), // offset 0 in batch
                     base_old_loc: None,
                 },
@@ -1536,7 +1535,6 @@ mod tests {
             (
                 key2,
                 DiffEntry::Active {
-                    value: 200u64,
                     loc: Location::new(99), // not in batch [4,8), so superseded
                     base_old_loc: None,
                 },
@@ -1571,11 +1569,10 @@ mod tests {
         // Base bitmap with 64 bits, all set.
         let base = make_bitmap(&[true; 64]);
 
-        let mut diff: Vec<(K, DiffEntry<mmr::Family, u64>)> = vec![
+        let mut diff: Vec<(K, DiffEntry<mmr::Family>)> = vec![
             (
                 key1,
                 DiffEntry::Active {
-                    value: 100,
                     loc: Location::new(70),
                     base_old_loc: Some(Location::new(5)),
                 },
@@ -1589,7 +1586,6 @@ mod tests {
             (
                 key3,
                 DiffEntry::Active {
-                    value: 300,
                     loc: Location::new(71),
                     base_old_loc: None,
                 },
@@ -1632,7 +1628,6 @@ mod tests {
         let mut diff = vec![(
             key1,
             DiffEntry::Active {
-                value: 42u64,
                 loc: Location::new(35),
                 base_old_loc: None,
             },

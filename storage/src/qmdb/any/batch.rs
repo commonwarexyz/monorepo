@@ -52,8 +52,8 @@ use std::{
 };
 use tracing::debug;
 
-type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
-type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
+type DiffVec<K, F> = Vec<(K, DiffEntry<F>)>;
+type DiffSlice<K, F> = [(K, DiffEntry<F>)];
 
 /// Sorted locations at the retained batch chain's recorded database boundary.
 type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
@@ -162,11 +162,13 @@ type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, 
 const GATHER_PREFETCH_DISTANCE: usize = 16;
 
 /// What happened to a key in this batch.
-#[derive(Clone)]
-pub(crate) enum DiffEntry<F: Family, V> {
+///
+/// An active entry holds no value. Every batch that retains the diff also retains the update at
+/// `loc` (see [`MerkleizedBatch::update_at`]), and a read takes the value from there.
+#[derive(Clone, Copy)]
+pub(crate) enum DiffEntry<F: Family> {
     /// Key was updated (existing) or created (new).
     Active {
-        value: V,
         /// Location where this operation will be written.
         loc: Location<F>,
         /// The key's location in the DB index, or `None` if the key did not exist in the
@@ -182,7 +184,7 @@ pub(crate) enum DiffEntry<F: Family, V> {
     },
 }
 
-impl<F: Family, V> DiffEntry<F, V> {
+impl<F: Family> DiffEntry<F> {
     /// The key's location in the base DB index, regardless of variant.
     pub(crate) const fn base_old_loc(&self) -> Option<Location<F>> {
         match self {
@@ -194,14 +196,6 @@ impl<F: Family, V> DiffEntry<F, V> {
     pub(crate) const fn loc(&self) -> Option<Location<F>> {
         match self {
             Self::Active { loc, .. } => Some(*loc),
-            Self::Deleted { .. } => None,
-        }
-    }
-
-    /// The value if active, `None` if deleted.
-    pub(crate) const fn value(&self) -> Option<&V> {
-        match self {
-            Self::Active { value, .. } => Some(value),
             Self::Deleted { .. } => None,
         }
     }
@@ -416,9 +410,9 @@ struct Walked<F: Family, U: update::Update> {
     /// The operations the batch appends, in location order.
     ops: Vec<Operation<F, U>>,
     /// This batch's key-level changes, key-sorted once the walk has run.
-    diff: DiffVec<U::Key, F, U::Value>,
+    diff: DiffVec<U::Key, F>,
     /// New entries for keys `diff` lacks, in any order. A key appears in at most one of the two.
-    floor_diff: DiffVec<U::Key, F, U::Value>,
+    floor_diff: DiffVec<U::Key, F>,
     /// The change in active keys since the base.
     active_keys_delta: isize,
 }
@@ -441,11 +435,7 @@ impl<F: Family, U: update::Update> Walked<F, U> {
         let loc = self.next_loc();
         self.diff.push((
             update.key().clone(),
-            DiffEntry::Active {
-                value: update.value().clone(),
-                loc,
-                base_old_loc,
-            },
+            DiffEntry::Active { loc, base_old_loc },
         ));
         self.ops.push(Operation::Update(update));
     }
@@ -497,7 +487,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
-    pub(crate) diff: Arc<DiffVec<U::Key, F, U::Value>>,
+    pub(crate) diff: Arc<DiffVec<U::Key, F>>,
 
     /// The parent batch in the chain, if any.
     parent: Option<Weak<Self>>,
@@ -508,7 +498,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     /// Arc refs to the diffs of the reachable ancestors, collected during `finish()`. Reads
     /// consult them (see `read_diffs`), and `apply_batch` applies the unapplied ones. 1:1 with
     /// `bounds.ancestors` (same length, same ordering).
-    pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
+    pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F>>>,
 
     /// Locations at `bounds.db` for keys that both a reachable ancestor and an older, unreachable
     /// ancestor wrote. Keeping only these keys bounds this by the reachable ancestors' diffs
@@ -580,7 +570,7 @@ type PrepareResult<'a, F, E, C, I, H, U, const N: usize, S> =
 fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
     ancestors: &'a [Arc<MerkleizedBatch<F, D, U, S>>],
     key: &U::Key,
-) -> Option<&'a DiffEntry<F, U::Value>> {
+) -> Option<&'a DiffEntry<F>> {
     for batch in ancestors {
         if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
             return Some(entry);
@@ -635,12 +625,12 @@ enum Move<F: Family> {
 /// Streaming equivalent of [`resolve_in_ancestors`] for an ascending sequence of queries:
 /// one cursor per key-sorted diff advances in a linear merge instead of binary-searching
 /// each diff per key. Diffs must be ordered closest-first (the first hit wins).
-pub(crate) struct DiffCursors<'a, K, F: Family, V> {
-    diffs: Vec<(&'a DiffSlice<K, F, V>, usize)>,
+pub(crate) struct DiffCursors<'a, K, F: Family> {
+    diffs: Vec<(&'a DiffSlice<K, F>, usize)>,
 }
 
-impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
-    pub(crate) fn new(diffs: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
+impl<'a, K: Ord, F: Family> DiffCursors<'a, K, F> {
+    pub(crate) fn new(diffs: impl IntoIterator<Item = &'a DiffSlice<K, F>>) -> Self {
         Self {
             diffs: diffs.into_iter().map(|diff| (diff, 0)).collect(),
         }
@@ -653,7 +643,7 @@ impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
     ///
     /// Panics on any out-of-order query that would return a wrong result (the cursor has
     /// already advanced past an entry at or above the query).
-    pub(crate) fn resolve(&mut self, key: &K) -> Option<&'a DiffEntry<F, V>> {
+    pub(crate) fn resolve(&mut self, key: &K) -> Option<&'a DiffEntry<F>> {
         for (diff, cursor) in &mut self.diffs {
             assert!(
                 *cursor == 0 || diff[*cursor - 1].0 < *key,
@@ -684,16 +674,16 @@ struct Shadow<'a, K> {
 
 impl<'a, K: Key> Shadow<'a, K> {
     /// Prepare to walk `diffs`, ordered nearest first.
-    fn new<F: Family, V: 'a>(diffs: impl ExactSizeIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
+    fn new<F: Family>(diffs: impl ExactSizeIterator<Item = &'a DiffSlice<K, F>>) -> Self {
         let seen =
             (diffs.len() > 1).then(|| AHashSet::with_capacity(diffs.map(|diff| diff.len()).sum()));
         Self { seen }
     }
 
     /// The updates in `diff`, the next diff of the walk, for keys no nearer diff holds.
-    fn updates<F: Family, V>(
+    fn updates<F: Family>(
         &mut self,
-        diff: &'a DiffSlice<K, F, V>,
+        diff: &'a DiffSlice<K, F>,
     ) -> impl Iterator<Item = (&'a K, Location<F>)> {
         diff.iter().filter_map(move |(key, entry)| {
             if self.seen.as_mut().is_some_and(|seen| !seen.insert(key)) {
@@ -708,15 +698,17 @@ impl<'a, K: Key> Shadow<'a, K> {
 /// input slot. The caller keeps `pending` in input order so the database reads that follow can do
 /// the same.
 ///
-/// `on_hit` is invoked (serially, in `pending` order) with each resolving diff entry, so
-/// staged reads can record ancestor resolutions alongside the values.
-fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: Strategy>(
+/// `value_at` returns the value of the update at an active entry's location. `on_hit` is invoked
+/// (serially, in `pending` order) with each resolving diff entry, so staged reads can record
+/// ancestor resolutions alongside the values.
+fn resolve_pending_from_diffs<'a, K, F: Family, V, S: Strategy>(
     pending: &[PendingRead<'a, K>],
-    diffs: &[&'a DiffSlice<K, F, V>],
+    diffs: &[&'a DiffSlice<K, F>],
     strategy: &S,
     resolved: &mut [bool],
     results: &mut [Option<V>],
-    mut on_hit: impl FnMut(usize, &DiffEntry<F, V>),
+    value_at: impl Fn(Location<F>) -> V,
+    mut on_hit: impl FnMut(usize, &DiffEntry<F>),
 ) where
     K: Ord + Sync,
 {
@@ -724,7 +716,7 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
         return;
     }
 
-    let resolve = |chunk: &[PendingRead<'a, K>]| -> Vec<(usize, &'a DiffEntry<F, V>)> {
+    let resolve = |chunk: &[PendingRead<'a, K>]| -> Vec<(usize, &'a DiffEntry<F>)> {
         chunk
             .iter()
             .filter_map(|(slot, key)| {
@@ -741,7 +733,7 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
 
     for (slot, entry) in shards.into_iter().flatten() {
         resolved[slot] = true;
-        results[slot] = entry.value().cloned();
+        results[slot] = entry.loc().map(&value_at);
         on_hit(slot, entry);
     }
 }
@@ -750,14 +742,16 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
 /// inner `Option` distinguishing a value from a delete) and then against `diffs`, returning
 /// per-slot results and the slots that still need database reads.
 ///
-/// `on_diff_hit` is invoked with each slot resolved by a diff entry (see
-/// [`resolve_pending_from_diffs`]). Slots resolved by `local` do not report.
+/// `value_at` returns the value of the update at an active diff entry's location. `on_diff_hit`
+/// is invoked with each slot resolved by a diff entry (see [`resolve_pending_from_diffs`]).
+/// Slots resolved by `local` do not report.
 fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
     keys: &'a [impl Borrow<K>],
     local: impl Fn(&K) -> Option<Option<V>>,
-    diffs: &[&DiffSlice<K, F, V>],
+    diffs: &[&DiffSlice<K, F>],
     strategy: &S,
-    on_diff_hit: impl FnMut(usize, &DiffEntry<F, V>),
+    value_at: impl Fn(Location<F>) -> V,
+    on_diff_hit: impl FnMut(usize, &DiffEntry<F>),
 ) -> UncommittedReadResolution<'a, K, V>
 where
     K: Ord + Sync,
@@ -782,6 +776,7 @@ where
         strategy,
         &mut resolved,
         &mut results,
+        value_at,
         on_diff_hit,
     );
 
@@ -791,22 +786,22 @@ where
 
 /// k-way sorted merge over diff slices in priority order. On equal keys, the lowest-indexed
 /// stream wins and all tied cursors are advanced. Each input slice must be sorted by key.
-struct DiffMerge<'a, K, F: Family, V> {
-    cursors: Vec<(&'a DiffSlice<K, F, V>, usize)>,
+struct DiffMerge<'a, K, F: Family> {
+    cursors: Vec<(&'a DiffSlice<K, F>, usize)>,
 }
 
-impl<'a, K: Ord, F: Family, V> DiffMerge<'a, K, F, V> {
-    fn new(streams: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
+impl<'a, K: Ord, F: Family> DiffMerge<'a, K, F> {
+    fn new(streams: impl IntoIterator<Item = &'a DiffSlice<K, F>>) -> Self {
         Self {
             cursors: streams.into_iter().map(|s| (s, 0)).collect(),
         }
     }
 
-    fn peek_key(cursor: &(&'a DiffSlice<K, F, V>, usize)) -> Option<&'a K> {
+    fn peek_key(cursor: &(&'a DiffSlice<K, F>, usize)) -> Option<&'a K> {
         cursor.0.get(cursor.1).map(|(k, _)| k)
     }
 
-    fn next_general(&mut self) -> Option<(&'a K, &'a DiffEntry<F, V>)> {
+    fn next_general(&mut self) -> Option<(&'a K, &'a DiffEntry<F>)> {
         let n = self.cursors.len();
         let mut winner: Option<usize> = None;
         for level in 0..n {
@@ -833,8 +828,8 @@ impl<'a, K: Ord, F: Family, V> DiffMerge<'a, K, F, V> {
     }
 }
 
-impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
-    type Item = (&'a K, &'a DiffEntry<F, V>);
+impl<'a, K: Ord, F: Family> Iterator for DiffMerge<'a, K, F> {
+    type Item = (&'a K, &'a DiffEntry<F>);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.cursors.len() {
@@ -1146,7 +1141,7 @@ where
     /// [`Move`]).
     fn classify(
         &self,
-        diff: &DiffSlice<U::Key, F, U::Value>,
+        diff: &DiffSlice<U::Key, F>,
         loc: Location<F>,
         key: &U::Key,
     ) -> Option<Move<F>> {
@@ -1181,19 +1176,11 @@ where
         let loc = walked.next_loc();
         match mv {
             Move::Existing { idx, base_old_loc } => {
-                walked.diff[idx].1 = DiffEntry::Active {
-                    value: update.value().clone(),
-                    loc,
-                    base_old_loc,
-                };
+                walked.diff[idx].1 = DiffEntry::Active { loc, base_old_loc };
             }
             Move::New { base_old_loc } => walked.floor_diff.push((
                 update.key().clone(),
-                DiffEntry::Active {
-                    value: update.value().clone(),
-                    loc,
-                    base_old_loc,
-                },
+                DiffEntry::Active { loc, base_old_loc },
             )),
         }
         walked.ops.push(Operation::Update(update));
@@ -1501,7 +1488,7 @@ where
         // A retained ancestor's `base_old_loc` traces back to the recorded database boundary its
         // chain was created on. If older ancestors have since become unreachable, resolve keys
         // touched on both sides of the effective boundary to their location after those
-        // ancestors. Keeping only the intersection avoids retaining their value diffs.
+        // ancestors. Keeping only the intersection avoids retaining their diffs.
         let ancestor_base_locs = self.ancestors.last().map_or_else(Vec::new, |oldest| {
             if oldest.ancestor_diffs.iter().all(|diff| diff.is_empty()) {
                 return Vec::new();
@@ -2123,17 +2110,23 @@ where
         keys: &'a [impl Borrow<U::Key>],
         strategy: &S,
         db_size: Location<F>,
-        on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
+        on_diff_hit: impl FnMut(usize, &DiffEntry<F>),
     ) -> UncommittedReadResolution<'a, U::Key, U::Value> {
-        let diffs: Vec<_> = self
-            .base
-            .parent()
-            .map_or_else(Vec::new, |parent| parent.read_diffs(db_size).collect());
+        let parent = self.base.parent();
+        let diffs: Vec<_> =
+            parent.map_or_else(Vec::new, |parent| parent.read_diffs(db_size).collect());
         resolve_reads(
             keys,
             |key| self.mutations.get(key).cloned(),
             &diffs,
             strategy,
+            |loc| {
+                parent
+                    .expect("a batch that reads ancestor diffs must have a parent")
+                    .update_at(loc)
+                    .value()
+                    .clone()
+            },
             on_diff_hit,
         )
     }
@@ -3077,7 +3070,7 @@ where
         // Diffs and their operation chunks are both visited newest first, so one cursor over the
         // chunks serves every diff.
         let mut chunks = self.chunks();
-        let find = |diff: &DiffSlice<K, F, V::Value>| {
+        let find = |diff: &DiffSlice<K, F>| {
             let end = diff.partition_point(|(candidate, _)| {
                 if NEXT {
                     candidate <= key
@@ -3138,10 +3131,7 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     /// reachable ancestor, so only the entry carries the key's location at the recorded boundary,
     /// and applying the child at that boundary needs it (see [`StagedLoc`]). The batch keeps every
     /// retained diff, because a bounded initialization can make those layers unapplied again.
-    fn read_diffs(
-        &self,
-        db_size: Location<F>,
-    ) -> impl Iterator<Item = &DiffSlice<U::Key, F, U::Value>> {
+    fn read_diffs(&self, db_size: Location<F>) -> impl Iterator<Item = &DiffSlice<U::Key, F>> {
         let mut reachable = iter::once_with(|| self.ancestors()).flatten();
         iter::once(self.diff.as_slice()).chain(
             self.ancestor_diffs
@@ -3328,7 +3318,7 @@ where
         let db = self.bounds.compatible(db, db.commitment())?;
         for diff in self.read_diffs(db.bounds().end) {
             if let Some(entry) = lookup_sorted(diff, key) {
-                return Ok(entry.value().cloned());
+                return Ok(entry.loc().map(|loc| self.update_at(loc).value().clone()));
             }
         }
         db.get(key).await
@@ -3358,11 +3348,13 @@ where
         }
 
         let diffs: Vec<_> = self.read_diffs(db.bounds().end).skip(1).collect();
+        let value_at = |loc| self.update_at(loc).value().clone();
         let (mut results, unresolved) = resolve_reads(
             keys,
-            |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.value().cloned()),
+            |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.loc().map(value_at)),
             &diffs,
             db.strategy(),
+            value_at,
             |_, _| {},
         );
 
@@ -3608,8 +3600,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// A walk over an unapplied ancestor's operations clones only the active update it decides:
-    /// once at the decision and once for the diff entry of its move.
+    /// A walk over an unapplied ancestor's operations clones only the active update it decides,
+    /// once, at the decision. Its diff entry holds no value.
     #[test]
     fn policy_clones_only_decided_ancestor_update() {
         deterministic::Runner::default().start(|context| async move {
@@ -3622,8 +3614,8 @@ pub(crate) mod tests {
             let (first_value, second_value) = (CountedValue::new(0), CountedValue::new(1));
             let counts = [first_value.1.clone(), second_value.1.clone()];
 
-            // An unapplied parent writes both keys and holds the floor. Writing clones each value
-            // once for its operation.
+            // An unapplied parent writes both keys and holds the floor. Writing moves each value
+            // into its operation without cloning it.
             let parent = db
                 .new_batch()
                 .write(first, Some(first_value))
@@ -3633,13 +3625,12 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             for count in &counts {
-                assert_eq!(count.swap(0, AtomicOrdering::Relaxed), 1);
+                assert_eq!(count.swap(0, AtomicOrdering::Relaxed), 0);
             }
 
             // The child deletes the first key, so only the second key's update is active.
             // Resolving the delete reads the first key's operation from the parent once, and the
-            // walk clones the second key's update once when the policy decides it and once more
-            // for the diff entry of its move.
+            // walk clones the second key's update once, when the policy decides it.
             let mut policy = Probe {
                 decided: Vec::new(),
             };
@@ -3651,7 +3642,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(policy.decided, [(second, 1)]);
             let clones = counts.map(|count| count.load(AtomicOrdering::Relaxed));
-            assert_eq!(clones, [1, 2]);
+            assert_eq!(clones, [1, 1]);
 
             // The walk passes the parent's commit and the child's delete to the tip after the
             // writes.
@@ -3705,8 +3696,8 @@ pub(crate) mod tests {
 
     /// A policy that evicts committed, unapplied-parent, colliding-key, and the batch's own updates
     /// owns each evicted value and receives them in location order. A committed value arrives
-    /// unshared, a parent value carries only the walk's clone, and the batch's own value carries
-    /// its write's clone and the walk's. The evicted keys read `None` once the batch applies.
+    /// unshared, and a parent value and the batch's own value each carry only the walk's clone.
+    /// The evicted keys read `None` once the batch applies.
     async fn policy_evicts_owned<D>(db: D, child: fn(&D::Merkleized) -> D::Batch)
     where
         D: DbAny<Family = mmr::Family, Key = sha256::Digest, Value = CountedValue>,
@@ -3742,10 +3733,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // The child rewrites the first colliding key, and the policy evicts every active update,
-        // the rewrite among them.
+        // The parent's writes cloned nothing. The child rewrites the first colliding key, and the
+        // policy evicts every active update, the rewrite among them.
         for count in &counts {
-            count.store(0, AtomicOrdering::Relaxed);
+            assert_eq!(count.load(AtomicOrdering::Relaxed), 0);
         }
         let written = CountedValue::new(20);
         let written_count = written.1.clone();
@@ -3756,12 +3747,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Merkleize clones each `pending` value only for the walk's read, and the written value for
-        // its operation and the walk's read.
+        // Merkleize clones each `pending` value and the written value only for the walk's read.
         for count in &counts {
             assert_eq!(count.load(AtomicOrdering::Relaxed), 1);
         }
-        assert_eq!(written_count.load(AtomicOrdering::Relaxed), 2);
+        assert_eq!(written_count.load(AtomicOrdering::Relaxed), 1);
 
         // Evictions arrive in location order with the committed update first. Evicting clones
         // nothing.
@@ -3776,7 +3766,7 @@ pub(crate) mod tests {
             evicted,
             [
                 (false, colliding(1), 1, 0, 0),
-                (true, colliding(0), 20, 2, 2),
+                (true, colliding(0), 20, 1, 1),
                 (true, colliding(2), 12, 1, 1),
                 (true, other, 13, 1, 1),
             ]
@@ -5145,7 +5135,7 @@ pub(crate) mod tests {
         for _ in 0..50 {
             // Build 1-4 sorted diffs over a small key universe so overlaps are common.
             let num_diffs = rng.random_range(1..=4);
-            let diffs: Vec<DiffVec<u64, mmr::Family, u64>> = (0..num_diffs)
+            let diffs: Vec<DiffVec<u64, mmr::Family>> = (0..num_diffs)
                 .map(|d| {
                     let mut keys: Vec<u64> = (0..rng.random_range(0..30))
                         .map(|_| rng.random_range(0..50u64))
@@ -5157,7 +5147,6 @@ pub(crate) mod tests {
                             (
                                 k,
                                 DiffEntry::Active {
-                                    value: k * 1000 + d,
                                     loc: loc(k * 1000 + d),
                                     base_old_loc: None,
                                 },
@@ -5190,13 +5179,12 @@ pub(crate) mod tests {
     #[test]
     #[should_panic(expected = "queries must be non-decreasing")]
     fn diff_cursors_rejects_out_of_order_query() {
-        let diff: DiffVec<u64, mmr::Family, u64> = vec![1, 5]
+        let diff: DiffVec<u64, mmr::Family> = vec![1, 5]
             .into_iter()
             .map(|k| {
                 (
                     k,
                     DiffEntry::Active {
-                        value: k,
                         loc: loc(k),
                         base_old_loc: None,
                     },
@@ -5242,13 +5230,13 @@ pub(crate) mod tests {
         let mut rng = test_rng();
         for _ in 0..50 {
             // Disjoint key sets: evens on one side, odds on the other.
-            let mut build = |offset: u64| -> DiffVec<u64, mmr::Family, u64> {
+            let mut build = |offset: u64| -> DiffVec<u64, mmr::Family> {
                 let mut keys: Vec<u64> = (0..rng.random_range(0..30))
                     .map(|_| rng.random_range(0..50u64) * 2 + offset)
                     .collect();
                 keys.sort_unstable();
                 keys.dedup();
-                keys.into_iter().map(|k| (k, active(k, k))).collect()
+                keys.into_iter().map(|k| (k, active(k))).collect()
             };
             let a = build(0);
             let b = build(1);
@@ -5262,7 +5250,6 @@ pub(crate) mod tests {
             for ((mk, me), (rk, re)) in merged.iter().zip(&reference) {
                 assert_eq!(mk, rk);
                 assert_eq!(me.loc(), re.loc());
-                assert_eq!(me.value(), re.value());
             }
         }
     }
@@ -5288,15 +5275,14 @@ pub(crate) mod tests {
         (candidate < tip).then(|| Location::new(candidate))
     }
 
-    fn active(value: u64, location: u64) -> DiffEntry<mmr::Family, u64> {
+    fn active(location: u64) -> DiffEntry<mmr::Family> {
         DiffEntry::Active {
-            value,
             loc: loc(location),
             base_old_loc: None,
         }
     }
 
-    fn deleted(base_old_loc: Option<u64>) -> DiffEntry<mmr::Family, u64> {
+    fn deleted(base_old_loc: Option<u64>) -> DiffEntry<mmr::Family> {
         DiffEntry::Deleted {
             base_old_loc: base_old_loc.map(loc),
         }
@@ -5304,90 +5290,82 @@ pub(crate) mod tests {
 
     #[test]
     fn diff_merge_returns_sorted_newest_entries() {
-        let child = vec![(2, active(20, 20)), (5, active(50, 50))];
+        let child = vec![(2, active(20)), (5, active(50))];
         let parent = vec![
-            (1, active(11, 11)),
-            (2, active(12, 12)),
+            (1, active(11)),
+            (2, active(12)),
             (4, deleted(Some(4))),
-            (7, active(17, 17)),
+            (7, active(17)),
         ];
         let grandparent = vec![
-            (2, active(102, 102)),
-            (3, active(103, 103)),
-            (4, active(104, 104)),
-            (6, active(106, 106)),
+            (2, active(102)),
+            (3, active(103)),
+            (4, active(104)),
+            (6, active(106)),
         ];
 
         // Streams are priority ordered: child, parent, then grandparent. Equal keys should
         // yield only the newest entry while preserving ascending key order for resolver lookups.
         let merged: Vec<_> =
             DiffMerge::new([child.as_slice(), parent.as_slice(), grandparent.as_slice()])
-                .map(|(key, entry)| (*key, entry.value().copied(), entry.loc()))
+                .map(|(key, entry)| (*key, entry.loc()))
                 .collect();
 
         assert_eq!(
             merged,
             vec![
-                (1, Some(11), Some(loc(11))),
-                (2, Some(20), Some(loc(20))),
-                (3, Some(103), Some(loc(103))),
-                (4, None, None),
-                (5, Some(50), Some(loc(50))),
-                (6, Some(106), Some(loc(106))),
-                (7, Some(17), Some(loc(17))),
+                (1, Some(loc(11))),
+                (2, Some(loc(20))),
+                (3, Some(loc(103))),
+                (4, None),
+                (5, Some(loc(50))),
+                (6, Some(loc(106))),
+                (7, Some(loc(17))),
             ]
         );
     }
 
     #[test]
     fn diff_merge_two_way_priority() {
-        let a = vec![
-            (1, active(10, 10)),
-            (3, active(30, 30)),
-            (5, deleted(Some(5))),
-        ];
+        let a = vec![(1, active(10)), (3, active(30)), (5, deleted(Some(5)))];
         let b = vec![
-            (2, active(20, 20)),
-            (3, active(300, 300)),
-            (4, active(40, 40)),
-            (5, active(50, 50)),
+            (2, active(20)),
+            (3, active(300)),
+            (4, active(40)),
+            (5, active(50)),
         ];
 
         let merged: Vec<_> = DiffMerge::new([a.as_slice(), b.as_slice()])
-            .map(|(key, entry)| (*key, entry.value().copied(), entry.loc()))
+            .map(|(key, entry)| (*key, entry.loc()))
             .collect();
 
         assert_eq!(
             merged,
             vec![
-                (1, Some(10), Some(loc(10))),
-                (2, Some(20), Some(loc(20))),
-                (3, Some(30), Some(loc(30))),
-                (4, Some(40), Some(loc(40))),
-                (5, None, None),
+                (1, Some(loc(10))),
+                (2, Some(loc(20))),
+                (3, Some(loc(30))),
+                (4, Some(loc(40))),
+                (5, None),
             ]
         );
     }
 
     #[test]
     fn diff_merge_single_stream() {
-        let a = vec![(1, active(10, 10)), (3, active(30, 30))];
+        let a = vec![(1, active(10)), (3, active(30))];
 
         let merged: Vec<_> = DiffMerge::new([a.as_slice()])
-            .map(|(key, entry)| (*key, entry.value().copied()))
+            .map(|(key, entry)| (*key, entry.loc()))
             .collect();
 
-        assert_eq!(merged, vec![(1, Some(10)), (3, Some(30))]);
+        assert_eq!(merged, vec![(1, Some(loc(10))), (3, Some(loc(30)))]);
     }
 
     #[test]
     fn diff_cursors_use_nearest_touch() {
-        let parent = vec![(2, active(20, 20)), (5, deleted(Some(5)))];
-        let grandparent = vec![
-            (2, active(200, 200)),
-            (4, active(40, 40)),
-            (5, active(50, 50)),
-        ];
+        let parent = vec![(2, active(20)), (5, deleted(Some(5)))];
+        let grandparent = vec![(2, active(200)), (4, active(40)), (5, active(50))];
         let mut cursors = DiffCursors::new([parent.as_slice(), grandparent.as_slice()]);
 
         // Lookups are issued in ascending order, as they are from DiffMerge in apply_batch.
@@ -6427,8 +6405,8 @@ pub(crate) mod tests {
     }
 
     /// Reads stay exact after the ancestor batches are dropped, because merkleization retains
-    /// their diffs. Every ancestor write, including a delete, must resolve from a retained diff,
-    /// since the database has applied none of them.
+    /// their diffs and operations. Every ancestor write, including a delete, must resolve from a
+    /// retained diff, since the database has applied none of them.
     #[test]
     fn dropped_ancestor_reads_stay_exact() {
         let runner = deterministic::Runner::default();
@@ -6512,8 +6490,9 @@ pub(crate) mod tests {
             assert_eq!(c.get_many(&keys, &db).await.unwrap(), expected);
             assert_eq!(child.get_many(&keys, &db).await.unwrap(), expected);
 
-            // Staging and expansion also read retained diffs. Merkleizing returns `StaleBatch`
-            // until the dropped ancestors are applied, because it needs their operations.
+            // Staging and expansion also read the retained diffs and operations. Merkleizing
+            // returns `StaleBatch` until the dropped ancestors are applied, because it reaches
+            // the ancestors through their handles.
             let (staged, values) = child.stage(&keys, &db).await.unwrap();
             assert_eq!(values, expected);
             let (staged, _, values) = staged.expand(&keys, &db).await.unwrap();
@@ -6540,6 +6519,176 @@ pub(crate) mod tests {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    /// Assert that every active entry of every diff `batch` retains names an update of its own key
+    /// among the operations `batch` retains.
+    fn assert_entries_name_their_updates<F, D, U, S>(batch: &MerkleizedBatch<F, D, U, S>)
+    where
+        F: Family,
+        D: Digest,
+        U: update::Update,
+        S: Strategy,
+    {
+        for diff in iter::once(&batch.diff).chain(&batch.ancestor_diffs) {
+            for (key, entry) in diff.iter() {
+                if let Some(loc) = entry.loc() {
+                    assert_eq!(batch.update_at(loc).key(), key, "wrong update at {loc}");
+                }
+            }
+        }
+    }
+
+    /// Reads through a batch take each value from the update its diff entry names. They stay
+    /// exact in a chain rooted at a batch from `to_batch`, which retains one more diff than
+    /// operation chunks, and in a chain past a detached clone, which retains one more chunk than
+    /// diffs. The ordered variant adds the entries of rewritten predecessors.
+    async fn retained_updates_serve_reads<P>(context: deterministic::Context, mut policy: P)
+    where
+        P: Policy<mmr::Family, sha256::Digest, sha256::Digest>,
+    {
+        let key = |i: u8| Sha256::hash(&[&[b'k', i]]);
+        let value = |batch: u8, i: u8| Sha256::hash(&[&[b'v', batch, i]]);
+        let keys: Vec<_> = (0..14).map(key).collect();
+
+        // Each batch's writes, as a key and whether the write is a put. Later batches rewrite keys
+        // of earlier ones, delete a key an earlier batch created and recreate one it deleted. The
+        // last batch is the leaf the reads go through.
+        let batches: [&[(u8, bool)]; 6] = [
+            &[(0, true), (1, true), (2, false), (10, true)],
+            &[(0, true), (11, true)],
+            &[],
+            &[(10, false), (2, true), (3, true)],
+            &[(1, true)],
+            &[(0, true), (12, true), (4, false)],
+        ];
+
+        for (name, view, detach_oldest) in [
+            ("direct", false, false),
+            ("direct_detached", false, true),
+            ("view", true, false),
+            ("view_detached", true, true),
+        ] {
+            let config = fixed_db_config::<OneCap>(name);
+            let mut db = AnyOrdered::init(context.child(name), config, None)
+                .await
+                .unwrap();
+
+            // Seed the database with keys the chain rewrites, deletes and never writes.
+            let mut live = BTreeMap::new();
+            let seed = (0..8).fold(db.new_batch(), |batch, i| {
+                live.insert(key(i), value(0, i));
+                batch.write(key(i), Some(value(0, i)))
+            });
+            let seed = seed.merkleize_with(&db, &mut policy).await.unwrap();
+            db = db.apply_batch(seed).await.unwrap();
+
+            let mut held = Vec::new();
+            if view {
+                held.push(db.to_batch());
+            }
+            let mut detached = None;
+            for (n, writes) in (1u8..).zip(batches) {
+                // Before the leaf, apply the oldest batch and keep only a detached clone. The
+                // clone keeps the oldest batch's operations reachable while the link to the batch
+                // itself fails, so the leaf records only the younger ancestors.
+                if detach_oldest && usize::from(n) == batches.len() {
+                    let oldest = held.remove(usize::from(view));
+                    db = db.apply_batch(Arc::clone(&oldest)).await.unwrap();
+                    detached = Some(Arc::new((*oldest).clone()));
+                }
+                let batch = held
+                    .last()
+                    .map_or_else(|| db.new_batch(), |parent| parent.new_batch::<Sha256>());
+                let batch = writes.iter().fold(batch, |batch, &(i, put)| {
+                    if put {
+                        live.insert(key(i), value(n, i));
+                    } else {
+                        live.remove(&key(i));
+                    }
+                    batch.write(key(i), put.then(|| value(n, i)))
+                });
+                held.push(batch.merkleize_with(&db, &mut policy).await.unwrap());
+            }
+            let leaf = held.pop().unwrap();
+
+            // The batch from `to_batch` has a diff and no operations. The detached clone's
+            // operations stay retained without its diff.
+            let diffs = leaf.ancestor_diffs.len();
+            let chunks = leaf.journal_batch.ancestor_items.len();
+            assert_eq!(diffs, leaf.bounds.ancestors.len());
+            match (view, detach_oldest) {
+                (false, false) => assert_eq!(chunks, diffs),
+                (true, false) => assert_eq!(chunks + 1, diffs),
+                (_, true) => assert_eq!(chunks, diffs + 1),
+            }
+
+            // Reads stay exact with every handle held, after the held handles are dropped, and
+            // after the leaf is applied.
+            let expected: Vec<_> = keys.iter().map(|key| live.get(key).copied()).collect();
+            for phase in 0..3 {
+                if phase == 1 {
+                    held.clear();
+                } else if phase == 2 {
+                    db = db.apply_batch(Arc::clone(&leaf)).await.unwrap();
+                }
+                for batch in held.iter().chain(&detached).chain([&leaf]) {
+                    assert_entries_name_their_updates(batch);
+                }
+                let child = leaf.new_batch::<Sha256>();
+                for (k, v) in keys.iter().zip(&expected) {
+                    assert_eq!(leaf.get(k, &db).await.unwrap(), *v);
+                    assert_eq!(child.get(k, &db).await.unwrap(), *v);
+                }
+                assert_eq!(leaf.get_many(&keys, &db).await.unwrap(), expected);
+                assert_eq!(child.get_many(&keys, &db).await.unwrap(), expected);
+                let (staged, values) = child.stage(&keys, &db).await.unwrap();
+                assert_eq!(values, expected);
+                let (_, _, values) = staged.expand(&keys, &db).await.unwrap();
+                assert_eq!(values, expected);
+            }
+
+            // A child of the applied leaf stages every key. The keys in the leaf's diff resolve
+            // to the leaf's updates and the rest to the database. It rewrites keys of both kinds,
+            // recreates the key the leaf deleted, creates a key and deletes another.
+            let (staged, values) = leaf.new_batch::<Sha256>().stage(&keys, &db).await.unwrap();
+            assert_eq!(values, expected);
+            let slots = (0..14)
+                .map(|i| match i {
+                    0 | 4 | 5 | 12 | 13 => {
+                        live.insert(key(i), value(7, i));
+                        Slot::Put(value(7, i))
+                    }
+                    1 => {
+                        live.remove(&key(i));
+                        Slot::Delete
+                    }
+                    _ => Slot::Keep,
+                })
+                .collect();
+            let last = staged
+                .merkleize_with(slots, vec![], &db, &mut policy)
+                .await
+                .unwrap();
+            db = db.apply_batch(last).await.unwrap();
+            let absent: Vec<_> = keys
+                .iter()
+                .filter(|key| !live.contains_key(*key))
+                .copied()
+                .collect();
+            assert_links(&db, &live, &absent).await;
+            db.destroy().await.unwrap();
+        }
+    }
+
+    /// Runs under a held floor and under the default policy, whose walk adds the entries of the
+    /// updates it moves.
+    #[test]
+    fn retained_updates_serve_reads_in_every_chain_shape() {
+        deterministic::Runner::default()
+            .start(|context| retained_updates_serve_reads(context, Hold));
+        deterministic::Runner::default()
+            .start(|context| retained_updates_serve_reads(context, Proportional));
     }
 
     /// After an applied ancestor is dropped and the database is reinitialized at the chain's
@@ -8704,15 +8853,15 @@ pub(crate) mod tests {
     /// Resolves pending reads against two ancestor diffs on `strategy` and checks the results.
     ///
     /// The nearest diff holding a key wins, a deletion resolves its key to `None` even when an
-    /// older diff holds a value, and a key absent from both diffs stays unresolved. Slots without
+    /// older diff holds an update, and a key absent from both diffs stays unresolved. Slots without
     /// a pending read stay untouched, and `on_hit` sees the hits in pending order.
     fn check_pending_resolution(strategy: &Explorer) {
-        let active = |value: u64| DiffEntry::<mmr::Family, u64>::Active {
-            value,
+        // Each update's value is its location, which is what `value_at` below returns.
+        let active = |value: u64| DiffEntry::<mmr::Family>::Active {
             loc: Location::new(value),
             base_old_loc: None,
         };
-        let deleted = || DiffEntry::<mmr::Family, u64>::Deleted { base_old_loc: None };
+        let deleted = || DiffEntry::<mmr::Family>::Deleted { base_old_loc: None };
         let near = vec![(1u64, deleted()), (2, active(20)), (5, active(50))];
         let far = vec![
             (1u64, active(10)),
@@ -8745,7 +8894,8 @@ pub(crate) mod tests {
                 strategy,
                 &mut resolved,
                 &mut results,
-                |slot, entry| hits.push((slot, entry.value().copied())),
+                |loc| *loc,
+                |slot, entry| hits.push((slot, entry.loc().map(|loc| *loc))),
             );
 
             let mut expected_hits = Vec::new();
@@ -8759,7 +8909,7 @@ pub(crate) mod tests {
                 assert_eq!(
                     results[*slot],
                     value.unwrap_or(Some(u64::MAX)),
-                    "slot {slot} of {len} reads must hold the nearest diff's value or be untouched"
+                    "slot {slot} of {len} reads must hold the nearest update's value or be untouched"
                 );
                 if let Some(value) = value {
                     expected_hits.push((*slot, value));
