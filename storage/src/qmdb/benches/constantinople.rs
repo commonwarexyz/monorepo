@@ -2,18 +2,18 @@
 //!
 //! Times the full per-block state pipeline (staged load, staged merkleize, root) on the
 //! tokio runtime with EightCap, matching the production validator shape. Runs against the
-//! unordered or ordered fixed `any`/`current` DBs over `mmb`. Prints per-iteration latency with
-//! a load/merkleize phase split and the speculative root (a cross-binary parity check:
-//! any optimization must reproduce identical roots).
+//! `any` and `current` DBs listed below, over `mmb`. Prints per-iteration latency with a
+//! load/merkleize phase split and the speculative root (a cross-binary parity check: any
+//! optimization must reproduce identical roots).
 //!
 //! Usage:
 //!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache] [policy]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
-//!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
-//!   "current::ordered::fixed::mmb", matching the qmdb criterion bench variant names
-//!   (required; without it the harness no-ops so blanket `cargo bench --benches`
-//!   invocations skip it)
+//!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb",
+//!   "current::ordered::fixed::mmb", or "current::ordered::variable::mmb", matching the qmdb
+//!   criterion bench variant names (required; without it the harness no-ops so blanket
+//!   `cargo bench --benches` invocations skip it)
 //! - depth: number of pending ancestor batches under the timed batch
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
@@ -52,7 +52,9 @@ use commonware_storage::{
             unordered::{fixed::Config as AnyConfig, variable::Config as AnyVarConfig},
         },
         current::{
-            ordered::fixed::Config as CurrentOrderedConfig,
+            ordered::{
+                fixed::Config as CurrentOrderedConfig, variable::Config as CurrentOrderedVarConfig,
+            },
             unordered::fixed::Config as CurrentConfig,
         },
         floor::Bounded,
@@ -141,6 +143,26 @@ type CurrentOrderedMerkleized = std::sync::Arc<
         mmb::Family,
         Digest,
         commonware_storage::qmdb::any::ordered::fixed::Update<Digest, Digest>,
+        CHUNK_SIZE,
+        Rayon,
+    >,
+>;
+
+type CurrentOrderedVarDb = commonware_storage::qmdb::current::ordered::variable::Db<
+    mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+    Rayon,
+>;
+type CurrentOrderedVarMerkleized = std::sync::Arc<
+    commonware_storage::qmdb::current::batch::MerkleizedBatch<
+        mmb::Family,
+        Digest,
+        commonware_storage::qmdb::any::ordered::variable::Update<Digest, Digest>,
         CHUNK_SIZE,
         Rayon,
     >,
@@ -408,8 +430,9 @@ fn main() {
                 | "any::unordered::variable::mmb"
                 | "current::unordered::fixed::mmb"
                 | "current::ordered::fixed::mmb"
+                | "current::ordered::variable::mmb"
         ),
-        "db: any::unordered::fixed::mmb|any::ordered::fixed::mmb|any::unordered::variable::mmb|current::unordered::fixed::mmb|current::ordered::fixed::mmb"
+        "db: any::unordered::fixed::mmb|any::ordered::fixed::mmb|any::unordered::variable::mmb|current::unordered::fixed::mmb|current::ordered::fixed::mmb|current::ordered::variable::mmb"
     );
     assert!(
         args.iters > 0
@@ -484,6 +507,34 @@ fn main() {
                     args,
                     "current::ordered::fixed::mmb",
                     CurrentOrderedMerkleized
+                )
+            }
+            "current::ordered::variable::mmb" => {
+                let cfg = CurrentOrderedVarConfig {
+                    merkle: merkle_config,
+                    log: VConfig {
+                        partition: "constantinople-var-log".into(),
+                        items_per_section: ITEMS_PER_BLOB,
+                        compression: None,
+                        codec_config: ((), ()),
+                        page_cache: pc_var,
+                        write_buffer: WRITE_BUFFER,
+                        replay_buffer: REPLAY_BUFFER,
+                    },
+                    grafted_metadata_partition: "constantinople-grafted-metadata".into(),
+                    translator: EightCap,
+                    init_cache: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: threads,
+                };
+                let db = CurrentOrderedVarDb::init(ctx.child("db"), cfg, None)
+                    .await
+                    .unwrap();
+                run_pipeline!(
+                    db,
+                    args,
+                    "current::ordered::variable::mmb",
+                    CurrentOrderedVarMerkleized
                 )
             }
             "any::ordered::fixed::mmb" => {
