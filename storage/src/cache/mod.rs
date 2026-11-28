@@ -20,6 +20,11 @@
 //! the floor is satisfied without storing. The pruning granularity is determined by
 //! `items_per_blob` in the configuration.
 //!
+//! Pruned sections are deleted after `prune` returns, and their space is free once
+//! [Cache::removals] completes. A restart after a crash or a shutdown that leaves the deletion
+//! unfinished indexes the remaining pruned sections again, so their items are readable until a
+//! later `prune` covers them.
+//!
 //! # Single Operation Reads
 //!
 //! To enable single operation reads (i.e. reading all of an item in a single call to
@@ -119,7 +124,7 @@ mod tests {
         Metrics as _, Runner, Supervisor as _, deterministic, mocks::RecordingContext,
         telemetry::metrics::has_metric_value,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use rand::RngExt as _;
     use std::{collections::BTreeMap, num::NonZeroU16};
 
@@ -238,6 +243,44 @@ mod tests {
                 .await
                 .expect("Failed to put_sync below floor");
             assert_eq!(cache.get(1).await.expect("Failed to get data"), None);
+        });
+    }
+
+    /// A prune that changes nothing still reports an earlier deletion failure.
+    #[test_traced]
+    fn test_cache_noop_prune_reports_failed_removal() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "noop-failure".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_blob: NZU64!(1),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut cache = Cache::init(context.child("storage"), cfg).await.unwrap();
+            for index in 0..4u64 {
+                cache = cache.put(index, index).await.unwrap();
+            }
+            let cache = cache.sync().await.unwrap();
+
+            // The prune releases sections 0 and 1, and their deletion fails.
+            context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            let cache = cache.prune(2).await.unwrap();
+            let removals = cache.removals();
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(removals.await.is_err());
+            assert!(matches!(
+                cache.wait_for_removals().await,
+                Err(JournalError::Removal(_))
+            ));
+
+            // A prune at the floor releases nothing but still reports the failure.
+            assert!(matches!(
+                cache.prune(2).await,
+                Err(JournalError::Removal(_))
+            ));
         });
     }
 

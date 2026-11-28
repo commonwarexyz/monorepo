@@ -98,7 +98,7 @@ use crate::journal::{
 use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, Copying, Encode as _, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
-    Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
+    Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Removal, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay},
 };
 use std::{collections::VecDeque, num::NonZeroUsize};
@@ -591,11 +591,40 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(self)
     }
 
-    /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
+    /// Prunes all `sections` less than `min`. Returns true if any sections were pruned. Deletion
+    /// of the pruned sections may continue after this call returns, on the terms of
+    /// [Mutable::prune](crate::journal::contiguous::Mutable::prune). A deletion failure
+    /// surfaces from [Self::removals] and from the next prune, [Self::sync], [Self::start_sync],
+    /// [Self::sync_all], [Self::clear], or [Self::destroy].
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Like [Self::prune], also returning a [Removal] that completes once the released sections
+    /// are deleted.
+    pub async fn start_prune(self, min: u64) -> Result<(Self, bool, Removal), Error> {
+        let (journal, pruned) = self.prune(min).await?;
+        let removals = journal.removals();
+        Ok((journal, pruned, removals))
+    }
+
+    /// A [Removal] that completes once every section released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.0.manager.removals()
+    }
+
+    /// Wait until every section released by an earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        self.0.manager.wait_for_removals().await
+    }
+
+    /// Return the failure of a submitted deletion that already finished, without waiting.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn check_removals(&self) -> Result<(), Error> {
+        self.0.manager.check_removals()
     }
 
     /// Returns true when `section` is below the prune floor.
@@ -908,7 +937,11 @@ mod tests {
     use super::*;
     use crate::journal::{
         frame::encode_frame_into,
-        segmented::manager::tests::{BoundedOpen, FaultedContext, check_interrupted_bounded_open},
+        segmented::manager::tests::{
+            BoundedOpen, DeferredContext, DeferredPrune, FaultedContext,
+            check_abandoned_deletion_reopens_sections, check_failed_deletion_is_fatal,
+            check_interrupted_bounded_open, check_start_prune_without_release_is_ready,
+        },
     };
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
@@ -1036,6 +1069,64 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    impl DeferredPrune for Journal<DeferredContext, u64> {
+        const PARTITION: &'static str = "deferred-prune";
+
+        async fn open(context: DeferredContext) -> Self {
+            let cfg = Config {
+                partition: Self::PARTITION.into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(64),
+                replay_buffer: NZUsize!(64),
+            };
+            init_journal(context, cfg).await.unwrap()
+        }
+
+        async fn fill(mut self, sections: Range<u64>) -> Self {
+            for section in sections {
+                (self, _, _) = self.append(section, &section).await.unwrap();
+            }
+            Self::sync_all(self).await.unwrap()
+        }
+
+        async fn start_prune(self, min: u64) -> Result<(Self, bool, Removal), Error> {
+            Self::start_prune(self, min).await
+        }
+
+        fn removals(&self) -> Removal {
+            Self::removals(self)
+        }
+
+        async fn wait_for_removals(&self) -> Result<(), Error> {
+            Self::wait_for_removals(self).await
+        }
+
+        async fn sync_all(self) -> Result<Self, Error> {
+            Self::sync_all(self).await
+        }
+
+        fn oldest_section(&self) -> Option<u64> {
+            Self::oldest_section(self)
+        }
+    }
+
+    #[test_traced]
+    fn test_abandoned_deletion_reopens_sections() {
+        check_abandoned_deletion_reopens_sections::<Journal<DeferredContext, u64>>();
+    }
+
+    #[test_traced]
+    fn test_failed_deletion_is_fatal() {
+        check_failed_deletion_is_fatal::<Journal<DeferredContext, u64>>();
+    }
+
+    #[test_traced]
+    fn test_start_prune_without_release_is_ready() {
+        check_start_prune_without_release_is_ready::<Journal<DeferredContext, u64>>();
+    }
 
     /// Writes sections whose section 1 has a torn interior page and returns their configuration.
     async fn torn_interior_page_config(
