@@ -229,21 +229,6 @@ fn sorted_contains_by<T, Q: Ord>(
     items.get(*cursor).is_some_and(|item| key(item) == target)
 }
 
-/// Iterates the items of `shards` in order, as one sequence, from its item at index `start`. A
-/// `start` at or past the number of items yields nothing.
-fn flatten_from<T>(shards: &[Vec<T>], mut start: usize) -> impl Iterator<Item = &T> {
-    let mut rest = shards.iter();
-    let mut head: &[T] = &[];
-    for shard in rest.by_ref() {
-        if start < shard.len() {
-            head = &shard[start..];
-            break;
-        }
-        start -= shard.len();
-    }
-    head.iter().chain(rest.flatten())
-}
-
 /// Maps every candidate and its operation through `map`, in the batches `strategy` plans.
 ///
 /// The first `split` candidates take their operations from the items of `committed`, in order,
@@ -278,9 +263,14 @@ where
         batches.map_collect_vec(
             |ranges| ranges,
             |range: Range<usize>| {
-                // The batch's operations start among the committed ones or past them.
+                // The batch's operations start among the committed ones or past them. The skip
+                // takes one step per shard, not one per operation.
                 let in_memory = candidates[range.start.max(split)..].iter().map(&memory);
-                let ops = flatten_from(committed, range.start).chain(in_memory);
+                let ops = committed
+                    .iter()
+                    .flatten()
+                    .skip(range.start)
+                    .chain(in_memory);
 
                 // The operations do not report how many remain, so the range sizes the results.
                 let mut mapped = Vec::with_capacity(range.len());
@@ -5359,19 +5349,6 @@ pub(crate) mod tests {
                 shard
             })
             .collect()
-    }
-
-    #[test]
-    fn flatten_from_matches_skip() {
-        for layout in SHARD_LAYOUTS {
-            let shards = counted_shards(layout, 0);
-            let total: u64 = layout.iter().map(|len| *len as u64).sum();
-            for start in 0..=total + 2 {
-                let items: Vec<u64> = flatten_from(&shards, start as usize).copied().collect();
-                let expected: Vec<u64> = (start..total).collect();
-                assert_eq!(items, expected, "shards of {layout:?} from {start}");
-            }
-        }
     }
 
     /// Maps candidates whose committed operations arrive in each shard layout and are followed by
