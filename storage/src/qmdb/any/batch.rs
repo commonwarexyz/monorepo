@@ -229,6 +229,73 @@ fn sorted_contains_by<T, Q: Ord>(
     items.get(*cursor).is_some_and(|item| key(item) == target)
 }
 
+/// Iterates the items of `shards` in order, as one sequence, from its item at index `start`. A
+/// `start` at or past the number of items yields nothing.
+fn flatten_from<T>(shards: &[Vec<T>], mut start: usize) -> impl Iterator<Item = &T> {
+    let mut rest = shards.iter();
+    let mut head: &[T] = &[];
+    for shard in rest.by_ref() {
+        if start < shard.len() {
+            head = &shard[start..];
+            break;
+        }
+        start -= shard.len();
+    }
+    head.iter().chain(rest.flatten())
+}
+
+/// Maps every candidate and its operation through `map`, in the batches `strategy` plans.
+///
+/// The first `split` candidates take their operations from the items of `committed`, in order,
+/// and `memory` returns the operation of each later candidate. Returns one vector of results per
+/// batch, whose concatenation follows candidate order.
+///
+/// # Panics
+///
+/// Panics if `split` exceeds the number of candidates or `committed` does not hold exactly
+/// `split` items.
+fn map_candidates<'a, L, O, R, S>(
+    candidates: &'a [L],
+    committed: &'a [Vec<O>],
+    split: usize,
+    strategy: &S,
+    memory: impl Fn(&'a L) -> &'a O + Sync,
+    map: impl Fn(&'a L, &'a O) -> R + Sync,
+) -> Vec<Vec<R>>
+where
+    L: Sync,
+    O: Sync,
+    R: Send,
+    S: Strategy,
+{
+    assert!(split <= candidates.len(), "split past the candidates");
+    assert_eq!(
+        committed.iter().map(Vec::len).sum::<usize>(),
+        split,
+        "one read per committed candidate"
+    );
+    strategy.run_batches(candidates.len(), NonZeroUsize::MIN, 1, |batches| {
+        batches.map_collect_vec(
+            |ranges| ranges,
+            |range: Range<usize>| {
+                // The batch's operations start among the committed ones or past them.
+                let in_memory = candidates[range.start.max(split)..].iter().map(&memory);
+                let ops = flatten_from(committed, range.start).chain(in_memory);
+
+                // The operations do not report how many remain, so the range sizes the results.
+                let mut mapped = Vec::with_capacity(range.len());
+                mapped.extend(
+                    candidates[range]
+                        .iter()
+                        .zip(ops)
+                        .map(|(candidate, op)| map(candidate, op)),
+                );
+                mapped
+            },
+        )
+    })
+}
+
 /// Returns whether `staged` holds an update resolved at `target`, advancing `cursor` past updates
 /// resolved below it. Successive calls must use non-decreasing `target`s.
 fn contains_staged<F: Family, U: update::Update>(
@@ -1327,15 +1394,13 @@ where
             // their operations follow those read from the database.
             let diff = &walked.diff;
             let ops = &walked.ops;
-            let memory = round.candidates[split..]
-                .iter()
-                .map(|loc| self.peek_uncommitted(*loc, ops));
-            let moves: Vec<Option<Move<F>>> = strategy.map_collect_vec(
-                zip_eq(
-                    round.candidates.iter(),
-                    round.committed.iter().flatten().chain(memory),
-                ),
-                |(loc, op)| op.key().and_then(|key| self.classify(diff, *loc, key)),
+            let moves = map_candidates(
+                &round.candidates,
+                &round.committed,
+                split,
+                strategy,
+                |loc| self.peek_uncommitted(*loc, ops),
+                |loc, op| op.key().and_then(|key| self.classify(diff, *loc, key)),
             );
 
             // The round decides at most its candidates, the remaining entries, and the active
@@ -1353,7 +1418,8 @@ where
             // Reach each active candidate in order, moving committed operations out of the read
             // and cloning in-memory ones.
             let mut reads = round.committed.into_iter().flatten();
-            for (at, (loc, mv)) in zip_eq(round.candidates, moves).enumerate() {
+            for (at, (loc, mv)) in zip_eq(round.candidates, moves.into_iter().flatten()).enumerate()
+            {
                 let read =
                     (at < split).then(|| reads.next().expect("one read per committed candidate"));
                 let Some(mv) = mv else {
@@ -5276,6 +5342,101 @@ pub(crate) mod tests {
                 assert_eq!(me.value(), re.value());
             }
         }
+    }
+
+    /// Shard lengths with empty shards at either end and between shards that hold items.
+    const SHARD_LAYOUTS: [&[usize]; 6] =
+        [&[], &[0], &[5], &[1, 2, 3], &[0, 2, 0, 0, 3, 0], &[4, 0, 1]];
+
+    /// Shards of the lengths in `layout` whose items count up from `first`.
+    fn counted_shards(layout: &[usize], first: u64) -> Vec<Vec<u64>> {
+        let mut next = first;
+        layout
+            .iter()
+            .map(|len| {
+                let shard = (next..next + *len as u64).collect();
+                next += *len as u64;
+                shard
+            })
+            .collect()
+    }
+
+    #[test]
+    fn flatten_from_matches_skip() {
+        for layout in SHARD_LAYOUTS {
+            let shards = counted_shards(layout, 0);
+            let total: u64 = layout.iter().map(|len| *len as u64).sum();
+            for start in 0..=total + 2 {
+                let items: Vec<u64> = flatten_from(&shards, start as usize).copied().collect();
+                let expected: Vec<u64> = (start..total).collect();
+                assert_eq!(items, expected, "shards of {layout:?} from {start}");
+            }
+        }
+    }
+
+    /// Maps candidates whose committed operations arrive in each shard layout and are followed by
+    /// in-memory ones, and returns the results for `explore` to compare across batch shapes.
+    fn check_candidate_mapping(strategy: &Explorer) -> Vec<Vec<(usize, u64)>> {
+        let mut outputs = Vec::new();
+        for layout in SHARD_LAYOUTS {
+            let split: usize = layout.iter().sum();
+            for in_memory in [0, 1, 6] {
+                // A committed operation is its candidate plus 1000, an in-memory one plus 2000.
+                let candidates: Vec<usize> = (0..split + in_memory).collect();
+                let committed = counted_shards(layout, 1000);
+                let memory: Vec<u64> = candidates.iter().map(|c| 2000 + *c as u64).collect();
+                let mapped: Vec<(usize, u64)> = map_candidates(
+                    &candidates,
+                    &committed,
+                    split,
+                    strategy,
+                    |c| {
+                        assert!(*c >= split, "a committed candidate has its read");
+                        &memory[*c]
+                    },
+                    |c, op| (*c, *op),
+                )
+                .into_iter()
+                .flatten()
+                .collect();
+
+                let expected: Vec<(usize, u64)> = candidates
+                    .iter()
+                    .map(|c| {
+                        let source = if *c < split { 1000 } else { 2000 };
+                        (*c, source + *c as u64)
+                    })
+                    .collect();
+                assert_eq!(
+                    mapped, expected,
+                    "shards of {layout:?} with {in_memory} in memory"
+                );
+                outputs.push(mapped);
+            }
+        }
+        outputs
+    }
+
+    #[test]
+    fn candidates_map_alike_in_every_batch_shape() {
+        // Each candidate meets its own operation in one batch, in the most batches the strategy
+        // plans, and in the seeded batch counts between them.
+        explore(check_candidate_mapping);
+    }
+
+    #[test]
+    #[should_panic(expected = "one read per committed candidate")]
+    fn map_candidates_rejects_a_missing_read() {
+        let candidates = [0usize, 1, 2];
+        let committed = vec![vec![1000u64]];
+        map_candidates(
+            &candidates,
+            &committed,
+            2,
+            &Sequential,
+            |_| unreachable!("the counts are checked before any operation is taken"),
+            |c, op| (*c, *op),
+        );
     }
 
     /// Single-step oracle for [`Candidates::fill`]: return the next floor candidate in
