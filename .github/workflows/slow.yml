@@ -235,7 +235,7 @@ jobs:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run miri tests
       run: |
-        just miri -p commonware-runtime -p commonware-utils -p commonware-p2p --partition slice:${{matrix.partition}}/12
+        just miri -p commonware-runtime -p commonware-utils -p commonware-p2p -p commonware-math --partition slice:${{matrix.partition}}/12
         just miri-lenient -p commonware-parallel --partition slice:${{matrix.partition}}/12
 
   Unsafe-Tests-Gate:

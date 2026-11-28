@@ -1,4 +1,6 @@
-use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Random, Ring, Space};
+use crate::algebra::{
+    Additive, CryptoGroup, Field, Multiplicative, Object, PairingGroup, Random, Ring, Space,
+};
 use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
 use core::{
     fmt::Debug,
@@ -254,11 +256,178 @@ impl arbitrary::Arbitrary<'_> for G {
     }
 }
 
+/// The group that [`G`] pairs with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct G2(F);
+
+impl Object for G2 {}
+
+impl<'a> Add<&'a Self> for G2 {
+    type Output = Self;
+
+    fn add(self, rhs: &'a Self) -> Self::Output {
+        Self(self.0 + &rhs.0)
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for G2 {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.0 += &rhs.0;
+    }
+}
+
+impl Neg for G2 {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self(-self.0)
+    }
+}
+
+impl<'a> Sub<&'a Self> for G2 {
+    type Output = Self;
+
+    fn sub(self, rhs: &'a Self) -> Self::Output {
+        Self(self.0 - &rhs.0)
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for G2 {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        self.0 -= &rhs.0;
+    }
+}
+
+impl Additive for G2 {
+    fn zero() -> Self {
+        Self(F::zero())
+    }
+}
+
+impl<'a> Mul<&'a F> for G2 {
+    type Output = Self;
+
+    fn mul(self, rhs: &'a F) -> Self::Output {
+        Self(self.0 * rhs)
+    }
+}
+
+impl<'a> MulAssign<&'a F> for G2 {
+    fn mul_assign(&mut self, rhs: &'a F) {
+        self.0 *= rhs;
+    }
+}
+
+impl Space<F> for G2 {}
+
+impl CryptoGroup for G2 {
+    type Scalar = F;
+
+    fn generator() -> Self {
+        Self(F::one())
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl arbitrary::Arbitrary<'_> for G2 {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(u.arbitrary()?))
+    }
+}
+
+/// The target group of pairings between [`G`] and [`G2`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GT(G);
+
+impl Object for GT {}
+
+impl<'a> Add<&'a Self> for GT {
+    type Output = Self;
+
+    fn add(self, rhs: &'a Self) -> Self::Output {
+        Self(self.0 + &rhs.0)
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for GT {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.0 += &rhs.0;
+    }
+}
+
+impl Neg for GT {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self(-self.0)
+    }
+}
+
+impl<'a> Sub<&'a Self> for GT {
+    type Output = Self;
+
+    fn sub(self, rhs: &'a Self) -> Self::Output {
+        Self(self.0 - &rhs.0)
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for GT {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        self.0 -= &rhs.0;
+    }
+}
+
+impl Additive for GT {
+    fn zero() -> Self {
+        Self(G::zero())
+    }
+}
+
+impl<'a> Mul<&'a F> for GT {
+    type Output = Self;
+
+    fn mul(self, rhs: &'a F) -> Self::Output {
+        Self(self.0 * rhs)
+    }
+}
+
+impl<'a> MulAssign<&'a F> for GT {
+    fn mul_assign(&mut self, rhs: &'a F) {
+        self.0 *= rhs;
+    }
+}
+
+impl Space<F> for GT {}
+
+impl CryptoGroup for GT {
+    type Scalar = F;
+
+    fn generator() -> Self {
+        Self(G::generator())
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl arbitrary::Arbitrary<'_> for GT {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(u.arbitrary()?))
+    }
+}
+
+impl PairingGroup for G {
+    type Twin = G2;
+    type Target = GT;
+
+    fn pairing(&self, other: &Self::Twin) -> Self::Target {
+        GT(*self * &other.0)
+    }
+}
+
 commonware_macros::stability_scope!(ALPHA {
     #[cfg(any(test, feature = "fuzz"))]
     pub mod fuzz {
         use super::*;
-        use crate::algebra::test_suites;
+        use crate::algebra::{Twin, test_suites};
         use arbitrary::{Arbitrary, Unstructured};
         use commonware_codec::Encode as _;
 
@@ -268,6 +437,8 @@ commonware_macros::stability_scope!(ALPHA {
             GCodec(G),
             FuzzField,
             FuzzSpace,
+            FuzzPairing,
+            FuzzPairingTwin,
         }
 
         impl Plan {
@@ -285,6 +456,12 @@ commonware_macros::stability_scope!(ALPHA {
                     Self::FuzzSpace => {
                         test_suites::fuzz_space::<F, G>(u)?;
                     }
+                    Self::FuzzPairing => {
+                        test_suites::fuzz_pairing_group::<G>(u)?;
+                    }
+                    Self::FuzzPairingTwin => {
+                        test_suites::fuzz_pairing_group::<Twin<G>>(u)?;
+                    }
                 }
                 Ok(())
             }
@@ -294,6 +471,18 @@ commonware_macros::stability_scope!(ALPHA {
         fn test_fuzz() {
             use commonware_invariants::minifuzz;
             minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
+        }
+
+        #[test]
+        fn test_fuzz_pairing() {
+            use commonware_invariants::minifuzz;
+            minifuzz::test(|u| Plan::FuzzPairing.run(u));
+        }
+
+        #[test]
+        fn test_fuzz_pairing_twin() {
+            use commonware_invariants::minifuzz;
+            minifuzz::test(|u| Plan::FuzzPairingTwin.run(u));
         }
     }
 });
@@ -325,5 +514,39 @@ mod test {
             CodecConformance<F>,
             CodecConformance<G>
         }
+    }
+}
+
+// `Twin`'s `msm` and batch pairing methods view a slice of twins as a slice of
+// `G2` through an unsafe cast, which Miri checks here.
+#[cfg(test)]
+#[commonware_macros::test_group("miri")]
+mod twin {
+    use super::*;
+    use crate::algebra::{Twin, msm_naive};
+    use commonware_parallel::Sequential;
+
+    #[test]
+    fn test_twin_slice_methods_match_single_element_methods() {
+        let lefts: Vec<Twin<G>> = (1u8..=3).map(|i| Twin::new(G2(F::from(i)))).collect();
+        let rights: Vec<G> = (4u8..=6).map(|i| G::generator() * &F::from(i)).collect();
+        let scalars: Vec<F> = (7u8..=9).map(F::from).collect();
+
+        let expected: Vec<GT> = lefts
+            .iter()
+            .zip(&rights)
+            .map(|(x, a)| x.pairing(a))
+            .collect();
+        let mut outputs = vec![GT::zero(); expected.len()];
+        Twin::<G>::pairings(&lefts, &rights, &mut outputs, &Sequential);
+        assert_eq!(outputs, expected);
+
+        let sum = expected.iter().fold(GT::zero(), |acc, out| acc + out);
+        assert_eq!(Twin::<G>::multi_pairing(&lefts, &rights, &Sequential), sum);
+
+        assert_eq!(
+            Twin::<G>::msm(&lefts, &scalars, &Sequential),
+            msm_naive(&lefts, &scalars)
+        );
     }
 }
