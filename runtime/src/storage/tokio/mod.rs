@@ -1,17 +1,20 @@
 use super::{Layout, Pending, create_header, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, Error};
 use commonware_formatting::{from_hex, hex};
-use commonware_utils::channel::oneshot;
+use commonware_utils::{
+    channel::oneshot,
+    sync::{AsyncMutex, Mutex},
+};
 #[cfg(not(target_os = "linux"))]
 use std::collections::HashSet;
 use std::{
+    collections::HashMap,
     fs,
     io::ErrorKind,
     ops::RangeInclusive,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
-use tokio::sync::Mutex;
 
 mod blob;
 
@@ -48,10 +51,13 @@ impl Config {
 /// An open stops trying direct I/O once its filesystem rejects `O_DIRECT`. While opening the
 /// descriptor fails for another reason, such as the descriptor limit, uncached reads keep retrying
 /// the open on their blocking threads before reading buffered.
+///
+/// Directory operations are ordered within each partition and run concurrently across
+/// partitions, the order [crate::Storage::start_remove_many] promises.
 #[derive(Clone)]
 pub struct Storage {
-    /// Serializes namespace operations and access to partition durability records.
-    lock: Arc<Mutex<Partitions>>,
+    /// Orders each partition's namespace operations and records partition durability.
+    partitions: Arc<Partitions>,
     /// Filesystem root and permitted on-disk header layouts.
     cfg: Config,
     /// Directory exclusion also retained by opened files and dispatched blocking operations.
@@ -60,59 +66,105 @@ pub struct Storage {
     pending: Arc<Pending>,
 }
 
-/// Partition directory durability tracked by this storage instance.
+/// One partition's queue of directory operations, which serves them in the order they joined.
+///
+/// It lives while an operation waits or runs on the partition and retires its entry in
+/// [Partitions::queues] with the last of them.
+struct Queue {
+    /// The partition's key in [Partitions::queues].
+    partition: String,
+    /// The registry holding this queue's entry.
+    partitions: Arc<Partitions>,
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        // An operation that joined the partition after this queue emptied has replaced the
+        // entry with a live one, which stays.
+        let mut queues = self.partitions.queues.lock();
+        if queues
+            .get(&self.partition)
+            .is_some_and(|queue| queue.strong_count() == 0)
+        {
+            queues.remove(&self.partition);
+        }
+    }
+}
+
+/// The directory operation queues and directory durability of this storage instance's
+/// partitions.
 #[derive(Default)]
 struct Partitions {
-    /// Partitions whose inherited directory changes are durable. Creation and removal maintain
-    /// this state under the same lock. Removal retires the entry before unlinking, and a blob
-    /// removal restores it once the partition directory is synced.
+    /// The queue of each partition with a waiting or running directory operation.
+    queues: Mutex<HashMap<String, Weak<AsyncMutex<Queue>>>>,
+    /// Partitions whose inherited directory changes are durable. Only the operation holding a
+    /// partition's turn reads or changes its entry. Removal retires the entry before
+    /// unlinking, and a blob removal restores it once the partition directory is synced.
     #[cfg(not(target_os = "linux"))]
-    synced: HashSet<PathBuf>,
+    synced: Mutex<HashSet<PathBuf>>,
     #[cfg(all(test, not(target_os = "linux")))]
-    sync_hook: tests::SyncHook,
+    sync_hook: Mutex<tests::SyncHook>,
 }
 
 impl Partitions {
+    /// Return `partition`'s queue from `queues`, starting one if no operation waits or runs on
+    /// the partition.
+    fn queue(
+        self: &Arc<Self>,
+        queues: &mut HashMap<String, Weak<AsyncMutex<Queue>>>,
+        partition: &str,
+    ) -> Arc<AsyncMutex<Queue>> {
+        if let Some(queue) = queues.get(partition).and_then(Weak::upgrade) {
+            return queue;
+        }
+        let queue = Arc::new(AsyncMutex::new(Queue {
+            partition: partition.to_string(),
+            partitions: self.clone(),
+        }));
+        queues.insert(partition.to_string(), Arc::downgrade(&queue));
+        queue
+    }
+
     /// Makes storage root entry changes durable, with test hooks to pause or fail
     /// before the filesystem sync.
-    fn sync_root(&mut self, root: &Path) -> Result<(), Error> {
+    fn sync_root(&self, root: &Path) -> Result<(), Error> {
         #[cfg(all(test, not(target_os = "linux")))]
-        self.sync_hook.run()?;
+        tests::SyncHook::run(&self.sync_hook)?;
         sync_dir(root)
     }
 
     /// Make a partition's directory entries durable before caching it. Supply
     /// `root` during blob creation to persist the partition's directory entry too.
     fn sync(
-        &mut self,
+        &self,
         path: impl AsRef<Path> + Into<PathBuf>,
         root: Option<&Path>,
     ) -> Result<(), Error> {
         #[cfg(all(test, not(target_os = "linux")))]
-        self.sync_hook.run()?;
+        tests::SyncHook::run(&self.sync_hook)?;
         sync_dir(path.as_ref())?;
         if let Some(root) = root {
             self.sync_root(root)?;
         }
 
         #[cfg(not(target_os = "linux"))]
-        self.synced.insert(path.into());
+        self.synced.lock().insert(path.into());
         Ok(())
     }
 
     /// Retire a partition's durability record before changing its directory entries.
     #[allow(clippy::missing_const_for_fn)]
-    fn invalidate(&mut self, _path: &Path) {
+    fn invalidate(&self, _path: &Path) {
         #[cfg(not(target_os = "linux"))]
-        self.synced.remove(_path);
+        self.synced.lock().remove(_path);
     }
 
     /// Make a partition's inherited directory entries durable on first access.
     #[allow(clippy::missing_const_for_fn)]
-    fn sync_once(&mut self, _path: &Path) -> Result<(), Error> {
+    fn sync_once(&self, _path: &Path) -> Result<(), Error> {
         #[cfg(not(target_os = "linux"))]
         {
-            if self.synced.contains(_path) {
+            if self.synced.lock().contains(_path) {
                 return Ok(());
             }
 
@@ -138,24 +190,32 @@ impl Storage {
             )
         });
         Self {
-            lock: Arc::new(Mutex::new(Partitions::default())),
+            partitions: Arc::new(Partitions::default()),
             cfg,
             hold,
             pending: Arc::new(Pending::default()),
         }
     }
 
-    /// Run `f` to completion on the blocking pool while owning the filesystem
-    /// lock and the directory hold, so dropping the returned future neither
+    /// Return `partition`'s queue, starting one if no operation waits or runs on the partition.
+    fn queue(&self, partition: &str) -> Arc<AsyncMutex<Queue>> {
+        self.partitions
+            .queue(&mut self.partitions.queues.lock(), partition)
+    }
+
+    /// Run `f` to completion on the blocking pool while owning a turn of
+    /// `queue` and the directory hold, so dropping the returned future neither
     /// abandons `f` mid-sequence nor lets a successor storage instance
     /// initialize before `f` has finished. Results are delivered or dropped before
-    /// releasing the filesystem lock. A closure dropped unstarted at runtime
+    /// releasing the turn. A closure dropped unstarted at runtime
     /// shutdown yields [Error::Closed].
     async fn dispatch<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&mut Partitions) -> Result<T, Error> + Send + 'static,
+        queue: Arc<AsyncMutex<Queue>>,
+        f: impl FnOnce(&Partitions) -> Result<T, Error> + Send + 'static,
     ) -> Result<T, Error> {
-        let guard = self.lock.clone().lock_owned().await;
+        let turn = queue.lock_owned().await;
+        let partitions = self.partitions.clone();
         let hold = self.hold.clone();
         let (sender, receiver) = oneshot::channel();
         #[cfg(test)]
@@ -163,8 +223,8 @@ impl Storage {
         let task = tokio::task::spawn_blocking(move || {
             {
                 let _hold = hold;
-                let mut guard = guard;
-                let _ = sender.send(f(&mut guard));
+                let _turn = turn;
+                let _ = sender.send(f(&partitions));
             }
             #[cfg(test)]
             if let Some((entered, released)) = after_dispatch {
@@ -192,6 +252,7 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         // Construct the full path
+        let queue = self.queue(partition);
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
@@ -206,7 +267,7 @@ impl crate::Storage for Storage {
         // clobber a successor's blob) or leave a later open trusting a header
         // whose syncs never ran.
         let (blob, mut logical_size, blob_version, wait, owed) = self
-            .dispatch(move |partitions| {
+            .dispatch(queue, move |partitions| {
                 let parent = match path.parent() {
                     Some(parent) => parent,
                     None => return Err(Error::PartitionCreationFailed(partition)),
@@ -267,13 +328,13 @@ impl crate::Storage for Storage {
                         file.metadata().map_err(|_| Error::ReadFailed)?.len() - data_offset;
                 }
 
-                // Construct the blob while still holding the filesystem lock.
+                // Construct the blob while still holding the partition's turn.
                 let blob = Self::Blob::new(file, data_offset, hold, generation);
                 Ok((blob, logical_size, blob_version, wait, owed))
             })
             .await?;
 
-        // Outside the namespace lock, wait for any outstanding work, then flush any debt and read
+        // Outside the partition's turn, wait for any outstanding work, then flush any debt and read
         // the final file length.
         if owed {
             Pending::wait(wait).await?;
@@ -285,6 +346,7 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
 
+        let queue = self.queue(partition);
         let path = self.cfg.storage_directory.join(partition);
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
@@ -294,7 +356,7 @@ impl crate::Storage for Storage {
         // Run the removal to completion: dropping this future must not abandon
         // the sequence between an unlink and the directory sync that makes it
         // durable.
-        self.dispatch(move |partitions| {
+        self.dispatch(queue, move |partitions| {
             // Invalidate before unlinking so a failed removal cannot leave the
             // partition marked durable.
             partitions.invalidate(&path);
@@ -329,9 +391,10 @@ impl crate::Storage for Storage {
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         super::validate_partition_name(partition)?;
 
+        let queue = self.queue(partition);
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
-        self.dispatch(move |partitions| {
+        self.dispatch(queue, move |partitions| {
             // Distinguish missing partitions from other filesystem failures.
             let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
                 ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
@@ -398,12 +461,16 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     impl SyncHook {
-        pub(super) fn run(&mut self) -> Result<(), Error> {
-            if let Some((entered, released)) = self.pause.take() {
+        /// Apply the controls armed in `hook`, which stays unlocked during a pause so syncs in
+        /// other partitions can run.
+        pub(super) fn run(hook: &Mutex<Self>) -> Result<(), Error> {
+            let pause = hook.lock().pause.take();
+            if let Some((entered, released)) = pause {
                 let _ = entered.send(());
                 let _ = released.recv();
             }
-            if let Some(error) = self.fail.take() {
+            let fail = hook.lock().fail.take();
+            if let Some(error) = fail {
                 return Err(error);
             }
             Ok(())
@@ -523,6 +590,78 @@ mod tests {
             let storage = Storage::new(config);
             run_storage_tests(context, storage).await;
         });
+    }
+
+    /// A partition's queue is retired once nothing waits or runs on it, whether its last
+    /// operation finished or was dropped while waiting.
+    #[tokio::test]
+    async fn test_idle_partition_queue_is_retired() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_queue_idle_{}", random_suffix()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            for partition in ["left", "right"] {
+                drop(storage.open(partition, b"a").await.unwrap());
+            }
+            let batch = vec![
+                ("left".to_string(), b"a".to_vec()),
+                ("right".to_string(), b"a".to_vec()),
+            ];
+            storage.start_remove_many(batch, None).await.await.unwrap();
+            assert!(matches!(
+                storage.scan("missing").await,
+                Err(Error::PartitionMissing(_))
+            ));
+
+            // Drop a scan that queued behind a held turn.
+            let turn = storage.queue("left").lock_owned().await;
+            let mut scan = Box::pin(storage.scan("left"));
+            assert!((&mut scan).now_or_never().is_none());
+            drop(scan);
+            drop(turn);
+
+            // A finished operation releases its queue on its blocking thread, shortly after its
+            // result is delivered.
+            while !storage.partitions.queues.lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// While an operation holds one partition's turn, later operations on that partition wait
+    /// and another partition still creates a blob and scans.
+    #[tokio::test]
+    async fn test_partitions_progress_independently() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory = env::temp_dir().join(format!(
+                "storage_tokio_queue_independent_{}",
+                random_suffix()
+            ));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            drop(storage.open("held", b"a").await.unwrap());
+
+            // Hold the first partition's turn, as a running operation does.
+            let turn = storage.queue("held").lock_owned().await;
+            let mut held = Box::pin(storage.scan("held"));
+            assert!((&mut held).now_or_never().is_none());
+
+            // The other partition creates a blob and scans while the held partition waits.
+            drop(storage.open("free", b"a").await.unwrap());
+            assert_eq!(storage.scan("free").await.unwrap(), vec![b"a".to_vec()]);
+            assert!((&mut held).now_or_never().is_none());
+
+            // Releasing the turn lets the waiting operation run.
+            drop(turn);
+            assert_eq!(held.await.unwrap(), vec![b"a".to_vec()]);
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     /// Dropping the `start_sync` receiver must not break the blob: the handle stays
@@ -791,8 +930,8 @@ mod tests {
                 assert!(futures::poll!(&mut first).is_pending());
                 entering.await.unwrap();
 
-                // A completed filesystem operation must release the namespace lock even
-                // while its caller has not polled the result.
+                // A completed filesystem operation must release its partition even while
+                // its caller has not polled the result.
                 let independent = storage.open("partition", b"independent").await;
 
                 // Canceling delivery must drop the unclaimed blob and release its name
@@ -844,7 +983,7 @@ mod tests {
     }
 
     /// Dropping an open future at any await point must leave the blob openable: creation
-    /// runs to completion on a task that owns the filesystem lock, so a retry serializes
+    /// runs to completion on a task that owns the partition's turn, so a retry serializes
     /// behind it and never observes (or clobbers) a half-created blob.
     #[tokio::test]
     async fn test_open_dropped_mid_creation() {
@@ -1111,10 +1250,10 @@ mod tests {
             let storage = Storage::new(Config::new(directory.clone(), Layout::ALL));
             crate::storage::sync(&directory).unwrap();
 
-            // Pause the first directory barrier while it owns the namespace lock.
+            // Pause the first directory barrier while it owns the partition's turn.
             let (entered, entering) = oneshot::channel();
             let (release, gate) = mpsc::channel();
-            storage.lock.lock().await.sync_hook.pause = Some((entered, gate));
+            storage.partitions.sync_hook.lock().pause = Some((entered, gate));
             {
                 let mut scan = Box::pin(storage.scan("partition"));
                 assert!((&mut scan).now_or_never().is_none());
@@ -1136,10 +1275,10 @@ mod tests {
                 }
                 assert!(next.await.unwrap().is_empty());
             }
-            assert!(storage.lock.lock().await.synced.contains(&partition));
+            assert!(storage.partitions.synced.lock().contains(&partition));
 
             // A cached scan leaves the failure armed for the other partition's first barrier.
-            storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+            storage.partitions.sync_hook.lock().fail = Some(Error::WriteFailed);
             assert!(storage.scan("partition").await.unwrap().is_empty());
             assert!(matches!(
                 storage.scan("other").await,
@@ -1150,7 +1289,7 @@ mod tests {
                 storage.scan("missing").await,
                 Err(Error::PartitionMissing(_))
             ));
-            assert_eq!(storage.lock.lock().await.synced.len(), 2);
+            assert_eq!(storage.partitions.synced.lock().len(), 2);
 
             drop(storage);
             fs::remove_dir_all(directory).unwrap();
@@ -1168,16 +1307,16 @@ mod tests {
         fs::create_dir_all(&partition).unwrap();
         let storage = Storage::new(Config::new(directory.clone(), Layout::ALL));
         crate::storage::sync(&directory).unwrap();
-        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+        storage.partitions.sync_hook.lock().fail = Some(Error::WriteFailed);
 
         assert!(matches!(
             storage.scan("partition").await,
             Err(Error::WriteFailed)
         ));
-        assert!(!storage.lock.lock().await.synced.contains(&partition));
+        assert!(!storage.partitions.synced.lock().contains(&partition));
 
         assert!(storage.scan("partition").await.unwrap().is_empty());
-        assert!(storage.lock.lock().await.synced.contains(&partition));
+        assert!(storage.partitions.synced.lock().contains(&partition));
 
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
@@ -1201,13 +1340,13 @@ mod tests {
         crate::storage::sync(&directory).unwrap();
         let (blob, size) = storage.open("partition", b"blob").await.unwrap();
         assert_eq!(size, 0);
-        assert!(storage.lock.lock().await.synced.contains(&partition));
+        assert!(storage.partitions.synced.lock().contains(&partition));
         drop(blob);
 
         // A cached reopen must leave the sync failure armed.
-        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+        storage.partitions.sync_hook.lock().fail = Some(Error::WriteFailed);
         drop(storage.open("partition", b"blob").await.unwrap());
-        assert!(storage.lock.lock().await.sync_hook.fail.is_some());
+        assert!(storage.partitions.sync_hook.lock().fail.is_some());
 
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
@@ -1235,7 +1374,7 @@ mod tests {
 
         // Creation synchronizes the partition, so its first scan can use the cache.
         drop(storage.open("created", b"blob").await.unwrap());
-        assert!(storage.lock.lock().await.synced.contains(&created));
+        assert!(storage.partitions.synced.lock().contains(&created));
         assert_eq!(
             storage.scan("created").await.unwrap(),
             vec![b"blob".to_vec()]
@@ -1243,7 +1382,7 @@ mod tests {
 
         // Removing an inherited blob also synchronizes its partition before caching it.
         storage.remove("inherited", Some(b"blob")).await.unwrap();
-        assert!(storage.lock.lock().await.synced.contains(&inherited));
+        assert!(storage.partitions.synced.lock().contains(&inherited));
         assert!(storage.scan("inherited").await.unwrap().is_empty());
 
         // Removing a partition retires its cache entry before the name is reused.
@@ -1256,9 +1395,9 @@ mod tests {
             storage.scan("retired").await,
             Err(Error::PartitionMissing(_))
         ));
-        assert!(!storage.lock.lock().await.synced.contains(&retired));
+        assert!(!storage.partitions.synced.lock().contains(&retired));
         drop(storage.open("retired", b"new").await.unwrap());
-        assert!(storage.lock.lock().await.synced.contains(&retired));
+        assert!(storage.partitions.synced.lock().contains(&retired));
         assert_eq!(
             storage.scan("retired").await.unwrap(),
             vec![b"new".to_vec()]
@@ -1268,7 +1407,7 @@ mod tests {
             storage.remove("missing", Some(b"blob")).await,
             Err(Error::BlobMissing(_, _))
         ));
-        assert!(!storage.lock.lock().await.synced.contains(&missing));
+        assert!(!storage.partitions.synced.lock().contains(&missing));
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1293,20 +1432,20 @@ mod tests {
             storage.scan("partition").await.unwrap(),
             vec![b"blob".to_vec()]
         );
-        assert!(storage.lock.lock().await.synced.contains(&partition));
+        assert!(storage.partitions.synced.lock().contains(&partition));
 
         // The unlink lands, then the directory sync fails.
-        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+        storage.partitions.sync_hook.lock().fail = Some(Error::WriteFailed);
         assert!(matches!(
             storage.remove("partition", Some(b"blob")).await,
             Err(Error::WriteFailed)
         ));
         assert!(!partition.join(hex(b"blob")).exists());
-        assert!(!storage.lock.lock().await.synced.contains(&partition));
+        assert!(!storage.partitions.synced.lock().contains(&partition));
 
         // A later scan must finish the missing barrier before caching the empty partition.
         assert!(storage.scan("partition").await.unwrap().is_empty());
-        assert!(storage.lock.lock().await.synced.contains(&partition));
+        assert!(storage.partitions.synced.lock().contains(&partition));
 
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
@@ -1409,12 +1548,12 @@ mod tests {
 
         let storage = Storage::new(config);
         crate::storage::sync(&directory).unwrap();
-        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+        storage.partitions.sync_hook.lock().fail = Some(Error::WriteFailed);
         assert!(matches!(
             storage.open("partition", b"blob").await,
             Err(Error::WriteFailed)
         ));
-        assert!(storage.lock.lock().await.synced.is_empty());
+        assert!(storage.partitions.synced.lock().is_empty());
         assert_eq!(storage.pending.completions(), 0);
         assert!(storage.pending.owes("partition", b"blob"));
 
@@ -1423,10 +1562,9 @@ mod tests {
         assert_eq!(size, 0);
         assert!(
             storage
-                .lock
-                .lock()
-                .await
+                .partitions
                 .synced
+                .lock()
                 .contains(&directory.join("partition"))
         );
         assert_eq!(storage.pending.completions(), 1);
