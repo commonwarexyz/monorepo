@@ -5,12 +5,13 @@ use crate::{
     scenarios::recording_resolver::{RecordingResolver, init_injectable},
 };
 use arbitrary::Arbitrary;
+use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_codec::Encode as _;
 use commonware_consensus::{
-    Heightable, Reporter as _,
+    Heightable, Reporter,
     marshal::{
-        Config, Identifier, Start,
+        Config, Identifier, Start, Update,
         ancestry::Ancestry as _,
         core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{
@@ -46,7 +47,14 @@ use commonware_storage::{
 };
 use commonware_utils::{FuzzRng, NZU64, NZUsize, non_empty, vec::NonEmptyVec};
 use futures::StreamExt as _;
-use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 /// The store fuzzer runs on the cheap certificate mock; `K` is unchanged
 /// (ed25519), so only the certificate scheme differs from the harness default.
@@ -56,6 +64,42 @@ type StoreVariant = Standard<B>;
 /// The actor's resolver, held by the harness so scripted deliveries can answer
 /// the fetches it records.
 type StoreResolver = RecordingResolver<SimplexCertificateMock>;
+
+/// The actor's application: the mock, with acknowledgements the driver can hold.
+#[derive(Clone)]
+struct StoreApplication {
+    inner: Application<B>,
+    hold: Arc<AtomicBool>,
+}
+
+impl Default for StoreApplication {
+    fn default() -> Self {
+        Self {
+            inner: Application::manual_ack(),
+            hold: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl StoreApplication {
+    /// Acknowledges every block the application holds, oldest first.
+    fn acknowledge_all(&self) {
+        while self.inner.acknowledge_next().is_some() {}
+    }
+}
+
+impl Reporter for StoreApplication {
+    type Activity = Update<B>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        let block = matches!(activity, Update::Block(..));
+        let feedback = self.inner.report(activity);
+        if block && !self.hold.load(Ordering::Relaxed) {
+            self.acknowledge_all();
+        }
+        feedback
+    }
+}
 
 /// Certificate-mock port of the harness prunable-validator setup: identical
 /// wiring, with the BLS scheme replaced by the certificate mock and the
@@ -72,7 +116,7 @@ async fn setup_prunable_validator_cert_mock(
 ) -> (
     Mailbox<CertScheme, StoreVariant>,
     buffered::Mailbox<K, B>,
-    Application<B>,
+    StoreApplication,
     Handle<()>,
     StoreResolver,
 ) {
@@ -162,7 +206,7 @@ async fn setup_prunable_validator_cert_mock(
         config,
     )
     .await;
-    let application = Application::<B>::default();
+    let application = StoreApplication::default();
     let handle = if unbuffered {
         actor.start_unbuffered(application.clone(), (receiver, resolver.clone()))
     } else {
@@ -192,6 +236,8 @@ const MAX_ANCESTRY_STEPS: usize = NUM_BLOCKS as usize + 2;
 /// Actor mailbox capacity; a burst longer than this spills into the overflow
 /// policy that coalesces hints, floors, and prunes.
 const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
+/// Settle periods the driver waits for a block the actor owes the application.
+const DISPATCH_STEPS: usize = 5;
 
 fn block_idx(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<u8> {
     u.int_in_range(0..=((NUM_BLOCKS - 1) as u8))
@@ -335,6 +381,66 @@ pub enum StoreOp {
     GetVerified {
         block_idx: u8,
     },
+    /// Holds application acknowledgements, or acknowledges every held block
+    /// and stops holding.
+    HoldAcks {
+        hold: bool,
+    },
+    /// Acknowledges up to `count` held blocks, oldest first, one settle
+    /// period apart.
+    AckBlocks {
+        count: u8,
+    },
+    /// Builds a floor that waits for a pruned anchor while the round floor lags
+    /// behind the processed height, then (unless `waiting`) reports the
+    /// finalization at the processed height.
+    LagFloor {
+        waiting: bool,
+    },
+}
+
+/// First floor of [`StoreOp::LagFloor`]. The anchor of its second floor is one
+/// block above, the last height of the first archive section, so one clamped
+/// prune removes it and keeps the processed block.
+const LAG_FLOOR_BLOCK: u8 = 7;
+
+/// The operations [`StoreOp::LagFloor`] stands for.
+fn lag_floor_steps(waiting: bool) -> Vec<StoreOp> {
+    let floor = LAG_FLOOR_BLOCK;
+    let (anchor, processed, next) = (floor + 1, floor + 2, floor + 3);
+    let mut steps = vec![
+        StoreOp::SeedBlock { block_idx: floor },
+        StoreOp::SetFloor {
+            block_idx: floor,
+            late_round: false,
+        },
+        StoreOp::HoldAcks { hold: true },
+        StoreOp::SeedBlock {
+            block_idx: processed,
+        },
+        StoreOp::SeedBlock { block_idx: next },
+        StoreOp::ReportFinalization { block_idx: next },
+        StoreOp::DeliverBlock {
+            block_idx: anchor,
+            annotation: DeliverAnnotation::Finalized,
+        },
+        StoreOp::AckBlocks { count: 2 },
+        StoreOp::Prune {
+            block_idx: processed,
+            clamp: true,
+        },
+        StoreOp::SetFloor {
+            block_idx: anchor,
+            late_round: false,
+        },
+        StoreOp::AckBlocks { count: 1 },
+    ];
+    if !waiting {
+        steps.push(StoreOp::ReportFinalization {
+            block_idx: processed,
+        });
+    }
+    steps
 }
 
 /// Local annotation of a scripted block delivery, mirroring the block-bearing
@@ -441,8 +547,17 @@ impl Arbitrary<'_> for StoreOp {
                 bounded: u.arbitrary()?,
                 serve: u.arbitrary()?,
             },
-            230..=255 => Self::GetVerified {
+            230..=243 => Self::GetVerified {
                 block_idx: block_idx(u)?,
+            },
+            244..=249 => Self::LagFloor {
+                waiting: u.arbitrary()?,
+            },
+            250..=252 => Self::HoldAcks {
+                hold: u.arbitrary()?,
+            },
+            253..=255 => Self::AckBlocks {
+                count: u.int_in_range(1..=NUM_BLOCKS as u8)?,
             },
             _ => Self::Subscribe {
                 block_idx: block_idx(u)?,
@@ -740,8 +855,14 @@ impl StoreTrace {
 
 /// Crypto: `SimplexCertificateMock`. Marshal: standard, store driven directly
 /// below the wrapper, buffered or unbuffered from fuzz input. Cluster: single
-/// validator, prunable archives. Liveness: not checked. App: none (plain
-/// delivery sink).
+/// validator, prunable archives. Liveness: only SF-1, checked in
+/// `ReportFinalization`: when every floor set since the last restart is at or
+/// below the reported round, the application holds no block, the reported block
+/// is local at or below the processed height and the next block is stored, a
+/// block must reach the application, or the processed height must rise, within
+/// `DISPATCH_STEPS` settle periods; otherwise it panics with `SF-1 violated:`.
+/// App: the marshal mock, acknowledging each block on delivery unless the input
+/// holds acknowledgements (`HoldAcks`, `AckBlocks`).
 pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
     let _ = run_store(input, &StoreHooks::default());
 }
@@ -757,6 +878,7 @@ pub(crate) fn run_store(input: MarshalActorStoreInput, hooks: &StoreHooks) -> St
     executor.start(|mut context| async move {
         let mut trace = StoreTrace::default();
         let mut model = StoreModel::default();
+        let mut newest_floor: Option<View> = None;
         let (participants, schemes) =
             SimplexCertificateMock::setup(&mut context, NAMESPACE, NUM_VALIDATORS);
         let oracle = setup_network_with_participants(
@@ -837,8 +959,13 @@ pub(crate) fn run_store(input: MarshalActorStoreInput, hooks: &StoreHooks) -> St
         trace.record(|| StoreEvent::TimedRegistered { label: "ancestry" });
         let clock = Arc::new(ancestry_context);
 
-        for (op_index, op) in input.ops.into_iter().enumerate() {
+        let steps = input.ops.into_iter().flat_map(|op| match op {
+            StoreOp::LagFloor { waiting } => lag_floor_steps(waiting),
+            op => vec![op],
+        });
+        for (op_index, op) in steps.enumerate() {
             match op {
+                StoreOp::LagFloor { .. } => unreachable!("expanded into its steps"),
                 StoreOp::SeedBlock { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
                     let persisted = mailbox
@@ -848,9 +975,53 @@ pub(crate) fn run_store(input: MarshalActorStoreInput, hooks: &StoreHooks) -> St
                     assert!(persisted);
                 }
                 StoreOp::ReportFinalization { block_idx } => {
+                    let block = &canonical[block_index(block_idx)];
                     let finalization = finalizations[block_index(block_idx)].clone();
+                    let view = finalization.round().view();
+                    // The actor owes the application the next block when every floor
+                    // set since the last restart is at or below this round, the
+                    // application holds no block, the reported block is local at or
+                    // below the processed height, and the next block is stored.
+                    let mut owed = None;
+                    if newest_floor.is_some_and(|floor| floor <= view)
+                        && application.inner.pending_ack_heights().is_empty()
+                    {
+                        let processed = mailbox
+                            .get_processed()
+                            .await
+                            .map_or(Height::zero(), |processed| processed.height());
+                        if block.height() <= processed
+                            && mailbox.get_block(&block.digest()).await.is_some()
+                            && mailbox.get_block(processed.next()).await.is_some()
+                        {
+                            owed = Some((processed, application.inner.delivered().len()));
+                        }
+                    }
                     model.finalization(block_index(block_idx), finalization.round());
-                    mailbox.report(Activity::Finalization(finalization));
+                    let feedback = mailbox.report(Activity::Finalization(finalization));
+                    if let Some((processed, delivered)) = owed.filter(|_| feedback == Feedback::Ok)
+                    {
+                        let mut resumed = false;
+                        for _ in 0..DISPATCH_STEPS {
+                            context.sleep(EVENT_SETTLE).await;
+                            let now = mailbox
+                                .get_processed()
+                                .await
+                                .map_or(Height::zero(), |processed| processed.height());
+                            if now > processed || application.inner.delivered().len() > delivered {
+                                resumed = true;
+                                break;
+                            }
+                        }
+                        assert!(
+                            resumed,
+                            "SF-1 violated: no block reached the application after the round \
+                             floor passed every floor set, with height {} stored above the \
+                             processed height {}",
+                            processed.next().get(),
+                            processed.get(),
+                        );
+                    }
                 }
                 StoreOp::GetBlock {
                     block_idx,
@@ -920,6 +1091,7 @@ pub(crate) fn run_store(input: MarshalActorStoreInput, hooks: &StoreHooks) -> St
                         finalizations[block_index(block_idx)].clone()
                     };
                     model.finalization(block_index(block_idx), finalization.round());
+                    newest_floor = newest_floor.max(Some(finalization.round().view()));
                     mailbox.set_floor(finalization);
                 }
                 StoreOp::HintFinalized { block_idx, targets } => {
@@ -935,6 +1107,8 @@ pub(crate) fn run_store(input: MarshalActorStoreInput, hooks: &StoreHooks) -> St
                             5 => mailbox.prune(height),
                             6 => {
                                 model.finalization(idx, finalizations[idx].round());
+                                newest_floor =
+                                    newest_floor.max(Some(finalizations[idx].round().view()));
                                 mailbox.set_floor(finalizations[idx].clone());
                             }
                             7 => {
@@ -1063,10 +1237,11 @@ pub(crate) fn run_store(input: MarshalActorStoreInput, hooks: &StoreHooks) -> St
                     actor_handle = setup.3;
                     resolver = setup.4;
                     model.verified_since_restart = [false; NUM_BLOCKS as usize];
+                    newest_floor = None;
                 }
                 StoreOp::ObserveApplication => {
-                    let _ = application.tip();
-                    let _ = application.blocks();
+                    let _ = application.inner.tip();
+                    let _ = application.inner.blocks();
                     let _ = mailbox.get_processed().await;
                 }
                 StoreOp::DirectPutBlock { block_idx } => {
@@ -1312,6 +1487,20 @@ pub(crate) fn run_store(input: MarshalActorStoreInput, hooks: &StoreHooks) -> St
                     drop(stream);
                     trace.record(|| StoreEvent::AncestryDone { end, polls });
                 }
+                StoreOp::HoldAcks { hold } => {
+                    application.hold.store(hold, Ordering::Relaxed);
+                    if !hold {
+                        application.acknowledge_all();
+                    }
+                }
+                StoreOp::AckBlocks { count } => {
+                    for _ in 0..count {
+                        if application.inner.acknowledge_next().is_none() {
+                            break;
+                        }
+                        context.sleep(EVENT_SETTLE).await;
+                    }
+                }
                 StoreOp::GetVerified { block_idx } => {
                     let idx = block_index(block_idx);
                     let block = &canonical[idx];
@@ -1363,6 +1552,60 @@ mod ancestry_acceptance;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lag_floor_steps_are_the_recipe() {
+        let recipe = vec![
+            StoreOp::SeedBlock { block_idx: 7 },
+            StoreOp::SetFloor {
+                block_idx: 7,
+                late_round: false,
+            },
+            StoreOp::HoldAcks { hold: true },
+            StoreOp::SeedBlock { block_idx: 9 },
+            StoreOp::SeedBlock { block_idx: 10 },
+            StoreOp::ReportFinalization { block_idx: 10 },
+            StoreOp::DeliverBlock {
+                block_idx: 8,
+                annotation: DeliverAnnotation::Finalized,
+            },
+            StoreOp::AckBlocks { count: 2 },
+            StoreOp::Prune {
+                block_idx: 9,
+                clamp: true,
+            },
+            StoreOp::SetFloor {
+                block_idx: 8,
+                late_round: false,
+            },
+            StoreOp::AckBlocks { count: 1 },
+            StoreOp::ReportFinalization { block_idx: 9 },
+        ];
+        assert_eq!(
+            format!("{:?}", lag_floor_steps(false)),
+            format!("{recipe:?}")
+        );
+        assert_eq!(
+            format!("{:?}", lag_floor_steps(true)),
+            format!("{:?}", &recipe[..11])
+        );
+    }
+
+    #[test]
+    fn lag_floor_selector_band() {
+        for selector in 0..=255u8 {
+            for waiting in [0u8, 1] {
+                let bytes = [selector, waiting];
+                let op = StoreOp::arbitrary(&mut arbitrary::Unstructured::new(&bytes)).unwrap();
+                let lag = matches!(op, StoreOp::LagFloor { waiting: w } if w == (waiting == 1));
+                assert_eq!(
+                    lag,
+                    (244..=249).contains(&selector),
+                    "selector {selector}, byte {waiting}: {op:?}"
+                );
+            }
+        }
+    }
 
     /// Runs `ops` in one actor mode and returns the recorded events.
     fn run_ops(ops: Vec<StoreOp>, unbuffered: bool) -> Vec<StoreEvent> {

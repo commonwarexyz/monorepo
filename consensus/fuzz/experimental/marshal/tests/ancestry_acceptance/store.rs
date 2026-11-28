@@ -36,6 +36,9 @@ enum OpTag {
     DirectLastCertificate,
     Ancestry,
     GetVerified,
+    LagFloor,
+    HoldAcks,
+    AckBlocks,
 }
 
 fn tag(op: &StoreOp) -> OpTag {
@@ -68,6 +71,9 @@ fn tag(op: &StoreOp) -> OpTag {
         StoreOp::DirectLastCertificate => OpTag::DirectLastCertificate,
         StoreOp::Ancestry { .. } => OpTag::Ancestry,
         StoreOp::GetVerified { .. } => OpTag::GetVerified,
+        StoreOp::LagFloor { .. } => OpTag::LagFloor,
+        StoreOp::HoldAcks { .. } => OpTag::HoldAcks,
+        StoreOp::AckBlocks { .. } => OpTag::AckBlocks,
     }
 }
 
@@ -100,7 +106,10 @@ fn expected_selector(selector: u8) -> (OpTag, usize) {
         185..=189 => (OpTag::Subscribe, 2),
         190..=199 => (OpTag::DeliverBlock, 4),
         200..=229 => (OpTag::Ancestry, 3),
-        230..=255 => (OpTag::GetVerified, 1),
+        230..=243 => (OpTag::GetVerified, 1),
+        244..=249 => (OpTag::LagFloor, 1),
+        250..=252 => (OpTag::HoldAcks, 1),
+        253..=255 => (OpTag::AckBlocks, 1),
     }
 }
 
