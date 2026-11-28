@@ -20,7 +20,7 @@ use crate::{
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Error as RError, Handle};
+use commonware_runtime::{Error as RError, Handle, Removal};
 use futures::FutureExt as _;
 use std::sync::{Arc, Weak};
 
@@ -546,7 +546,7 @@ where
     /// Bounded initialization and compact sync can only use witnesses that survive. The current
     /// commit's witness always survives. A pending compact-sync import is journaled first. The
     /// current state is durable when this method returns. Storage may delete the dropped
-    /// witnesses later, so a reopen after a crash can still find them.
+    /// witnesses later (see [`Self::removals`]), so a reopen after a crash can still find them.
     #[tracing::instrument(
         name = "qmdb.compact.db.prune",
         level = "info",
@@ -564,6 +564,25 @@ where
         (open.journal, _) = open.journal.prune(pos).await?;
         self.storage = Storage::Open(open.sync().await?);
         Ok(self)
+    }
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    /// Deletion may continue after a prune returns. A pending compact-sync import has released
+    /// nothing.
+    pub fn removals(&self) -> Removal {
+        match &self.storage {
+            Storage::Open(open) => open.journal.removals(),
+            Storage::Replacing(_) => Removal::ready(Ok(())),
+        }
+    }
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error<F>> {
+        match &self.storage {
+            Storage::Open(open) => Ok(open.journal.wait_for_removals().await?),
+            Storage::Replacing(_) => Ok(()),
+        }
     }
 
     /// Destroy all persisted state associated with this database.
@@ -986,7 +1005,10 @@ pub(crate) mod tests {
         Blob as _, Runner as _, Spawner as _, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
+        mocks::{
+            DeferredRemoveContext, DelayedSyncContext, PendingSyncs, drive_pending_syncs,
+            fail_pending_syncs,
+        },
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, Probability, probability, sequence::VecU64};
@@ -3708,6 +3730,57 @@ pub(crate) mod tests {
         });
     }
 
+    /// A prune returns while storage still holds the witness blobs it released. `removals`
+    /// completes with their deletion and `wait_for_removals` reports its failure. A db that has
+    /// released nothing, such as a pending import with no open journal, has nothing to wait for.
+    pub(crate) fn test_compact_removals_follow_released_witnesses<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            // A pending import has no journal and has released nothing.
+            let import = Import::<O>::build(context.child("src"), "compact-removals-src", 2).await;
+            let pending = import.into_db(context.child("import"), "compact-removals-dst");
+            pending.wait_for_removals().await.unwrap();
+            pending.removals().await.unwrap();
+            drop(pending);
+
+            // One witness per section, so each dropped witness releases its own blobs.
+            let (parked, removes) = DeferredRemoveContext::new(context.child("db"));
+            let cfg = Config {
+                strategy: Sequential,
+                witness: sectioned_witness_config::<O>("compact-removals"),
+            };
+            let mut db = Db::<O::Family, _, O, Sha256, Sequential>::init(parked, cfg, None)
+                .await
+                .unwrap();
+            for seed in 1..=3 {
+                let batch = db
+                    .new_batch()
+                    .with_metadata(Some(O::value(seed)))
+                    .merkleize(&db)
+                    .await
+                    .unwrap();
+                db = db.apply_batch(batch).await.unwrap();
+            }
+            db.wait_for_removals().await.unwrap();
+
+            // The prune returns with the deletion of the older witnesses parked.
+            let size = db.size();
+            db = db.prune(size).await.unwrap();
+            assert!(!removes.is_empty());
+            let removals = db.removals();
+            assert!(removals.clone().now_or_never().is_none());
+
+            // Storage refuses the deletion, and both handles report it.
+            context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            removes.release(&context).await;
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(removals.await.is_err());
+            assert!(matches!(
+                db.wait_for_removals().await,
+                Err(Error::Journal(crate::journal::Error::Removal(_)))
+            ));
+        });
+    }
+
     pub(crate) fn test_compact_bounded_initialization_preserves_pre_advance_batch<
         O: TestOperation,
     >() {
@@ -4240,6 +4313,7 @@ pub(crate) mod tests {
                 test_compact_reopen_drops_unsynced_witness,
                 test_compact_bounded_initialization_multiple_commits,
                 test_compact_prune_then_bounded_initialization,
+                test_compact_removals_follow_released_witnesses,
                 test_compact_bounded_initialization_preserves_pre_advance_batch,
                 test_compact_noop_sync_after_sync,
                 test_compact_noop_sync_after_reopen,

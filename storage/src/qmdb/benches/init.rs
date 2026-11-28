@@ -75,7 +75,9 @@ async fn populate_and_sync<F: Family, C: DbAny<Family = F, Key = Digest>>(
     } else {
         db
     };
-    db.sync().await.unwrap()
+    let db = db.sync().await.unwrap();
+    db.wait_for_removals().await.unwrap();
+    db
 }
 
 /// Append `operations` variable-size values to a keyless database, committing periodically.
@@ -337,7 +339,8 @@ fn bench_store_init(c: &mut Criterion) {
                                 let floor = db.inactivity_floor();
                                 let db = db.prune(floor).await.unwrap();
                                 let size = db.bounds().end;
-                                db.sync().await.unwrap();
+                                let db = db.sync().await.unwrap();
+                                db.wait_for_removals().await.unwrap();
                                 size
                             },
                         )

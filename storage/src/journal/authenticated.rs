@@ -2513,6 +2513,143 @@ mod tests {
         });
     }
 
+    /// A crash with a prune's deletions failed leaves the released blobs on disk. The journal
+    /// reopens at its frontier with the released operations unreadable, and submits their
+    /// deletion again.
+    fn crash_with_failed_removals_recovers<F: Family + PartialEq>() {
+        let suffix = "failed_removals";
+        let partition = format!("journal-{suffix}-blobs");
+        let executor = deterministic::Runner::default();
+        let (root, checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            move |context| async move {
+                let mut journal =
+                    create_journal_with_ops::<F>(context.child("first"), suffix, 100).await;
+                (journal, _) = journal
+                    .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
+                    .await
+                    .unwrap();
+                let journal = journal.sync().await.unwrap();
+                context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+                let (journal, boundary) = journal.prune(Location::<F>::new(50)).await.unwrap();
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                assert_eq!(boundary, Location::<F>::new(50));
+                assert!(matches!(
+                    journal.wait_for_removals().await,
+                    Err(Error::Journal(JournalError::Removal(_)))
+                ));
+                assert_eq!(context.scan(&partition).await.unwrap().len(), 15);
+                journal.root(0).unwrap()
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            // The prune wrote the frontier at the retained start, 49, before it released the
+            // blobs. The reopened journal starts there although storage still holds the earlier
+            // operations.
+            let journal = create_empty_journal::<F>(context.child("second"), suffix).await;
+            assert_eq!(journal.bounds(), 49..101);
+            assert_eq!(journal.merkle.bounds().start, Location::<F>::new(49));
+            assert_eq!(journal.root(0).unwrap(), root);
+            assert!(matches!(
+                journal.read(48).await,
+                Err(JournalError::ItemPruned(48))
+            ));
+            assert_eq!(journal.read(49).await.unwrap(), create_operation::<F>(49));
+
+            // The reopen submitted the deletion again, and storage deletes the released blobs.
+            journal.wait_for_removals().await.unwrap();
+            assert_eq!(context.scan(&partition).await.unwrap().len(), 8);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_crash_with_failed_removals_recovers_mmr() {
+        crash_with_failed_removals_recovers::<mmr::Family>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_crash_with_failed_removals_recovers_mmb() {
+        crash_with_failed_removals_recovers::<mmb::Family>();
+    }
+
+    /// A crash with a prune's deletions still queued leaves every released blob on disk. A reopen
+    /// capped inside the released blobs is rejected before anything is truncated, as it is once
+    /// they are deleted. An unbounded reopen starts at the frontier and submits the deletion
+    /// again.
+    fn crash_with_pending_removals_recovers<F: Family + PartialEq>() {
+        type Ops<F> = ContiguousJournal<ParkedContext, TestOp<F>>;
+        let suffix = "pending_removals";
+        let partition = format!("journal-{suffix}-blobs");
+        let executor = deterministic::Runner::default();
+        let (root, checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            move |context| async move {
+                let (parked, removes) = ParkedContext::new(context.child("first"));
+                let mut journal = ParkedJournal::<F, Ops<F>>::new(
+                    parked,
+                    merkle_config(suffix),
+                    journal_config(suffix),
+                    any_op::<F>,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+                for op in tagged_ops::<F>(101, &[(100, 50)]) {
+                    (journal, _) = journal.append(&op).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                let (journal, _) = journal.prune(Location::new(50)).await.unwrap();
+                assert_eq!(removes.len(), 1);
+                assert_eq!(context.scan(&partition).await.unwrap().len(), 15);
+                journal.root(0).unwrap()
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            // The frontier sits at the retained start, 49, so the operations below it are pruned
+            // history. A reopen capped at 48 is rejected as it is once the released blobs are
+            // deleted, even though the operation journal still holds 48. It truncates nothing.
+            let capped = TestJournal::<F>::init_at_most(
+                context.child("bounded"),
+                merkle_config(suffix),
+                journal_config(suffix),
+                48,
+                |_| true,
+                ForwardFold,
+            )
+            .await;
+            assert!(matches!(
+                capped,
+                Err(Error::Journal(JournalError::ItemPruned(_)))
+            ));
+            assert_eq!(context.scan(&partition).await.unwrap().len(), 15);
+
+            // An unbounded reopen starts at the frontier with every later operation in place.
+            let journal = create_empty_journal::<F>(context.child("second"), suffix).await;
+            assert_eq!(journal.bounds(), 49..101);
+            assert_eq!(journal.merkle.bounds().start, Location::<F>::new(49));
+            assert_eq!(journal.root(0).unwrap(), root);
+            assert_eq!(journal.read(49).await.unwrap(), create_operation::<F>(49));
+
+            // The reopen submitted the deletion again, and storage deletes the released blobs.
+            journal.wait_for_removals().await.unwrap();
+            assert_eq!(context.scan(&partition).await.unwrap().len(), 8);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_crash_with_pending_removals_recovers_mmr() {
+        crash_with_pending_removals_recovers::<mmr::Family>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_crash_with_pending_removals_recovers_mmb() {
+        crash_with_pending_removals_recovers::<mmb::Family>();
+    }
+
     /// Verify that read() returns an error for out-of-range locations.
     async fn test_read_out_of_range_returns_error_inner<F: Family + PartialEq>(context: Context) {
         let journal = create_journal_with_ops::<F>(context, "read_oob", 3).await;
