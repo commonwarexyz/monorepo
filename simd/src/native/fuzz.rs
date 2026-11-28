@@ -173,6 +173,16 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u32_rotate_right::<0>(na); (ea));
     check!(u32_rotate_right::<1>(na); (ea));
     check!(u32_rotate_right::<31>(na); (ea));
+    check!(u32_mul_lo(na, nb); (ea, eb));
+    check!(u32_mul_lo(na, na); (ea, ea));
+    assert_eq!(
+        longs(n, n.u32_widen_mul_first(na, nb)),
+        longs(e, e.u32_widen_mul_first(ea, eb))
+    );
+    assert_eq!(
+        longs(n, n.u32_widen_mul_second(na, nb)),
+        longs(e, e.u32_widen_mul_second(ea, eb))
+    );
     let indices: [u32; 16] = u.arbitrary()?;
     check!(u32_permute(na, n.u32_load(&indices)); (ea, e.u32_load(&indices)));
     check!(u32_permute2(na, nb, n.u32_load(&indices)); (ea, eb, e.u32_load(&indices)));
@@ -213,12 +223,29 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
         48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
     );
     check!(u64_select(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
+    check!(u64_min(na, nb); (ea, eb));
+    check!(u64_min(na, na); (ea, ea));
+    check!(u64_rotate_lanes::<0>(na); (ea));
+    check!(u64_rotate_lanes::<1>(na); (ea));
+    check!(u64_rotate_lanes::<3>(na); (ea));
+    check!(u64_rotate_lanes::<7>(na); (ea));
+    check!(u64_rotate_lanes::<9>(na); (ea));
     check!(u64_shl::<0>(na); (ea));
     check!(u64_shl::<1>(na); (ea));
     check!(u64_shl::<63>(na); (ea));
     check!(u64_shr::<0>(na); (ea));
     check!(u64_shr::<1>(na); (ea));
     check!(u64_shr::<63>(na); (ea));
+    check!(u64_madd52lo(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
+    check!(u64_madd52hi(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
+    assert_eq!(
+        words(n, n.u64_narrow_pair(na, nb)),
+        words(e, e.u64_narrow_pair(ea, eb))
+    );
+    check!(u64_mul_lo(na, nb); (ea, eb));
+    check!(u64_mul_lo(na, na); (ea, ea));
+    check!(u64_mul_hi(na, nb); (ea, eb));
+    check!(u64_mul_hi(na, na); (ea, ea));
     macro_rules! lanes { ($($lane:literal),*) => { $(
         if $lane < N::U64_LANES {
             assert_eq!(n.u64_extract::<$lane>(na), e.u64_extract::<$lane>(ea));
@@ -331,6 +358,23 @@ pub fn neon<N: Neon, E: Neon>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitrary
     );
     let a: [u32; 4] = u.arbitrary()?;
     let b: [u32; 4] = u.arbitrary()?;
+    let (na, nb) = (n.u32_load(&a), n.u32_load(&b));
+    let (ea, eb) = (e.u32_load(&a), e.u32_load(&b));
+    macro_rules! lanes {
+        ($($lane:literal)*) => {$(
+            assert_eq!(
+                longs(n, n.u32_widen_mul_first_lane::<$lane>(na, nb)),
+                longs(e, e.u32_widen_mul_first_lane::<$lane>(ea, eb))
+            );
+            assert_eq!(
+                longs(n, n.u32_widen_mul_second_lane::<$lane>(na, nb)),
+                longs(e, e.u32_widen_mul_second_lane::<$lane>(ea, eb))
+            );
+        )*};
+    }
+    lanes!(0 1 2 3);
+    let a: [u32; 4] = u.arbitrary()?;
+    let b: [u32; 4] = u.arbitrary()?;
     let c: [u32; 4] = u.arbitrary()?;
     let na = n.u32x4_load(&a);
     let nb = n.u32x4_load(&b);
@@ -410,29 +454,6 @@ pub fn x86_v4c<N: X86V4C, E: X86V4C>(
     narrow!(sha256_rounds2(na, nb, nk); (ea, eb, ek));
     narrow!(sha256_msg1(na, nb); (ea, eb));
     narrow!(sha256_msg2(na, nb); (ea, eb));
-    let a: [u64; 8] = u.arbitrary()?;
-    let b: [u64; 8] = u.arbitrary()?;
-    let acc: [u64; 8] = u.arbitrary()?;
-    assert_eq!(
-        longs(
-            n,
-            n.u64_madd52lo(n.u64_load(&acc), n.u64_load(&a), n.u64_load(&b))
-        ),
-        longs(
-            e,
-            e.u64_madd52lo(e.u64_load(&acc), e.u64_load(&a), e.u64_load(&b))
-        )
-    );
-    assert_eq!(
-        longs(
-            n,
-            n.u64_madd52hi(n.u64_load(&acc), n.u64_load(&a), n.u64_load(&b))
-        ),
-        longs(
-            e,
-            e.u64_madd52hi(e.u64_load(&acc), e.u64_load(&a), e.u64_load(&b))
-        )
-    );
     let a: [u32; 16] = u.arbitrary()?;
     let b: [u32; 16] = u.arbitrary()?;
     let na = n.u32_load(&a);

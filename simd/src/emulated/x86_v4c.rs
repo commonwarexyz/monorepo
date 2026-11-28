@@ -8,7 +8,7 @@ use crate::X86V4C;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmulatedX86V4C;
 
-super::common::impl_common!(EmulatedX86V4C, 64, 16, 8, x86_v4c);
+super::common::impl_common!(EmulatedX86V4C, 64, 16, 8, true, x86_v4c);
 
 impl X86V4C for EmulatedX86V4C {
     #[inline]
@@ -207,20 +207,6 @@ impl X86V4C for EmulatedX86V4C {
             product
         })
     }
-    fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
-        const MASK: u64 = (1 << 52) - 1;
-        core::array::from_fn(|i| {
-            let product = u128::from(a[i] & MASK) * u128::from(b[i] & MASK);
-            acc[i].wrapping_add(product as u64 & MASK)
-        })
-    }
-    fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
-        const MASK: u64 = (1 << 52) - 1;
-        core::array::from_fn(|i| {
-            let product = u128::from(a[i] & MASK) * u128::from(b[i] & MASK);
-            acc[i].wrapping_add((product >> 52) as u64)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -231,6 +217,21 @@ mod tests {
         panic::{AssertUnwindSafe, catch_unwind},
         vec::Vec,
     };
+
+    #[test]
+    fn widening_splits_even_and_odd_lanes() {
+        let simd = EmulatedX86V4C;
+        let a: [u32; 16] = core::array::from_fn(|i| i as u32 + 1);
+        let b: [u32; 16] = core::array::from_fn(|i| 100 * (i as u32 + 1));
+        let product = |i: u64| 100 * (i + 1) * (i + 1);
+        let first: [u64; 8] = core::array::from_fn(|i| product(2 * i as u64));
+        let second: [u64; 8] = core::array::from_fn(|i| product(2 * i as u64 + 1));
+        assert_eq!(simd.u32_widen_mul_first(a, b), first);
+        assert_eq!(simd.u32_widen_mul_second(a, b), second);
+        let high = first.map(|lane| lane | 1 << 40);
+        let narrowed: [u32; 16] = core::array::from_fn(|i| product(i as u64) as u32);
+        assert_eq!(simd.u64_narrow_pair(high, second), narrowed);
+    }
 
     fn load_be<S: X86V4C>(simd: S) {
         let original: [u8; 128] = core::array::from_fn(|i| (i as u8).wrapping_mul(37));
@@ -578,32 +579,6 @@ mod tests {
     fn native_u64_ternary_contracts() {
         if let Some(simd) = crate::native::NativeX86V4C::new() {
             u64_ternary(simd);
-        }
-    }
-
-    #[test]
-    fn ifma_truncation_and_accumulator_wrap() {
-        let simd = EmulatedX86V4C;
-        let values = [0, 1, (1 << 52) - 1, 1 << 52, u64::MAX];
-        let mask = (1u128 << 52) - 1;
-        for a in values {
-            for b in values {
-                for accumulator in values {
-                    let product = (a as u128 & mask) * (b as u128 & mask);
-                    let lo = simd.u64_madd52lo(
-                        simd.u64_splat(accumulator),
-                        simd.u64_splat(a),
-                        simd.u64_splat(b),
-                    );
-                    let hi = simd.u64_madd52hi(
-                        simd.u64_splat(accumulator),
-                        simd.u64_splat(a),
-                        simd.u64_splat(b),
-                    );
-                    assert_eq!(lo, [accumulator.wrapping_add((product & mask) as u64); 8]);
-                    assert_eq!(hi, [accumulator.wrapping_add((product >> 52) as u64); 8]);
-                }
-            }
         }
     }
 
