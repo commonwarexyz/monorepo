@@ -319,10 +319,8 @@ where
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
 
         let same_pos = |a: &(usize, u64), b: &(usize, u64)| a.1 == b.1;
-        let positions: Vec<u64> = candidates
-            .chunk_by(same_pos)
-            .map(|group| group[0].1)
-            .collect();
+        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
+        positions.extend(candidates.chunk_by(same_pos).map(|group| group[0].1));
 
         let ops = self.journal.read_many(&positions).await?;
         assert_eq!(

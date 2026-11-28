@@ -641,6 +641,7 @@ where
         // so its remaining keys are absent, and it leaves at the next round.
         let mut resolved = HashMap::new();
         let mut candidates = Vec::new();
+        let mut positions = Vec::new();
         loop {
             candidates.clear();
             buckets.retain(|bucket| bucket.pending > 0);
@@ -661,7 +662,8 @@ where
                 break;
             }
             candidates.sort_unstable_by_key(|(loc, _)| *loc);
-            let positions: Vec<_> = candidates.iter().map(|(loc, _)| **loc).collect();
+            positions.clear();
+            positions.extend(candidates.iter().map(|(loc, _)| **loc));
             let read = self.log.read_many(&positions).await?;
 
             // A read update resolves its key when the batch writes that key. A collision sibling

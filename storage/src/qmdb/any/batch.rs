@@ -229,6 +229,63 @@ fn sorted_contains_by<T, Q: Ord>(
     items.get(*cursor).is_some_and(|item| key(item) == target)
 }
 
+/// Maps every candidate and its operation through `map`, in the batches `strategy` plans.
+///
+/// The first `split` candidates take their operations from the items of `committed`, in order,
+/// and `memory` returns the operation of each later candidate. Returns one vector of results per
+/// batch, whose concatenation follows candidate order.
+///
+/// # Panics
+///
+/// Panics if `split` exceeds the number of candidates or `committed` does not hold exactly
+/// `split` items.
+fn map_candidates<'a, L, O, R, S>(
+    candidates: &'a [L],
+    committed: &'a [Vec<O>],
+    split: usize,
+    strategy: &S,
+    memory: impl Fn(&'a L) -> &'a O + Sync,
+    map: impl Fn(&'a L, &'a O) -> R + Sync,
+) -> Vec<Vec<R>>
+where
+    L: Sync,
+    O: Sync,
+    R: Send,
+    S: Strategy,
+{
+    assert!(split <= candidates.len(), "split past the candidates");
+    assert_eq!(
+        committed.iter().map(Vec::len).sum::<usize>(),
+        split,
+        "one read per committed candidate"
+    );
+    strategy.run_batches(candidates.len(), NonZeroUsize::MIN, 1, |batches| {
+        batches.map_collect_vec(
+            |ranges| ranges,
+            |range: Range<usize>| {
+                // The batch's operations start among the committed ones or past them. The skip
+                // takes one step per shard, not one per operation.
+                let in_memory = candidates[range.start.max(split)..].iter().map(&memory);
+                let ops = committed
+                    .iter()
+                    .flatten()
+                    .skip(range.start)
+                    .chain(in_memory);
+
+                // The operations do not report how many remain, so the range sizes the results.
+                let mut mapped = Vec::with_capacity(range.len());
+                mapped.extend(
+                    candidates[range]
+                        .iter()
+                        .zip(ops)
+                        .map(|(candidate, op)| map(candidate, op)),
+                );
+                mapped
+            },
+        )
+    })
+}
+
 /// Returns whether `staged` holds an update resolved at `target`, advancing `cursor` past updates
 /// resolved below it. Successive calls must use non-decreasing `target`s.
 fn contains_staged<F: Family, U: update::Update>(
@@ -764,18 +821,23 @@ where
     V: Clone + Send + Sync,
 {
     let mut results = vec![None; keys.len()];
-    let mut resolved = vec![false; keys.len()];
-    let mut pending = Vec::new();
+    let mut pending = Vec::with_capacity(keys.len());
 
     for (i, key) in keys.iter().enumerate() {
         let key = key.borrow();
         if let Some(value) = local(key) {
             results[i] = value;
-            resolved[i] = true;
         } else {
             pending.push((i, key));
         }
     }
+
+    // With no pending slot or no diff to consult, the diffs resolve nothing, and every pending
+    // slot still needs a database read.
+    if pending.is_empty() || diffs.is_empty() {
+        return (results, pending);
+    }
+    let mut resolved = vec![false; keys.len()];
     resolve_pending_from_diffs(
         &pending,
         diffs,
@@ -1092,7 +1154,7 @@ where
         } else {
             // Keys whose committed locations still matter, each with the one location (if any) to
             // leave out of its own, probed together below.
-            let mut probes = Vec::new();
+            let mut probes = Vec::with_capacity(mutations.len());
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
             for key in mutations.keys() {
                 match ancestors.resolve(key) {
@@ -1306,15 +1368,10 @@ where
                 }
             };
 
-            // In-memory candidates, in the ancestors or this batch, resolve by reference, and
-            // their operations follow those read from the database.
+            // Candidates from `split` on are in memory, in the ancestors or this batch.
             let split = round
                 .candidates
                 .partition_point(|loc| *loc < self.db_state.size);
-            let memory: Vec<&Operation<F, U>> = round.candidates[split..]
-                .iter()
-                .map(|loc| self.peek_uncommitted(*loc, &walked.ops))
-                .collect();
 
             // Classification is the first consumer of the sorted diff. By now the sort has
             // overlapped the fill and read above.
@@ -1323,14 +1380,17 @@ where
             }
 
             // Classify each candidate, as a [`Move`], against the state after the writes. A
-            // Commit has no key and is inactive.
+            // Commit has no key and is inactive. In-memory candidates resolve by reference, and
+            // their operations follow those read from the database.
             let diff = &walked.diff;
-            let moves: Vec<Option<Move<F>>> = strategy.map_collect_vec(
-                zip_eq(
-                    round.candidates.iter(),
-                    round.committed.iter().flatten().chain(memory),
-                ),
-                |(loc, op)| op.key().and_then(|key| self.classify(diff, *loc, key)),
+            let ops = &walked.ops;
+            let moves = map_candidates(
+                &round.candidates,
+                &round.committed,
+                split,
+                strategy,
+                |loc| self.peek_uncommitted(*loc, ops),
+                |loc, op| op.key().and_then(|key| self.classify(diff, *loc, key)),
             );
 
             // The round decides at most its candidates, the remaining entries, and the active
@@ -1348,7 +1408,8 @@ where
             // Reach each active candidate in order, moving committed operations out of the read
             // and cloning in-memory ones.
             let mut reads = round.committed.into_iter().flatten();
-            for (at, (loc, mv)) in zip_eq(round.candidates, moves).enumerate() {
+            for (at, (loc, mv)) in zip_eq(round.candidates, moves.into_iter().flatten()).enumerate()
+            {
                 let read =
                     (at < split).then(|| reads.next().expect("one read per committed candidate"));
                 let Some(mv) = mv else {
@@ -1607,10 +1668,14 @@ where
         let db = self.batch.compatible(db)?;
 
         // Retain the keys first and resolve the reads against them, so each key is borrowed once.
+        // Their resolutions are recorded in the slots the keys take.
         self.keys
             .extend(keys.iter().map(|key| key.borrow().clone()));
-        let (values, mut resolutions) = self.batch.stage_reads(&self.keys[start..], db).await?;
-        self.resolutions.append(&mut resolutions);
+        self.resolutions.resize_with(end, || None);
+        let values = self
+            .batch
+            .stage_reads(&self.keys[start..], &mut self.resolutions[start..], db)
+            .await?;
         Ok((self, start..end, values))
     }
 
@@ -2258,7 +2323,9 @@ where
         // Clone the keys first and resolve the reads against the clones the staged batch keeps, so
         // each key is borrowed once.
         let keys: Vec<U::Key> = keys.iter().map(|key| key.borrow().clone()).collect();
-        let (results, resolutions) = self.stage_reads(&keys, db).await?;
+        let mut resolutions: Vec<StagedResolution<F, U>> =
+            iter::repeat_with(|| None).take(keys.len()).collect();
+        let results = self.stage_reads(&keys, &mut resolutions, db).await?;
         Ok((
             Staged {
                 batch: self,
@@ -2269,22 +2336,20 @@ where
         ))
     }
 
-    /// Read keys through this batch and return the values plus one resolution per staged slot.
-    /// Slots resolved in the database or an ancestor's diff carry the location and cached payload
-    /// they resolved to.
+    /// Read keys through this batch and return their values, recording one resolution per key in
+    /// `resolutions`, which holds an empty slot for each. Slots resolved in the database or an
+    /// ancestor's diff carry the location and cached payload they resolved to.
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[U::Key],
+        resolutions: &mut [StagedResolution<F, U>],
         db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
-    ) -> Result<(Vec<Option<U::Value>>, Vec<StagedResolution<F, U>>), crate::qmdb::Error<F>>
+    ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let mut resolutions: Vec<StagedResolution<F, U>> =
-            iter::repeat_with(|| None).take(keys.len()).collect();
-
         // Record ancestor-diff resolutions so the staged write reuses the resolved location at
         // merkleize. A write that falls back to a normal mutation pays for location gathering, a
         // journal re-read, and per-key re-resolution through the ancestors, and that cost grows
@@ -2325,7 +2390,7 @@ where
             },
         )
         .await?;
-        Ok((results, resolutions))
+        Ok(results)
     }
 }
 
@@ -2433,8 +2498,8 @@ where
 
         // Database locations superseded by this batch, which the floor walk passes without reading.
         // Emission order is ascending in `base_old_loc` except for entries resolved through
-        // ancestor diffs, so the walk usually skips sorting them.
-        let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(walked.diff.capacity());
+        // ancestor diffs, so the walk usually skips sorting them. The walk appends one location.
+        let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(walked.diff.capacity() + 1);
 
         // Write a user mutation at the next batch location, preserving the previous committed
         // location of the key it supersedes.
@@ -2620,10 +2685,15 @@ where
         }
 
         // Classify mutations into deleted, created, updated, collecting the successor and
-        // predecessor candidates the link rewrites consult once they are sorted below.
+        // predecessor candidates the link rewrites consult once they are sorted below. Each read
+        // location and staged record contributes at most one successor candidate. A staged record
+        // also yields at most one update, while a read location may hold a collision sibling.
         let mut neighbors: Neighbors<K, (Cow<'_, V::Value>, Location<F>)> = Neighbors::new();
+        neighbors
+            .next
+            .reserve(locations.len() + staged_updates.len());
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
-        let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
+        let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::with_capacity(staged_updates.len());
         for (update, old_loc) in m.read_live(&locations, &db.log).await? {
             let update::Ordered {
                 key,
@@ -2631,21 +2701,15 @@ where
                 next_key,
             } = update;
             neighbors.next.push(next_key);
-            neighbors
-                .prev
-                .push((key.clone(), Some((Cow::Owned(value), old_loc))));
-
-            let Some(mutation) = mutations.remove(&key) else {
-                // Index collision: this operation's key does not match
-                // the mutation key (the index uses a compressed translated key
-                // that can collide). The mutation will be handled as a create below.
-                continue;
-            };
-
-            if let Some(new_value) = mutation {
-                updated.push((key, new_value, old_loc));
-            } else {
-                deleted.push((key, old_loc));
+            match mutations.remove(&key) {
+                // Index collision: this operation's key does not match the mutation key (the
+                // index uses a compressed translated key that can collide). The mutation will be
+                // handled as a create below, which this key may precede.
+                None => neighbors
+                    .prev
+                    .push((key, Some((Cow::Owned(value), old_loc)))),
+                Some(Some(new_value)) => updated.push((key, new_value, old_loc)),
+                Some(None) => deleted.push((key, old_loc)),
             }
         }
 
@@ -2658,8 +2722,9 @@ where
             created.push((key, value, base_old_loc));
         }
 
-        // Look up prev_translated_key for created/deleted keys, including staged deletes.
-        let mut prev_locations = Vec::new();
+        // Look up prev_translated_key for created/deleted keys, including staged deletes. The
+        // bucket before a key usually holds one location.
+        let mut prev_locations = Vec::with_capacity(deleted.len() + created.len());
         for key in deleted
             .iter()
             .map(|(k, _)| k)
@@ -2687,6 +2752,7 @@ where
 
         // Those updates may precede the created and deleted keys, and their successors may
         // follow the created keys.
+        neighbors.prev.reserve(prev_locations.len());
         for (update, old_loc) in m.read_live(&prev_locations, &db.log).await? {
             neighbors.next.push(update.next_key);
             neighbors
@@ -2699,10 +2765,6 @@ where
         // read would have. The cached successor is the key's successor at the parent's tip, because
         // a create or delete next to the key rewrites the key's update in the batch that makes it.
         //
-        // An update is a predecessor candidate without a rewrite source: its own operation carries
-        // its link, and the predecessor rewrites skip every key present in `updated`. A deleted
-        // key is never a predecessor.
-        //
         // An ancestor-resolved record's superseded base is re-resolved through the reachable
         // ancestors' diffs when its operation is emitted below. If none of them holds the key, its
         // resolving ancestor is applied and unreachable, and the resolved location is the key's
@@ -2711,7 +2773,6 @@ where
             let loc = sloc.loc();
             neighbors.next.push(old_next);
             if let Some(value) = value {
-                neighbors.prev.push((key.clone(), None));
                 updated.push((key, value, loc));
             } else {
                 deleted.push((key, loc));
@@ -2729,6 +2790,15 @@ where
         // advances three cursors in a sorted merge instead of three binary searches per key.
         let changes_membership = !created.is_empty() || !deleted.is_empty();
         if changes_membership {
+            // List each key this batch updates as a possible predecessor, without the value and
+            // location a rewrite needs: the update emitted below already names the key's new
+            // successor. Pushed after the candidates read above, it is the one kept for its key.
+            // A created key is not listed, having no earlier operation to rewrite, and a deleted
+            // key is never a predecessor.
+            neighbors
+                .prev
+                .extend(updated.iter().map(|(key, ..)| (key.clone(), None)));
+
             let mut shadow = Shadow::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
             for batch in &m.ancestors {
                 let (mut ui, mut ci, mut di) = (0, 0, 0);
@@ -2771,7 +2841,6 @@ where
         let deleted_range = 0..walked.diff.len();
 
         // Process updates of existing keys.
-        let updated_range = walked.diff.len()..walked.diff.len() + updated.len();
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut next_idx = 0;
         for (key, value, old_loc) in updated {
@@ -2808,18 +2877,13 @@ where
         if !neighbors.prev.is_empty() {
             // The create/delete ranges stay fixed as predecessor rewrites are appended.
             for idx in created_range.chain(deleted_range) {
+                // `claim` never returns a key this batch writes, as arranged where the candidates
+                // are listed, so the rewrite below cannot repeat one of its operations.
                 let Some((prev_key, (prev_value, prev_loc), prev_next_key)) =
                     neighbors.claim(&walked.diff[idx].0)
                 else {
                     continue;
                 };
-
-                // Only updated mutation keys can be candidates: creates have no active
-                // operation before this batch, and deletes are excluded from candidates. An
-                // update's own operation carries its link.
-                if lookup_sorted(&walked.diff[updated_range.clone()], prev_key).is_some() {
-                    continue;
-                }
                 let prev_value = prev_value.into_owned();
 
                 // Preserve the ordered links across creates and deletes by rewriting the
@@ -2840,12 +2904,15 @@ where
         // Release the candidate keys and values before the remaining phases run.
         drop(neighbors);
 
-        // Database locations superseded by this batch, which the floor walk sorts itself.
-        let superseded_locs: Vec<_> = walked
-            .diff
-            .iter()
-            .filter_map(|(_, entry)| entry.base_old_loc())
-            .collect();
+        // Database locations superseded by this batch, which the floor walk sorts itself. The walk
+        // appends one location.
+        let mut superseded_locs = Vec::with_capacity(walked.diff.len() + 1);
+        superseded_locs.extend(
+            walked
+                .diff
+                .iter()
+                .filter_map(|(_, entry)| entry.base_old_loc()),
+        );
 
         // Remaining phases: floor walk, its decisions and link repairs, Commit, journal, diff
         // merge.
@@ -5265,6 +5332,88 @@ pub(crate) mod tests {
                 assert_eq!(me.value(), re.value());
             }
         }
+    }
+
+    /// Shard lengths with empty shards at either end and between shards that hold items.
+    const SHARD_LAYOUTS: [&[usize]; 6] =
+        [&[], &[0], &[5], &[1, 2, 3], &[0, 2, 0, 0, 3, 0], &[4, 0, 1]];
+
+    /// Shards of the lengths in `layout` whose items count up from `first`.
+    fn counted_shards(layout: &[usize], first: u64) -> Vec<Vec<u64>> {
+        let mut next = first;
+        layout
+            .iter()
+            .map(|len| {
+                let shard = (next..next + *len as u64).collect();
+                next += *len as u64;
+                shard
+            })
+            .collect()
+    }
+
+    /// Maps candidates whose committed operations arrive in each shard layout and are followed by
+    /// in-memory ones, and returns the results for `explore` to compare across batch shapes.
+    fn check_candidate_mapping(strategy: &Explorer) -> Vec<Vec<(usize, u64)>> {
+        let mut outputs = Vec::new();
+        for layout in SHARD_LAYOUTS {
+            let split: usize = layout.iter().sum();
+            for in_memory in [0, 1, 6] {
+                // A committed operation is its candidate plus 1000, an in-memory one plus 2000.
+                let candidates: Vec<usize> = (0..split + in_memory).collect();
+                let committed = counted_shards(layout, 1000);
+                let memory: Vec<u64> = candidates.iter().map(|c| 2000 + *c as u64).collect();
+                let mapped: Vec<(usize, u64)> = map_candidates(
+                    &candidates,
+                    &committed,
+                    split,
+                    strategy,
+                    |c| {
+                        assert!(*c >= split, "a committed candidate has its read");
+                        &memory[*c]
+                    },
+                    |c, op| (*c, *op),
+                )
+                .into_iter()
+                .flatten()
+                .collect();
+
+                let expected: Vec<(usize, u64)> = candidates
+                    .iter()
+                    .map(|c| {
+                        let source = if *c < split { 1000 } else { 2000 };
+                        (*c, source + *c as u64)
+                    })
+                    .collect();
+                assert_eq!(
+                    mapped, expected,
+                    "shards of {layout:?} with {in_memory} in memory"
+                );
+                outputs.push(mapped);
+            }
+        }
+        outputs
+    }
+
+    #[test]
+    fn candidates_map_alike_in_every_batch_shape() {
+        // Each candidate meets its own operation in one batch, in the most batches the strategy
+        // plans, and in the seeded batch counts between them.
+        explore(check_candidate_mapping);
+    }
+
+    #[test]
+    #[should_panic(expected = "one read per committed candidate")]
+    fn map_candidates_rejects_a_missing_read() {
+        let candidates = [0usize, 1, 2];
+        let committed = vec![vec![1000u64]];
+        map_candidates(
+            &candidates,
+            &committed,
+            2,
+            &Sequential,
+            |_| unreachable!("the counts are checked before any operation is taken"),
+            |c, op| (*c, *op),
+        );
     }
 
     /// Single-step oracle for [`Candidates::fill`]: return the next floor candidate in

@@ -890,15 +890,8 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O
         H: Hasher<Digest = D>,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
-        let base = db.merkle.mem();
-        F::nodes_to_pin(self.bounds.base.size)
-            .map(|pos| {
-                self.merkle_batch
-                    .get_node(pos)
-                    .or_else(|| base.get_node(pos))
-                    .ok_or(merkle::Error::ElementPruned(pos))
-            })
-            .collect::<Result<Vec<_>, _>>()
+        self.merkle_batch
+            .pinned_nodes_at(db.merkle.mem(), self.bounds.base.size)
             .map_err(Into::into)
     }
 

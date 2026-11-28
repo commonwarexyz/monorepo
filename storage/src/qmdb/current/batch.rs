@@ -892,12 +892,14 @@ where
     //   2) Pending -> graftable transitions: chunks newly graftable because the ops tree built
     //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
     //      became graftable via ops growth alone) but they need a grafted-leaf entry now.
-    let mut chunk_indices_to_update: Vec<usize> = overlay
-        .chunks
-        .iter()
-        .filter(|&(&idx, _)| idx < graftable_parent && idx >= pruned_chunks)
-        .map(|(&idx, _)| idx)
-        .collect();
+    let mut chunk_indices_to_update: Vec<usize> = Vec::with_capacity(overlay.chunks.len());
+    chunk_indices_to_update.extend(
+        overlay
+            .chunks
+            .keys()
+            .copied()
+            .filter(|&idx| idx < graftable_parent && idx >= pruned_chunks),
+    );
     chunk_indices_to_update.sort_unstable();
 
     // Newly graftable chunks come last, in ascending order, so they append to the grafted tree as
@@ -1032,6 +1034,11 @@ impl<const N: usize> BitmapBatch<N> {
             }
             kept.push(Arc::clone(&layer.overlay));
             current = &layer.parent;
+        }
+
+        // With no applied layer to drop, the chain is returned as it is.
+        if matches!(current, Self::Base(_)) {
+            return self.clone();
         }
         let mut result = Self::Base(Arc::clone(shared));
         for overlay in kept.into_iter().rev() {

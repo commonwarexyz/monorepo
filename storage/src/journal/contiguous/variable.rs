@@ -702,11 +702,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     }
 
     /// Fill `out[i]` for each readable position whose offset and frame are already in the page
-    /// cache or the in-memory tail and whose frame decodes. Returns a `Miss` for every other
-    /// position, carrying the offsets the pass found so completion can skip those lookups.
-    fn read_many_sync_pass(&self, positions: &[u64], out: &mut [Option<V>]) -> Vec<Miss> {
+    /// cache or the in-memory tail and whose frame decodes. Returns the positions looked up in the
+    /// offsets journal and the offset found for each. Every position is listed, directly followed
+    /// by its same-blob successor if it has one.
+    fn read_many_sync_pass(
+        &self,
+        positions: &[u64],
+        out: &mut [Option<V>],
+    ) -> (Vec<u64>, Vec<Option<u64>>) {
         if positions.is_empty() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
 
         // A frame at position p spans [off(p), off(p + 1)), or [off(p), blob size) when p is the
@@ -725,6 +730,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         let extents = self.cached_frame_extents(positions, &lookups, &offsets);
         let mut buf = BytesMut::new();
+        let mut ranges: Vec<(u64, usize)> = Vec::with_capacity(extents.len());
         let mut hits = 0u64;
 
         // Serve the resolved extents with one batched cache read per data blob.
@@ -743,10 +749,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let Some(blob) = self.data.get(blob_num) else {
                 continue;
             };
-            let ranges: Vec<(u64, usize)> = group
-                .iter()
-                .map(|&(_, offset, len)| (offset, len))
-                .collect();
+            ranges.clear();
+            ranges.extend(group.iter().map(|&(_, offset, len)| (offset, len)));
             let Some(total) = read_buffer_len(ranges.iter().map(|&(_, len)| len)) else {
                 continue;
             };
@@ -779,13 +783,21 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
+        (lookups, offsets)
+    }
+
+    /// Run the sync pass over strictly increasing `positions`, returning one item slot per
+    /// position and the misses.
+    fn probe_parts(&self, positions: &[u64]) -> (Vec<Option<V>>, Vec<Miss>) {
+        let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        let (lookups, offsets) = self.read_many_sync_pass(positions, &mut items);
 
         // Each unserved position becomes a miss carrying the offsets found above, so completion
         // only looks up the rest.
         let mut lookup_idx = 0;
         let mut misses = Vec::new();
         for (idx, &position) in positions.iter().enumerate() {
-            if out[idx].is_some() {
+            if items[idx].is_some() {
                 continue;
             }
             while lookups[lookup_idx] != position {
@@ -799,7 +811,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                     .and_then(|_| offsets[lookup_idx + 1]),
             });
         }
-        misses
+        (items, misses)
     }
 }
 
@@ -830,7 +842,7 @@ async fn complete<E: Context, V: CodecShared>(
     }
 
     let fetched = reader.fetch_misses(&misses).await?;
-    let mut fetched = fetched.into_iter();
+    let mut fetched = fetched.into_iter().flatten();
     Ok(items
         .into_iter()
         .map(|item| item.unwrap_or_else(|| fetched.next().expect("one fetched item per miss")))
@@ -838,18 +850,11 @@ async fn complete<E: Context, V: CodecShared>(
 }
 
 impl<E: Context, V: CodecShared> Reader<'_, E, V> {
-    /// Run the sync pass over strictly increasing `positions`, returning one item slot per
-    /// position and the misses.
-    fn probe_parts(&self, positions: &[u64]) -> (Vec<Option<V>>, Vec<Miss>) {
-        let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        let misses = self.read_many_sync_pass(positions, &mut items);
-        (items, misses)
-    }
-
-    /// Read the items for `misses` (strictly increasing by position) and return them in order.
-    /// Offsets the sync pass didn't find come from one batched read of the offsets journal. Each
-    /// data blob's frames then come from one batched read, and the blobs are read concurrently.
-    async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<V>, Error> {
+    /// Read the items for `misses` (strictly increasing by position) and return them in order,
+    /// grouped by data blob. Offsets the sync pass didn't find come from one batched read of the
+    /// offsets journal. Each data blob's frames then come from one batched read, and the blobs
+    /// are read concurrently.
+    async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<Vec<V>>, Error> {
         if misses.is_empty() {
             return Ok(Vec::new());
         }
@@ -953,7 +958,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
 
         self.metrics.cache_misses.inc_by(misses.len() as u64);
         self.metrics.items_read.inc_by(misses.len() as u64);
-        Ok(groups.into_iter().flatten().collect())
+        Ok(groups)
     }
 
     /// Read the frames at `ranges` (sorted, non-overlapping, and inside `blob`) with one batched
@@ -1775,14 +1780,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             };
 
             // Convert batch-relative starts into absolute offsets within the data blob.
-            let absolute_offsets = item_starts[written..written + batch_count]
-                .iter()
-                .map(|&start| {
-                    base_offset
-                        .checked_add((start - batch_start) as u64)
-                        .ok_or(Error::OffsetOverflow)
-                })
-                .collect::<Result<Vec<u64>, _>>()?;
+            let mut absolute_offsets = Vec::with_capacity(batch_count);
+            for &start in &item_starts[written..written + batch_count] {
+                let offset = base_offset
+                    .checked_add((start - batch_start) as u64)
+                    .ok_or(Error::OffsetOverflow)?;
+                absolute_offsets.push(offset);
+            }
 
             // Append the offsets for this blob batch to the offsets journal.
             let (offsets, last_offsets_pos) = self

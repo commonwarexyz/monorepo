@@ -447,15 +447,9 @@ where
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
     ) -> Result<Vec<H::Digest>, Error<F>> {
         let start = Location::new(batch.size() - batch.items().len() as u64);
-        let mem = self.merkle.mem();
-        F::nodes_to_pin(start)
-            .map(|pos| {
-                batch
-                    .get_node(pos)
-                    .or_else(|| mem.get_node(pos))
-                    .ok_or(merkle::Error::ElementPruned(pos))
-            })
-            .collect::<Result<Vec<_>, _>>()
+        batch
+            .inner
+            .pinned_nodes_at(self.merkle.mem(), start)
             .map_err(Error::Merkle)
     }
 
@@ -560,17 +554,22 @@ where
         let strategy = self.strategy();
         let journal = &self.journal;
 
-        // Each shard yields its hits densely plus the shard-local indices it declined.
+        // Each shard yields its hits densely plus the shard-local indices it declined. Collecting
+        // the hits out of the probe's own vector lets them reuse its buffer.
         let probe = |positions: &[u64]| -> (Vec<C::Item>, Vec<usize>) {
             let probed = journal.try_read_many_sync(positions);
-            let mut hits = Vec::with_capacity(probed.len());
-            let mut missed = Vec::new();
-            for (idx, item) in probed.into_iter().enumerate() {
-                match item {
-                    Some(item) => hits.push(item),
-                    None => missed.push(idx),
-                }
-            }
+            let mut missed =
+                Vec::with_capacity(probed.iter().filter(|item| item.is_none()).count());
+            let hits = probed
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, item)| {
+                    if item.is_none() {
+                        missed.push(idx);
+                    }
+                    item
+                })
+                .collect();
             (hits, missed)
         };
         let shards: Vec<(Vec<C::Item>, Vec<usize>)> =
@@ -581,7 +580,8 @@ where
         // The declined positions are a strictly increasing subsequence of `positions`, so one
         // batched read serves them all. Each shard covers the slice of `positions` starting
         // at the previous shards' total item count, whatever geometry the probe ran with.
-        let mut misses: Vec<u64> = Vec::new();
+        let miss_count = shards.iter().map(|(_, missed)| missed.len()).sum();
+        let mut misses: Vec<u64> = Vec::with_capacity(miss_count);
         let mut offset = 0;
         for (hits, missed) in &shards {
             misses.extend(missed.iter().map(|idx| positions[offset + idx]));

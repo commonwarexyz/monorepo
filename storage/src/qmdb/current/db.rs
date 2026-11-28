@@ -1033,13 +1033,14 @@ fn compute_grafted_root<F: merkle::Graftable, H: Hasher>(
     let size = storage.size();
     let leaves = Location::try_from(size)?;
 
-    // Collect peak digests of the grafted structure.
-    let mut peaks: Vec<H::Digest> = Vec::new();
+    // Collect peak digests of the grafted structure, which has at most `MAX_PINNED_NODES` peaks.
+    let mut peaks = [H::Digest::EMPTY; merkle::MAX_PINNED_NODES];
+    let mut count = 0;
     for (peak_pos, _) in F::peaks(size) {
-        let digest = storage
+        peaks[count] = storage
             .get_node(peak_pos)
             .ok_or_else(|| merkle::Error::<F>::MissingNode(peak_pos))?;
-        peaks.push(digest);
+        count += 1;
     }
 
     let inactive_peaks =
@@ -1051,7 +1052,7 @@ fn compute_grafted_root<F: merkle::Graftable, H: Hasher>(
     // below G (raw, because its chunk is pending and its digest is hashed directly into the
     // canonical root rather than through the tree). Bagging is a straight fold; no per-chunk
     // transformation is needed.
-    Ok(hasher.root(leaves, inactive_peaks, peaks.iter())?)
+    Ok(hasher.root(leaves, inactive_peaks, peaks[..count].iter())?)
 }
 
 /// Resolve each bitmap chunk's covering ops-tree node, returning

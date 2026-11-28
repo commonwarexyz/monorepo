@@ -1418,6 +1418,34 @@ commonware_macros::stability_scope!(BETA {
             iter.into_iter().try_fold(identity(), fold_op)
         }
 
+        // `map_collect_vec` and `map_init_collect_vec` size their output from the iterator's size
+        // hint, where the provided methods fold into an empty `Vec` that regrows as it fills.
+        // `try_map_collect_vec` is not overridden: its closure returns a `Result`, and an error
+        // from an early item would leave the room reserved for the rest unused.
+
+        fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> T + Send + Sync,
+            T: Send,
+        {
+            iter.into_iter().map(map_op).collect()
+        }
+
+        fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            let mut init_val = init();
+            iter.into_iter()
+                .map(|item| map_op(&mut init_val, item))
+                .collect()
+        }
+
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
@@ -5347,6 +5375,17 @@ mod test {
 
         assert_eq!(result, Err(3));
         assert_eq!(calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn sequential_maps_size_their_output() {
+        // An output sized from the input's length has no spare capacity, where one grown from
+        // empty to 100 elements would.
+        let mapped = Sequential.map_collect_vec(0..100usize, |i| i);
+        assert_eq!(mapped.capacity(), mapped.len());
+
+        let mapped = Sequential.map_init_collect_vec(0..100usize, || (), |_, i| i);
+        assert_eq!(mapped.capacity(), mapped.len());
     }
 
     fn fixed_strategy(parallelism: usize) -> Rayon {

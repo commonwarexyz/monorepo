@@ -102,11 +102,13 @@
 //! ```
 
 use crate::merkle::{
-    Error, Family, Location, Position, Readable, hasher::Hasher, mem::Mem, proof::Proof,
+    Error, Family, Location, MAX_PINNED_NODES, Position, Readable, hasher::Hasher, mem::Mem,
+    proof::Proof,
 };
 use ahash::RandomState;
 use alloc::{
     sync::{Arc, Weak},
+    vec,
     vec::Vec,
 };
 #[cfg(feature = "std")]
@@ -118,6 +120,18 @@ use core::{iter::Peekable, num::NonZeroUsize, ops::Range};
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
+
+/// Collect peak digests into a shared slice. A structure has at most [`MAX_PINNED_NODES`] peaks,
+/// so they are gathered on the stack and the slice is the only allocation.
+fn shared_peaks<D: Digest>(peaks: impl Iterator<Item = D>) -> Arc<[D]> {
+    let mut digests = [D::EMPTY; MAX_PINNED_NODES];
+    let mut count = 0;
+    for digest in peaks {
+        digests[count] = digest;
+        count += 1;
+    }
+    Arc::from(&digests[..count])
+}
 
 /// Push a node position into the list for its height, growing the outer Vec as needed.
 fn push_node<F: Family>(levels: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
@@ -186,7 +200,12 @@ fn plan_hashes<F: Family>(
         unhashed.resize_with(dirty.len(), Vec::new);
     }
     for (nodes, dirty) in unhashed.iter_mut().zip(dirty) {
-        nodes.extend(dirty);
+        // A level with nothing unhashed takes the dirty list whole.
+        if nodes.is_empty() {
+            *nodes = dirty;
+        } else {
+            nodes.extend(dirty);
+        }
     }
     unhashed
 }
@@ -327,13 +346,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         &self.parent.strategy
     }
 
-    /// Retain the live parent chain up to the first dropped weak link.
+    /// Retain the live ancestors past the parent, up to the first dropped weak link.
     ///
-    /// Nodes beyond that link are read from committed state.
+    /// The batch holds its parent itself. Nodes beyond the dropped link are read from committed
+    /// state.
     #[cfg(feature = "std")]
     pub(crate) fn retain_ancestors(&self) -> Vec<Arc<MerkleizedBatch<F, D, S>>> {
         let mut ancestors = Vec::new();
-        let mut current = Some(Arc::clone(&self.parent));
+        let mut current = self.parent.parent.as_ref().and_then(Weak::upgrade);
         while let Some(batch) = current {
             current = batch.parent.as_ref().and_then(Weak::upgrade);
             ancestors.push(batch);
@@ -619,11 +639,17 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             .map(|level| level.iter().filter(|pos| **pos < parent_size).count())
             .sum();
         self.overwrites.reserve(overwritten);
+
+        // Every level computes its digests into the front of the same buffer, sized for the
+        // longest level.
+        let longest = levels.iter().map(Vec::len).max().unwrap_or(0);
+        let mut digests = vec![D::EMPTY; longest];
         for (height, positions) in levels.iter().enumerate() {
             if positions.is_empty() {
                 continue;
             }
-            self.merkleize_level(base, hasher, positions, height as u32);
+            let digests = &mut digests[..positions.len()];
+            self.merkleize_level(base, hasher, positions, height as u32, digests);
         }
 
         // Record the peaks of the state this batch represents. A batch without changes shares
@@ -631,12 +657,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let tip_peaks: Arc<[D]> = if self.appended.is_empty() && self.overwrites.is_empty() {
             Arc::clone(&self.parent.data.tip_peaks)
         } else {
-            F::peaks(self.size())
-                .map(|(pos, _)| {
-                    self.get_node(base, pos)
-                        .expect("peak must be in the batch chain or base")
-                })
-                .collect()
+            shared_peaks(F::peaks(self.size()).map(|(pos, _)| {
+                self.get_node(base, pos)
+                    .expect("peak must be in the batch chain or base")
+            }))
         };
 
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
@@ -667,32 +691,33 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Compute the digests of `positions` two at a time so the hasher can make progress on both
-    /// concurrently, appending `(position, digest)` results to `output`.
+    /// concurrently, writing each to its position's place in `digests`.
     fn zip_nodes(
         &self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         positions: &[Position<F>],
         height: u32,
-        output: &mut Vec<(Position<F>, D)>,
+        digests: &mut [D],
     ) {
         let (pairs, remainder) = positions.as_chunks::<2>();
-        for pair in pairs {
+        let (pair_digests, remainder_digest) = digests.as_chunks_mut::<2>();
+        for (pair, digests) in pairs.iter().zip(pair_digests) {
             let (left, right) = (pair[0], pair[1]);
             let (ll, lr) = self.child_digests(base, left, height);
             let (rl, rr) = self.child_digests(base, right, height);
             let (left_digest, right_digest) =
                 hasher.node_digest_pair([(left, &ll, &lr), (right, &rl, &rr)]);
-            output.push((left, left_digest));
-            output.push((right, right_digest));
+            *digests = [left_digest, right_digest];
         }
-        if let [pos] = remainder {
+        if let ([pos], [digest]) = (remainder, remainder_digest) {
             let (left, right) = self.child_digests(base, *pos, height);
-            output.push((*pos, hasher.node_digest(*pos, &left, &right)));
+            *digest = hasher.node_digest(*pos, &left, &right);
         }
     }
 
-    /// Compute digests for one height's dirty nodes via the configured strategy.
+    /// Compute digests for one height's dirty nodes via the configured strategy, overwriting
+    /// `digests`, which holds one slot per position, with each position's digest.
     ///
     /// The strategy splits the positions into batches of adjacent pairs, so every pair reaches
     /// [`Hasher::node_digest_pair`] together and only the last batch can end in a lone node.
@@ -702,27 +727,30 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         positions: &[Position<F>],
         height: u32,
+        digests: &mut [D],
     ) {
         let pairs = positions.len().div_ceil(2);
-        let computed: Vec<Vec<(Position<F>, D)>> =
-            self.parent
-                .strategy
-                .run_batches(pairs, NonZeroUsize::MIN, 2, |batches| {
-                    batches.map_collect_vec(
-                        |ranges| ranges,
-                        |range| {
+        self.parent
+            .strategy
+            .run_batches(pairs, NonZeroUsize::MIN, 2, |batches| {
+                // The ranges cover the pairs in order, so each takes its digests off the front.
+                let mut rest = &mut *digests;
+                batches.map_collect_vec(
+                    |ranges| {
+                        ranges.into_iter().map(move |range| {
                             let positions =
                                 &positions[2 * range.start..positions.len().min(2 * range.end)];
-                            let mut computed = Vec::with_capacity(positions.len());
-                            self.zip_nodes(base, hasher, positions, height, &mut computed);
-                            computed
-                        },
-                    )
-                });
-        for nodes in computed {
-            for (pos, digest) in nodes {
-                self.store_node(pos, digest);
-            }
+                            let digests = rest
+                                .split_off_mut(..positions.len())
+                                .expect("range ends within the level");
+                            (positions, digests)
+                        })
+                    },
+                    |(positions, digests)| self.zip_nodes(base, hasher, positions, height, digests),
+                );
+            });
+        for (pos, digest) in positions.iter().zip(digests.iter()) {
+            self.store_node(*pos, *digest);
         }
     }
 }
@@ -816,7 +844,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// Create a root batch representing the committed state of `mem`, using `strategy`
     /// for merkleization.
     pub fn from_mem_with_strategy(mem: &Mem<F, D>, strategy: S) -> Arc<Self> {
-        let peaks: Arc<[D]> = mem.peaks().collect();
+        let peaks = shared_peaks(mem.peaks());
         Arc::new(Self {
             parent: None,
             data: Arc::new(BatchData {
@@ -864,6 +892,29 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             }
         }
         None
+    }
+
+    /// The digests of the nodes [`Family::nodes_to_pin`] names for `start`, in its order, each
+    /// resolved from this batch or else from `base`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ElementPruned`] if a node is in neither.
+    #[cfg(feature = "std")]
+    pub(crate) fn pinned_nodes_at(
+        &self,
+        base: &Mem<F, D>,
+        start: Location<F>,
+    ) -> Result<Vec<D>, Error<F>> {
+        let mut nodes = Vec::with_capacity(F::nodes_to_pin(start).count());
+        for pos in F::nodes_to_pin(start) {
+            let node = self
+                .get_node(pos)
+                .or_else(|| base.get_node(pos))
+                .ok_or(Error::ElementPruned(pos))?;
+            nodes.push(node);
+        }
+        Ok(nodes)
     }
 
     /// Iterate the nodes this batch appended or overwrote relative to its parent batch.
