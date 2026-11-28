@@ -1,19 +1,21 @@
 use super::{Layout, Pending, create_header, hold::Hold, resolve_header, sync_dir};
-use crate::{BlobVersion, Error};
+use crate::{BlobVersion, Error, Handle, Removal};
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::{
     channel::oneshot,
-    sync::{AsyncMutex, Mutex},
+    sync::{AsyncMutex, Mutex, OwnedAsyncMutexGuard},
 };
 #[cfg(not(target_os = "linux"))]
 use std::collections::HashSet;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
-    io::ErrorKind,
+    future::Future as _,
+    io::{self, ErrorKind},
     ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::{Arc, Weak},
+    task::{Context, Poll, Waker},
 };
 
 mod blob;
@@ -53,7 +55,42 @@ impl Config {
 /// the open on their blocking threads before reading buffered.
 ///
 /// Directory operations are ordered within each partition and run concurrently across
-/// partitions, the order [crate::Storage::start_remove_many] promises.
+/// partitions, the order [crate::Storage::start_remove_many] promises. A removal batch takes a
+/// place in the queue of every partition it names before the call returns, and two batches take
+/// the same relative order in every partition they share. A batch runs once it has reached its
+/// turn in all of them and keeps every turn until its last removal is durable. An open, scan, or
+/// remove therefore queues only behind batches that name its partition. It waits for each of
+/// them as a whole, including the time that batch waits for its turn in its other partitions.
+///
+/// An empty batch names no partition, so it takes no place and completes with its `after`, or
+/// at once without one. A blob removal through [crate::Storage::remove] is a batch of one. It
+/// is submitted at its first poll and runs whether or not it is polled again. An open, a scan,
+/// and a whole-partition removal are submitted at their first poll that has cooperative budget.
+///
+/// A removal batch waits for its `after` while holding its places, so later directory
+/// operations on the partitions it names wait until `after` resolves (see
+/// [crate::Storage::start_remove_many]). Every context of a runtime shares one storage instance,
+/// so a stalled `after` stalls those partitions for every journal and actor in the runtime, and
+/// keeps the directory held against a successor [Storage::new]. A panic while a batch runs is
+/// reported through its [Removal] as [Error::Closed], and its payload is not resumed.
+///
+/// A blob removal completes once the blob's name is durably gone. It holds the blob open across
+/// the unlink and closes that descriptor only after it has delivered its result and released
+/// its turns, so neither the [Removal] nor the partition's next turn waits for the close. The
+/// blob's space can stay in use after the removal completes, until no handle or link to the file
+/// remains.
+///
+/// The closes run on the removal's blocking thread under the directory hold, so a successor
+/// [Storage::new] waits for them. They occupy that thread, so a later operation can wait for a
+/// blocking thread when the pool has none spare. A crash before a close leaves a file with no
+/// name, and the file system reclaims it when it recovers. A batch holds a bounded number of
+/// blobs open and closes the oldest inside its turn beyond that. A whole-partition removal holds
+/// no blob open, nor does the removal of a blob that cannot be opened or that keeps a name after
+/// the unlink.
+///
+/// The tokio runtime takes one turn of every partition's queue after its tasks finish, so every
+/// batch that holds a place and was submitted before then completes before shutdown. Dropping
+/// the runtime then joins its blocking pool, so the closes of those batches finish too.
 #[derive(Clone)]
 pub struct Storage {
     /// Orders each partition's namespace operations and records partition durability.
@@ -65,6 +102,10 @@ pub struct Storage {
     /// The live open of each blob and the debt its dropped handles left behind.
     pending: Arc<Pending>,
 }
+
+/// The exclusive use of one partition's directory, held by the operation at the head of the
+/// partition's queue until it has finished.
+type Turn = OwnedAsyncMutexGuard<Queue>;
 
 /// One partition's queue of directory operations, which serves them in the order they joined.
 ///
@@ -91,18 +132,44 @@ impl Drop for Queue {
     }
 }
 
+/// The blobs a removal batch has unlinked and still holds open.
+///
+/// Closing an unlinked blob can free its blocks, which takes time, so the batch chooses where
+/// that work runs by choosing where it drops this.
+#[derive(Default)]
+struct Unlinked(VecDeque<fs::File>);
+
+impl Unlinked {
+    /// The most blobs a batch holds open, so a batch of any length costs a bounded number of
+    /// descriptors.
+    const LIMIT: usize = 16;
+
+    /// Unlink the blob at `path` and keep it open (see [super::unlink]), first closing the
+    /// oldest blob held once [Self::LIMIT] are.
+    fn unlink(&mut self, path: &Path) -> io::Result<()> {
+        if self.0.len() == Self::LIMIT {
+            self.0.pop_front();
+        }
+        self.0.extend(super::unlink(path)?);
+        Ok(())
+    }
+}
+
 /// The directory operation queues and directory durability of this storage instance's
 /// partitions.
 #[derive(Default)]
 struct Partitions {
-    /// The queue of each partition with a waiting or running directory operation.
+    /// The queue of each partition with a waiting or running directory operation. A removal
+    /// batch joins every queue it needs under one acquisition of this lock, so any two batches
+    /// take the same relative order in every partition they share and never wait for each
+    /// other.
     queues: Mutex<HashMap<String, Weak<AsyncMutex<Queue>>>>,
     /// Partitions whose inherited directory changes are durable. Only the operation holding a
-    /// partition's turn reads or changes its entry. Removal retires the entry before
+    /// partition's [Turn] reads or changes its entry. Removal retires the entry before
     /// unlinking, and a blob removal restores it once the partition directory is synced.
     #[cfg(not(target_os = "linux"))]
     synced: Mutex<HashSet<PathBuf>>,
-    #[cfg(all(test, not(target_os = "linux")))]
+    #[cfg(test)]
     sync_hook: Mutex<tests::SyncHook>,
 }
 
@@ -128,7 +195,7 @@ impl Partitions {
     /// Makes storage root entry changes durable, with test hooks to pause or fail
     /// before the filesystem sync.
     fn sync_root(&self, root: &Path) -> Result<(), Error> {
-        #[cfg(all(test, not(target_os = "linux")))]
+        #[cfg(test)]
         tests::SyncHook::run(&self.sync_hook)?;
         sync_dir(root)
     }
@@ -140,7 +207,7 @@ impl Partitions {
         path: impl AsRef<Path> + Into<PathBuf>,
         root: Option<&Path>,
     ) -> Result<(), Error> {
-        #[cfg(all(test, not(target_os = "linux")))]
+        #[cfg(test)]
         tests::SyncHook::run(&self.sync_hook)?;
         sync_dir(path.as_ref())?;
         if let Some(root) = root {
@@ -157,6 +224,28 @@ impl Partitions {
     fn invalidate(&self, _path: &Path) {
         #[cfg(not(target_os = "linux"))]
         self.synced.lock().remove(_path);
+    }
+
+    /// Unlink one blob and make its removal durable in its partition directory. The blob stays
+    /// open in `unlinked` on success and on a failed directory sync, so the caller decides
+    /// where it is closed.
+    fn remove_blob(
+        &self,
+        pending: &Pending,
+        directory: &Path,
+        partition: &str,
+        name: &[u8],
+        unlinked: &mut Unlinked,
+    ) -> Result<(), Error> {
+        // Invalidate before unlinking so a failed removal cannot leave the partition marked
+        // durable. Only a surviving partition regains its cache entry after a successful sync.
+        let path = directory.join(partition);
+        self.invalidate(&path);
+        unlinked
+            .unlink(&path.join(hex(name)))
+            .map_err(|_| Error::BlobMissing(partition.to_string(), hex(name)))?;
+        pending.forget(partition, Some(name));
+        self.sync(path, None)
     }
 
     /// Make a partition's inherited directory entries durable on first access.
@@ -203,6 +292,14 @@ impl Storage {
             .queue(&mut self.partitions.queues.lock(), partition)
     }
 
+    /// Pause the next blob removal after it has delivered its result and released its turns,
+    /// before it closes the blobs it unlinked. Returns the receiver that reports its arrival
+    /// and the sender that releases it by sending or dropping.
+    #[cfg(test)]
+    pub(crate) fn pause_close(&self) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        self.pending.pause_close()
+    }
+
     /// Run `f` to completion on the blocking pool while owning a turn of
     /// `queue` and the directory hold, so dropping the returned future neither
     /// abandons `f` mid-sequence nor lets a successor storage instance
@@ -237,6 +334,108 @@ impl Storage {
             Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
             Err(_) => Err(Error::Closed),
         }
+    }
+
+    /// Wait for every directory operation submitted before this call, including queued removal
+    /// batches, by taking one turn of every partition's queue. A batch that has released its
+    /// turns may still be closing the blobs it unlinked. The runtime joins the blocking thread
+    /// doing so when it is dropped.
+    pub(crate) async fn drain(&self) {
+        let queues: Vec<_> = self
+            .partitions
+            .queues
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for queue in queues {
+            drop(queue.lock().await);
+        }
+    }
+
+    /// Like [Self::dispatch] for the distinct `partitions`, but queue `f` in each of them before
+    /// returning, so it runs whether or not the returned handle is polled, after every operation
+    /// on them submitted earlier and before every operation on them submitted later. With
+    /// `after`, `f` runs only once `after` has succeeded in its turn, and the handle otherwise
+    /// reports `after`'s failure. A queued closure dropped unstarted at runtime shutdown completes
+    /// the handle with [Error::Closed].
+    ///
+    /// The blobs `f` leaves in its [Unlinked] are closed once its result is delivered and every
+    /// turn is released, while the directory hold is still owned.
+    fn submit<T: Send + 'static>(
+        &self,
+        partitions: &[String],
+        after: Option<Removal>,
+        f: impl FnOnce(&Partitions, &mut Unlinked) -> Result<T, Error> + Send + 'static,
+    ) -> Handle<T> {
+        let hold = self.hold.clone();
+        let records = self.partitions.clone();
+        #[cfg(test)]
+        let pending = self.pending.clone();
+        let (sender, receiver) = oneshot::channel();
+
+        // Run `f` on the blocking pool with every turn, or report `after`'s failure, delivering
+        // the result before any turn is released.
+        let run = move |turns: Vec<Turn>, after: Result<(), Error>| match after {
+            Ok(()) => {
+                tokio::task::spawn_blocking(move || {
+                    let mut unlinked = Unlinked::default();
+                    let _ = sender.send(f(&records, &mut unlinked));
+                    drop(turns);
+
+                    // Closing the unlinked blobs can free their blocks. The closes run with
+                    // every turn released, so no operation waits for them in a queue, and with
+                    // the hold owned, so a successor storage instance starts only once they
+                    // have finished.
+                    #[cfg(test)]
+                    if !unlinked.0.is_empty() {
+                        pending.before_close();
+                    }
+                    drop(unlinked);
+                    drop(hold);
+                });
+            }
+            Err(err) => {
+                let _ = sender.send(Err(err));
+                drop(turns);
+            }
+        };
+
+        // A queue serves waiters in the order they join it, so the first poll of each
+        // acquisition takes the operation's place in that partition. The polls are exempt from
+        // the task's cooperative budget, which could otherwise return before joining, and all
+        // happen under the registry lock so no other batch joins between them. Waiting for a
+        // turn or for `after` continues on its own task.
+        let mut turns = Vec::with_capacity(partitions.len());
+        let mut waiting = Vec::new();
+        {
+            let mut queues = self.partitions.queues.lock();
+            let mut context = Context::from_waker(Waker::noop());
+            for partition in partitions {
+                let queue = self.partitions.queue(&mut queues, partition);
+                let mut acquire = Box::pin(tokio::task::unconstrained(queue.lock_owned()));
+                match acquire.as_mut().poll(&mut context) {
+                    Poll::Ready(turn) => turns.push(turn),
+                    Poll::Pending => waiting.push(acquire),
+                }
+            }
+        }
+        match (waiting.is_empty(), after) {
+            (true, None) => run(turns, Ok(())),
+            (_, after) => {
+                tokio::spawn(async move {
+                    for acquire in waiting {
+                        turns.push(acquire.await);
+                    }
+                    let after = match after {
+                        Some(after) => after.await,
+                        None => Ok(()),
+                    };
+                    run(turns, after);
+                });
+            }
+        }
+        Handle::from_receiver(receiver)
     }
 }
 
@@ -346,46 +545,71 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
 
+        // A blob removal is a batch of one, so it releases its turn before it closes the blob.
+        if let Some(name) = name {
+            let removal = vec![(partition.to_string(), name.to_vec())];
+            return self.start_remove_many(removal, None).await.await;
+        }
+
         let queue = self.queue(partition);
         let path = self.cfg.storage_directory.join(partition);
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
-        let name = name.map(<[u8]>::to_vec);
         let pending = self.pending.clone();
 
         // Run the removal to completion: dropping this future must not abandon
-        // the sequence between an unlink and the directory sync that makes it
-        // durable.
+        // the sequence between the unlinks and the directory sync that makes
+        // them durable.
         self.dispatch(queue, move |partitions| {
-            // Invalidate before unlinking so a failed removal cannot leave the
-            // partition marked durable.
+            // Invalidate before removing so a failed removal cannot leave the partition marked
+            // durable.
             partitions.invalidate(&path);
 
-            // Make the removal durable in its containing directory. Only a
-            // surviving partition regains its cache entry after a successful sync.
-            if let Some(name) = &name {
-                let blob_path = path.join(hex(name));
-                fs::remove_file(blob_path)
-                    .map_err(|_| Error::BlobMissing(partition.clone(), hex(name)))?;
+            // Distinguish missing partitions from other filesystem failures.
+            fs::remove_dir_all(&path).map_err(|error| match error.kind() {
+                ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
+                _ => Error::Io(error.into()),
+            })?;
 
-                pending.forget(&partition, Some(name));
+            pending.forget(&partition, None);
 
-                // Sync the partition directory to ensure the removal is durable.
-                partitions.sync(path, None)
-            } else {
-                // Distinguish missing partitions from other filesystem failures.
-                fs::remove_dir_all(&path).map_err(|error| match error.kind() {
-                    ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
-                    _ => Error::Io(error.into()),
-                })?;
-
-                pending.forget(&partition, None);
-
-                // Sync the storage directory to ensure the removal is durable.
-                partitions.sync_root(&storage_directory)
-            }
+            // Sync the storage directory to ensure the removal is durable.
+            partitions.sync_root(&storage_directory)
         })
         .await
+    }
+
+    async fn start_remove_many(
+        &self,
+        removals: Vec<(String, Vec<u8>)>,
+        after: Option<Removal>,
+    ) -> Removal {
+        if let Err(err) = super::validate_removals(&removals) {
+            return Removal::ready(Err(err));
+        }
+
+        // An empty batch names no partition, so it has no turn to wait for.
+        if removals.is_empty() {
+            return after.unwrap_or_else(|| Removal::ready(Ok(())));
+        }
+
+        // A batch takes one place in each partition, however many of its blobs it removes there.
+        let mut partitions: Vec<_> = removals
+            .iter()
+            .map(|(partition, _)| partition.clone())
+            .collect();
+        partitions.sort_unstable();
+        partitions.dedup();
+
+        let storage_directory = self.cfg.storage_directory.clone();
+        let pending = self.pending.clone();
+        let batch = self.submit(&partitions, after, move |partitions, unlinked| {
+            for (partition, name) in &removals {
+                partitions.remove_blob(&pending, &storage_directory, partition, name, unlinked)?;
+            }
+            Ok(())
+        });
+        Removal::submitted(batch)
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -444,13 +668,14 @@ mod tests {
     use std::{
         env,
         future::Future,
+        io::Read as _,
+        os::unix::fs::{MetadataExt as _, PermissionsExt as _},
         pin::Pin,
         sync::mpsc::{self, RecvTimeoutError},
         task::{Context, Poll},
     };
 
     /// One-shot pause and failure controls applied before a directory sync.
-    #[cfg(not(target_os = "linux"))]
     #[derive(Default)]
     pub(super) struct SyncHook {
         /// Announces entry and waits for release before the filesystem sync.
@@ -459,7 +684,6 @@ mod tests {
         fail: Option<Error>,
     }
 
-    #[cfg(not(target_os = "linux"))]
     impl SyncHook {
         /// Apply the controls armed in `hook`, which stays unlocked during a pause so syncs in
         /// other partitions can run.
@@ -475,6 +699,16 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    /// Pause the next directory sync, returning the receiver that reports its arrival and the
+    /// sender that releases it by sending or dropping. A removal's first sync follows its
+    /// unlink, so this holds a batch between unlinking a blob and making the removal durable.
+    fn pause_sync(storage: &Storage) -> (oneshot::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, entering) = oneshot::channel();
+        let (release, gate) = mpsc::channel();
+        storage.partitions.sync_hook.lock().pause = Some((entered, gate));
+        (entering, release)
     }
 
     fn random_suffix() -> u64 {
@@ -592,6 +826,311 @@ mod tests {
         });
     }
 
+    /// Removals submitted while their partition is held take their place in submission order.
+    /// Dropping the handle does not cancel them, and a scan submitted afterwards observes them.
+    #[tokio::test]
+    async fn test_start_remove_many_runs_in_submission_order() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_remove_many_{}", random_suffix()));
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+        for name in [b"a", b"b", b"c"] {
+            drop(storage.open("partition", name).await.unwrap());
+        }
+
+        // Hold the partition so every operation below queues behind it.
+        let turn = storage.queue("partition").lock_owned().await;
+        let removal = |name: &[u8]| ("partition".to_string(), name.to_vec());
+        drop(storage.start_remove_many(vec![removal(b"a")], None).await);
+        let second = storage.start_remove_many(vec![removal(b"b")], None).await;
+        let mut scan = Box::pin(storage.scan("partition"));
+        assert!((&mut scan).now_or_never().is_none());
+        drop(turn);
+
+        assert_eq!(scan.await.unwrap(), vec![b"c".to_vec()]);
+        second.await.unwrap();
+        drop(storage);
+        fs::remove_dir_all(storage_directory).unwrap();
+    }
+
+    /// An operation on a batch's partition submitted after the batch runs after every removal in
+    /// it.
+    #[tokio::test]
+    async fn test_start_remove_many_precedes_later_operations() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_remove_later_{}", random_suffix()));
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+        for name in [b"a", b"b"] {
+            drop(storage.open("partition", name).await.unwrap());
+        }
+
+        // Hold the partition so the batch and the later open queue behind it.
+        let turn = storage.queue("partition").lock_owned().await;
+        let removal = |name: &[u8]| ("partition".to_string(), name.to_vec());
+        let removed = storage
+            .start_remove_many(vec![removal(b"a"), removal(b"b")], None)
+            .await;
+        let mut open = Box::pin(storage.open("partition", b"x"));
+        assert!((&mut open).now_or_never().is_none());
+        drop(turn);
+
+        drop(open.await.unwrap());
+
+        // The batch sends its result before releasing its turn, so its completion is decided
+        // before the later open runs.
+        assert!(matches!(removed.peek(), Some(Ok(()))));
+        assert!(!storage_directory.join("partition").join(hex(b"b")).exists());
+        removed.await.unwrap();
+        drop(storage);
+        fs::remove_dir_all(storage_directory).unwrap();
+    }
+
+    /// A batch held inside a removal leaves other partitions free to open, scan, and remove,
+    /// while operations on its own partition wait for the whole batch.
+    #[tokio::test]
+    async fn test_start_remove_many_holds_only_its_partition() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_remove_held_{}", random_suffix()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            let removal = |partition: &str, name: &[u8]| (partition.to_string(), name.to_vec());
+            for name in [b"a", b"b"] {
+                drop(storage.open("removing", name).await.unwrap());
+            }
+            drop(storage.open("other", b"x").await.unwrap());
+
+            // Hold the batch after its first unlink.
+            let (entering, release) = pause_sync(&storage);
+            let removed = storage
+                .start_remove_many(
+                    vec![removal("removing", b"a"), removal("removing", b"b")],
+                    None,
+                )
+                .await;
+            entering.await.unwrap();
+            assert!(!storage_directory.join("removing").join(hex(b"a")).exists());
+
+            // Creating a blob, creating a partition, scanning, and removing a blob, a batch,
+            // and a partition all finish elsewhere while the batch is held.
+            drop(storage.open("other", b"y").await.unwrap());
+            drop(storage.open("fresh", b"z").await.unwrap());
+            let mut names = storage.scan("other").await.unwrap();
+            names.sort();
+            assert_eq!(names, vec![b"x".to_vec(), b"y".to_vec()]);
+            storage.remove("other", Some(b"x")).await.unwrap();
+            storage
+                .start_remove_many(vec![removal("other", b"y")], None)
+                .await
+                .await
+                .unwrap();
+            storage.remove("fresh", None).await.unwrap();
+            assert!(removed.peek().is_none());
+
+            // An open, a scan, and a removal in the batch's partition wait behind it.
+            let mut open = Box::pin(storage.open("removing", b"c"));
+            let mut scan = Box::pin(storage.scan("removing"));
+            let mut remove = Box::pin(storage.remove("removing", Some(b"b")));
+            assert!((&mut open).now_or_never().is_none());
+            assert!((&mut scan).now_or_never().is_none());
+            assert!((&mut remove).now_or_never().is_none());
+            assert!(storage_directory.join("removing").join(hex(b"b")).exists());
+            release.send(()).unwrap();
+
+            // They run in submission order after the batch's last removal.
+            drop(open.await.unwrap());
+            assert!(matches!(removed.peek(), Some(Ok(()))));
+            assert_eq!(scan.await.unwrap(), vec![b"c".to_vec()]);
+            assert!(matches!(remove.await, Err(Error::BlobMissing(_, _))));
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A batch naming several partitions holds each of them until its last removal, including
+    /// one whose removal has not started, and leaves the partitions it does not name free.
+    #[tokio::test]
+    async fn test_start_remove_many_orders_every_named_partition() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_remove_named_{}", random_suffix()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            let removal = |partition: &str, name: &[u8]| (partition.to_string(), name.to_vec());
+            for partition in ["first", "second", "third"] {
+                drop(storage.open(partition, b"a").await.unwrap());
+            }
+
+            // Hold the batch inside its removal from the first partition.
+            let (entering, release) = pause_sync(&storage);
+            let removed = storage
+                .start_remove_many(vec![removal("first", b"a"), removal("second", b"a")], None)
+                .await;
+            entering.await.unwrap();
+            assert!(storage_directory.join("second").join(hex(b"a")).exists());
+
+            // Scans of both named partitions wait, and a scan of another partition does not.
+            let mut first = Box::pin(storage.scan("first"));
+            let mut second = Box::pin(storage.scan("second"));
+            assert!((&mut first).now_or_never().is_none());
+            assert!((&mut second).now_or_never().is_none());
+            assert_eq!(storage.scan("third").await.unwrap(), vec![b"a".to_vec()]);
+            release.send(()).unwrap();
+
+            // Both scans observe the whole batch.
+            assert!(second.await.unwrap().is_empty());
+            assert!(matches!(removed.peek(), Some(Ok(()))));
+            assert!(first.await.unwrap().is_empty());
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A batch waiting for its turn in one partition already holds its place in the others, so
+    /// batches naming the same partitions in opposite orders run one after the other and a
+    /// later scan observes both.
+    #[tokio::test]
+    async fn test_start_remove_many_reserves_every_partition_while_waiting() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_remove_reserve_{}", random_suffix()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            let removal = |partition: &str, name: &[u8]| (partition.to_string(), name.to_vec());
+            for partition in ["left", "right"] {
+                for name in [b"a", b"b"] {
+                    drop(storage.open(partition, name).await.unwrap());
+                }
+            }
+
+            // Hold one partition so both batches wait there.
+            let turn = storage.queue("left").lock_owned().await;
+            let forward = storage
+                .start_remove_many(vec![removal("left", b"a"), removal("right", b"a")], None)
+                .await;
+            let backward = storage
+                .start_remove_many(vec![removal("right", b"b"), removal("left", b"b")], None)
+                .await;
+
+            // A scan of the other partition queues behind both batches, which have removed
+            // nothing yet.
+            let mut scan = Box::pin(storage.scan("right"));
+            assert!((&mut scan).now_or_never().is_none());
+            tokio::task::yield_now().await;
+            assert!((&mut scan).now_or_never().is_none());
+            for name in [b"a", b"b"] {
+                assert!(storage_directory.join("right").join(hex(name)).exists());
+            }
+            drop(turn);
+
+            assert!(scan.await.unwrap().is_empty());
+            assert!(matches!(forward.peek(), Some(Ok(()))));
+            assert!(matches!(backward.peek(), Some(Ok(()))));
+            assert!(storage.scan("left").await.unwrap().is_empty());
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A batch whose `after` is running in another partition holds its own partition until
+    /// `after` resolves, leaves other partitions free, and removes nothing if `after` failed.
+    #[tokio::test]
+    async fn test_start_remove_many_waits_for_after_in_another_partition() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_remove_lineage_{}", random_suffix()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            let removal = |partition: &str, name: &[u8]| (partition.to_string(), name.to_vec());
+            drop(storage.open("unrelated", b"a").await.unwrap());
+            for failed in [false, true] {
+                let (first, second) = (format!("first_{failed}"), format!("second_{failed}"));
+                for partition in [&first, &second] {
+                    drop(storage.open(partition, b"a").await.unwrap());
+                }
+
+                // Hold the predecessor inside its only successful removal.
+                let mut removals = vec![removal(&first, b"a")];
+                if failed {
+                    removals.push(removal(&first, b"missing"));
+                }
+                let (entering, release) = pause_sync(&storage);
+                let predecessor = storage.start_remove_many(removals, None).await;
+                entering.await.unwrap();
+                let removed = storage
+                    .start_remove_many(vec![removal(&second, b"a")], Some(predecessor.clone()))
+                    .await;
+
+                // A later scan of the waiting batch's partition queues behind it, and a scan of
+                // an unrelated partition does not.
+                let mut scan = Box::pin(storage.scan(&second));
+                assert!((&mut scan).now_or_never().is_none());
+                tokio::task::yield_now().await;
+                assert!((&mut scan).now_or_never().is_none());
+                assert_eq!(
+                    storage.scan("unrelated").await.unwrap(),
+                    vec![b"a".to_vec()]
+                );
+                assert!(removed.peek().is_none());
+                release.send(()).unwrap();
+
+                assert_eq!(scan.await.unwrap().is_empty(), !failed);
+                assert_eq!(predecessor.await.is_err(), failed);
+                assert_eq!(
+                    matches!(removed.await, Err(Error::BlobMissing(_, _))),
+                    failed
+                );
+            }
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Draining waits for the batches queued in every partition, whichever finishes first.
+    #[tokio::test]
+    async fn test_drain_waits_for_every_partition() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_drain_{}", random_suffix()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            for (early, late) in [("left", "right"), ("right", "left")] {
+                for partition in [early, late] {
+                    drop(storage.open(partition, b"a").await.unwrap());
+                }
+
+                // Queue a batch behind a held turn in each partition, then let the drain take
+                // its first place.
+                let early_turn = storage.queue(early).lock_owned().await;
+                let late_turn = storage.queue(late).lock_owned().await;
+                for partition in [early, late] {
+                    let batch = vec![(partition.to_string(), b"a".to_vec())];
+                    drop(storage.start_remove_many(batch, None).await);
+                }
+                let drain = tokio::spawn({
+                    let storage = storage.clone();
+                    async move { storage.drain().await }
+                });
+                tokio::task::yield_now().await;
+
+                // One partition's batch finishing does not finish the drain. The scan queues
+                // behind any turn the drain takes in that partition.
+                drop(early_turn);
+                assert!(storage.scan(early).await.unwrap().is_empty());
+                assert!(!drain.is_finished());
+                drop(late_turn);
+                drain.await.unwrap();
+                assert!(!storage_directory.join(late).join(hex(b"a")).exists());
+            }
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
     /// A partition's queue is retired once nothing waits or runs on it, whether its last
     /// operation finished or was dropped while waiting.
     #[tokio::test]
@@ -630,6 +1169,362 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A batch submitted by a task that has exhausted its cooperative budget still takes its
+    /// place ahead of operations submitted after it.
+    #[tokio::test]
+    async fn test_start_remove_many_with_exhausted_budget_precedes_scan() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_remove_budget_{}", random_suffix()));
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+        drop(storage.open("partition", b"a").await.unwrap());
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        let removed = storage
+            .start_remove_many(vec![("partition".into(), b"a".to_vec())], None)
+            .await;
+        let names = tokio::task::unconstrained(storage.scan("partition"))
+            .await
+            .unwrap();
+        removed.await.unwrap();
+        drop(storage);
+        fs::remove_dir_all(storage_directory).unwrap();
+        assert!(names.is_empty(), "{names:?}");
+    }
+
+    /// A batch whose predecessor's shared completion is mid-poll on another task, as when a caller
+    /// awaits an earlier removal, waits for that poll and then runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_start_remove_many_waits_for_shared_after_polled_elsewhere() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_remove_shared_{}", random_suffix()));
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+        drop(storage.open("partition", b"a").await.unwrap());
+
+        // A completion whose first poll after it resolves lingers, as when the polling task is
+        // preempted.
+        let (resolve, resolved) = oneshot::channel::<Result<(), Error>>();
+        let (entered, polling) = mpsc::channel();
+        let completion = async move {
+            let result = resolved.await.unwrap_or(Err(Error::Closed));
+            entered.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            result
+        }
+        .boxed()
+        .shared();
+
+        // Another task holds the completion mid-poll while the batch runs.
+        let observer = tokio::spawn(completion.clone());
+        resolve.send(Ok(())).unwrap();
+        tokio::task::spawn_blocking(move || polling.recv().unwrap())
+            .await
+            .unwrap();
+        let removed = storage
+            .start_remove_many(
+                vec![("partition".into(), b"a".to_vec())],
+                Some(Removal::submitted(Handle::from_future(completion))),
+            )
+            .await;
+        removed.await.unwrap();
+        observer.await.unwrap().unwrap();
+        assert!(storage.scan("partition").await.unwrap().is_empty());
+        drop(storage);
+        fs::remove_dir_all(storage_directory).unwrap();
+    }
+
+    /// A batch whose `after` has not resolved holds its place, and every later operation, until
+    /// `after` resolves. It then runs if `after` succeeded, and otherwise fails with its error
+    /// without removing anything.
+    #[tokio::test]
+    async fn test_start_remove_many_waits_for_after() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_remove_after_{}", random_suffix()));
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+        for (outcome, survivors) in [
+            (Ok(()), vec![b"b".to_vec()]),
+            (Err(Error::Closed), vec![b"a".to_vec(), b"b".to_vec()]),
+        ] {
+            let failed = outcome.is_err();
+            let partition = format!("partition_{failed}");
+            for name in [b"a", b"b"] {
+                drop(storage.open(&partition, name).await.unwrap());
+            }
+            let (resolve, resolved) = oneshot::channel();
+            let removed = storage
+                .start_remove_many(
+                    vec![(partition.clone(), b"a".to_vec())],
+                    Some(Removal::submitted(Handle::from_receiver(resolved))),
+                )
+                .await;
+
+            // A later scan waits behind the batch until its predecessor resolves.
+            let mut scan = Box::pin(storage.scan(&partition));
+            assert!((&mut scan).now_or_never().is_none());
+            tokio::task::yield_now().await;
+            assert!((&mut scan).now_or_never().is_none());
+            resolve.send(outcome).unwrap();
+
+            let mut names = scan.await.unwrap();
+            names.sort();
+            assert_eq!(names, survivors);
+            assert_eq!(removed.await.is_err(), failed);
+        }
+        drop(storage);
+        fs::remove_dir_all(storage_directory).unwrap();
+    }
+
+    /// A removal still queued when the runtime shuts down completes as closed.
+    #[test]
+    fn test_start_remove_many_closed_at_shutdown() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_remove_shutdown_{}", random_suffix()));
+        let runtime = tokio::runtime::Builder::new_multi_thread().build().unwrap();
+        let (storage, guard, handle) = runtime.block_on(async {
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            drop(storage.open("partition", b"a").await.unwrap());
+            let guard = storage.queue("partition").lock_owned().await;
+            let handle = storage
+                .start_remove_many(vec![("partition".to_string(), b"a".to_vec())], None)
+                .await;
+            (storage, guard, handle)
+        });
+        drop(runtime);
+        assert!(matches!(
+            futures::executor::block_on(handle),
+            Err(Error::Closed)
+        ));
+        drop(guard);
+        drop(storage);
+        fs::remove_dir_all(storage_directory).unwrap();
+    }
+
+    /// A blob removal, alone or in a batch, delivers its result and releases its partition
+    /// before it closes the blobs it unlinked, so neither its caller nor a later operation on
+    /// the partition waits for those closes.
+    #[tokio::test]
+    async fn test_remove_completes_before_blob_closes() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_remove_close_{}", random_suffix()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            let removal = |name: &[u8]| ("partition".to_string(), name.to_vec());
+            for batch in [false, true] {
+                for name in [b"a", b"b", b"c"] {
+                    drop(storage.open("partition", name).await.unwrap());
+                }
+
+                // The removal completes while it is held ahead of its closes.
+                let (entering, release) = storage.pause_close();
+                let removed = if batch {
+                    storage
+                        .start_remove_many(vec![removal(b"a"), removal(b"b")], None)
+                        .await
+                } else {
+                    storage.remove("partition", Some(b"a")).await.unwrap();
+                    storage.remove("partition", Some(b"b")).await.unwrap();
+                    Removal::ready(Ok(()))
+                };
+                removed.clone().await.unwrap();
+                entering.await.unwrap();
+
+                // A scan, an open that recreates a removed name, and a batch that follows the
+                // removal all run in the partition while the blobs are still open.
+                assert_eq!(
+                    storage.scan("partition").await.unwrap(),
+                    vec![b"c".to_vec()]
+                );
+                drop(storage.open("partition", b"a").await.unwrap());
+                storage
+                    .start_remove_many(vec![removal(b"c")], Some(removed))
+                    .await
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    storage.scan("partition").await.unwrap(),
+                    vec![b"a".to_vec()]
+                );
+                storage.remove("partition", None).await.unwrap();
+                release.send(()).unwrap();
+            }
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A removal that has completed keeps the directory held until it has closed the blobs it
+    /// unlinked, so a successor instance starts only once they are closed.
+    #[tokio::test]
+    async fn test_hold_retained_until_removed_blob_closes() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_hold_close_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config.clone());
+        drop(storage.open("partition", b"blob").await.unwrap());
+
+        // Complete a removal and hold it ahead of its close.
+        let (entering, release) = storage.pause_close();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            storage.remove("partition", Some(b"blob")).await.unwrap();
+            entering.await.unwrap();
+        })
+        .await
+        .expect("removal must complete ahead of its close");
+        drop(storage);
+
+        // A successor waits on the hold until the removal is released to close its blob.
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let second = Storage::new(config);
+            tx.send(()).unwrap();
+            drop(second);
+        });
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("second instance must stay blocked on the hold: {other:?}"),
+        }
+        release.send(()).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("second instance must acquire the hold after the blob closes");
+        handle.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A blob removal reports a missing blob, an entry that cannot be unlinked, and a failed
+    /// directory sync. Only a removal that unlinked a blob holds one open past its turn, and it
+    /// does so whether or not it then succeeds.
+    #[tokio::test]
+    async fn test_remove_failures_with_deferred_close() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_remove_errors_{}", random_suffix()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            let removal = |name: &[u8]| ("partition".to_string(), name.to_vec());
+            for name in [b"a", b"b", b"c"] {
+                drop(storage.open("partition", name).await.unwrap());
+            }
+
+            // A missing blob and a directory in a blob's place fail without unlinking, so
+            // neither reaches the armed pause.
+            let (entering, release) = storage.pause_close();
+            let directory = storage_directory.join("partition").join(hex(b"directory"));
+            fs::create_dir(&directory).unwrap();
+            for name in [b"missing".as_slice(), b"directory"] {
+                assert!(matches!(
+                    storage.remove("partition", Some(name)).await,
+                    Err(Error::BlobMissing(partition, blob))
+                        if partition == "partition" && blob == hex(name)
+                ));
+            }
+            assert!(storage.pending.test.before_close.lock().is_some());
+            fs::remove_dir(&directory).unwrap();
+
+            // A failed directory sync is reported after the unlink. The blob is still closed
+            // outside the turn, so the partition is free while the close is held.
+            storage.partitions.sync_hook.lock().fail = Some(Error::WriteFailed);
+            assert!(matches!(
+                storage.remove("partition", Some(b"a")).await,
+                Err(Error::WriteFailed)
+            ));
+            entering.await.unwrap();
+            let mut names = storage.scan("partition").await.unwrap();
+            names.sort();
+            assert_eq!(names, vec![b"b".to_vec(), b"c".to_vec()]);
+            release.send(()).unwrap();
+
+            // A batch that fails partway reports the failure while the blob it had already
+            // unlinked is still open, and leaves the blobs after the failure in place.
+            let (entering, release) = storage.pause_close();
+            let removed = storage
+                .start_remove_many(
+                    vec![removal(b"b"), removal(b"missing"), removal(b"c")],
+                    None,
+                )
+                .await;
+            assert!(matches!(removed.await, Err(Error::BlobMissing(_, _))));
+            entering.await.unwrap();
+            assert_eq!(
+                storage.scan("partition").await.unwrap(),
+                vec![b"c".to_vec()]
+            );
+            release.send(()).unwrap();
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A batch keeps at most [Unlinked::LIMIT] blobs open, the ones it unlinked last.
+    #[test]
+    fn test_unlinked_holds_bounded_blobs() {
+        let directory = env::temp_dir().join(format!("storage_tokio_unlinked_{}", random_suffix()));
+        fs::create_dir_all(&directory).unwrap();
+        let mut unlinked = Unlinked::default();
+        let mut inodes = Vec::new();
+        for index in 0..Unlinked::LIMIT + 3 {
+            let path = directory.join(index.to_string());
+            fs::write(&path, b"blob").unwrap();
+            inodes.push(fs::metadata(&path).unwrap().ino());
+            unlinked.unlink(&path).unwrap();
+            assert!(!path.exists());
+            assert!(unlinked.0.len() <= Unlinked::LIMIT);
+        }
+        let held: Vec<_> = unlinked
+            .0
+            .iter()
+            .map(|file| file.metadata().unwrap().ino())
+            .collect();
+        assert_eq!(held, inodes[3..]);
+        drop(unlinked);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Unlinking returns the file open only when the unlink left it with no name.
+    #[test]
+    fn test_unlink_returns_last_reference() {
+        let directory = env::temp_dir().join(format!("storage_tokio_unlink_{}", random_suffix()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("blob");
+
+        // The returned descriptor still reads the contents of a file with no name.
+        fs::write(&path, b"contents").unwrap();
+        let mut file = crate::storage::unlink(&path).unwrap().unwrap();
+        assert!(!path.exists());
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"contents");
+
+        // A file reachable through another name is not returned, and the other name keeps it.
+        let link = directory.join("link");
+        fs::write(&path, b"linked").unwrap();
+        fs::hard_link(&path, &link).unwrap();
+        assert!(crate::storage::unlink(&path).unwrap().is_none());
+        assert!(!path.exists());
+        assert_eq!(fs::read(&link).unwrap(), b"linked");
+
+        // A file that cannot be opened is still unlinked. A privileged process opens it
+        // whatever its mode.
+        fs::write(&path, b"unreadable").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let opened = fs::File::open(&path).is_ok();
+        assert_eq!(crate::storage::unlink(&path).unwrap().is_some(), opened);
+        assert!(!path.exists());
+
+        // A missing file and a directory are reported, and the directory stays.
+        assert_eq!(
+            crate::storage::unlink(&path).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+        fs::create_dir(&path).unwrap();
+        assert!(crate::storage::unlink(&path).is_err());
+        assert!(path.is_dir());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     /// While an operation holds one partition's turn, later operations on that partition wait

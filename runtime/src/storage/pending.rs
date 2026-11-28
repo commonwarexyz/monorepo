@@ -3,14 +3,14 @@
 use crate::Error;
 use commonware_formatting::hex;
 #[cfg(test)]
-use commonware_utils::channel::oneshot::Sender as OneshotSender;
+use commonware_utils::channel::oneshot::{self, Sender as OneshotSender};
 use commonware_utils::{channel::watch, sync::Mutex};
 #[cfg(not(target_os = "linux"))]
 use std::collections::HashSet;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
-use std::sync::mpsc::{Receiver as MpscReceiver, Sender as MpscSender};
+use std::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
 use std::{
     collections::HashMap,
     ptr,
@@ -65,6 +65,9 @@ pub(super) struct Hooks {
     /// Pause the next admission before it inspects the name's entry, letting predecessor work
     /// retire.
     pub(super) before_admit: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
+    /// Pause the next removal that kept a blob open across its unlink once it has released the
+    /// namespace, before it closes the blob.
+    pub(super) before_close: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
 }
 
 /// Tracks one name's latest open, outstanding settlement, and retained durability state.
@@ -327,6 +330,25 @@ impl Pending {
     /// Report that a completion is about to flush, then wait for release.
     pub(crate) fn before_complete(&self) {
         let hook = self.test.before_complete.lock().take();
+        if let Some((entered, released)) = hook {
+            let _ = entered.send(());
+            let _ = released.recv();
+        }
+    }
+
+    /// Pause the next removal that kept a blob open across its unlink before it closes the
+    /// blob. Returns the receiver that reports its arrival and the sender that releases it by
+    /// sending or dropping.
+    pub(crate) fn pause_close(&self) -> (oneshot::Receiver<()>, MpscSender<()>) {
+        let (entered, entering) = oneshot::channel();
+        let (release, gate) = mpsc::channel();
+        *self.test.before_close.lock() = Some((entered, gate));
+        (entering, release)
+    }
+
+    /// Report that a removal is about to close the blobs it unlinked, then wait for release.
+    pub(crate) fn before_close(&self) {
+        let hook = self.test.before_close.lock().take();
         if let Some((entered, released)) = hook {
             let _ = entered.send(());
             let _ = released.recv();

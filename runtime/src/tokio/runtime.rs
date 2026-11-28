@@ -421,7 +421,7 @@ impl crate::Runner for Runner {
         let process = MeteredProcess::init(&mut runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
-        // Initialize storage
+        // Initialize storage, keeping a handle to drain its removal batches at shutdown.
         let storage = MeteredStorage::new(
             TokioStorage::new(TokioStorageConfig::new(
                 self.cfg.storage_directory.clone(),
@@ -429,6 +429,7 @@ impl crate::Runner for Runner {
             )),
             &mut runtime_registry,
         );
+        let drain = storage.clone();
 
         // Under the hold, a prior run's operations have finished. Linux flushes the filesystem.
         // Other platforms sync the storage directory here so inherited partition removals are
@@ -495,10 +496,17 @@ impl crate::Runner for Runner {
             }))
         }));
 
-        // Finish cleanup if the root or a task panic unwound first.
+        // Finish cleanup if the root or a task panic unwound first. Removal batches run outside
+        // the task tracker, so take one turn of every partition's queue to let every batch
+        // submitted before the tasks finished complete. A completed batch may still be closing
+        // the blobs it unlinked on the blocking pool. Dropping the runtime when this function
+        // returns joins that pool.
         executor.tasks.close();
         tree.abort();
-        runtime.block_on(executor.tasks.wait());
+        runtime.block_on(async {
+            executor.tasks.wait().await;
+            drain.inner().drain().await;
+        });
         gauge.dec();
 
         match output {
@@ -1010,6 +1018,138 @@ mod tests {
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
         strategy
+    }
+
+    /// Removal batches still queued behind others in several partitions when the root returns
+    /// complete before shutdown, so the next run finds their blobs gone.
+    #[test]
+    fn test_shutdown_completes_queued_removals() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+
+        // Partitions of different sizes finish at different times.
+        let partitions = [
+            ("drain_large", 64u64),
+            ("drain_medium", 16),
+            ("drain_small", 2),
+        ];
+        let names =
+            |blobs: u64| -> Vec<_> { (0..blobs).map(|name| name.to_be_bytes().to_vec()).collect() };
+        let encoded = Runner::new(cfg).start(|context| async move {
+            for (partition, blobs) in partitions {
+                for name in &names(blobs) {
+                    drop(context.open(partition, name).await.unwrap());
+                }
+            }
+            for (partition, blobs) in partitions {
+                let batch = |names: &[Vec<u8>]| {
+                    names
+                        .iter()
+                        .map(|name| (partition.to_string(), name.clone()))
+                        .collect()
+                };
+
+                // The second batch queues behind the first, which is still removing when the
+                // root returns.
+                let names = names(blobs);
+                let (first, second) = names.split_at(names.len() - 1);
+                drop(context.start_remove_many(batch(first), None).await);
+                drop(context.start_remove_many(batch(second), None).await);
+            }
+            context.encode()
+        });
+        assert!(encoded.contains("removals_submitted_total 6"), "{encoded}");
+
+        let cfg = Config::new().with_storage_directory(storage_directory.clone());
+        Runner::new(cfg).start(|context| async move {
+            for (partition, _) in partitions {
+                assert!(context.scan(partition).await.unwrap().is_empty());
+            }
+        });
+        std::fs::remove_dir_all(storage_directory).unwrap();
+    }
+
+    /// Batches that finish after every caller dropped their completions still settle the
+    /// storage's removal metrics, since the context polls each running batch to completion.
+    #[test]
+    fn test_unobserved_removals_settle_metrics() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        Runner::new(cfg).start(|context| async move {
+            for name in [b"a", b"b"] {
+                drop(context.open("unobserved", name).await.unwrap());
+            }
+
+            // Each batch waits for its gate. Its caller drops the completion before the gate
+            // opens.
+            let mut gates = Vec::new();
+            for name in [b"a", b"b"] {
+                let (gate, opened) = oneshot::channel();
+                let after = Removal::submitted(Handle::from_receiver(opened));
+                let batch = vec![("unobserved".to_string(), name.to_vec())];
+                drop(context.start_remove_many(batch, Some(after)).await);
+                gates.push(gate);
+            }
+            let encoded = context.encode();
+            assert!(encoded.contains("removals_pending 2"), "{encoded}");
+
+            // One batch may run and the other fails with its gate's error.
+            let mut gates = gates.into_iter();
+            gates.next().unwrap().send(Ok(())).unwrap();
+            gates.next().unwrap().send(Err(Error::Closed)).unwrap();
+            let settled = |encoded: &str| encoded.contains("removals_pending 0");
+            for _ in 0..10_000 {
+                if settled(&context.encode()) {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let encoded = context.encode();
+            assert!(settled(&encoded), "{encoded}");
+            assert!(encoded.contains("removals_completed_total 1"), "{encoded}");
+            assert!(encoded.contains("removals_failed_total 1"), "{encoded}");
+            assert_eq!(
+                context.scan("unobserved").await.unwrap(),
+                vec![b"b".to_vec()]
+            );
+        });
+        std::fs::remove_dir_all(storage_directory).unwrap();
+    }
+
+    /// A removal that completed before the root returned still holds the blob it unlinked.
+    /// Shutdown finishes only once that blob is closed.
+    #[test]
+    fn test_shutdown_waits_for_removed_blob_close() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (runner_done_tx, runner_done_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            Runner::new(cfg).start(|context| async move {
+                drop(context.open("partition", b"blob").await.unwrap());
+
+                // Complete a removal and hold it ahead of its close.
+                let (entering, release) = context.storage.inner().pause_close();
+                context.remove("partition", Some(b"blob")).await.unwrap();
+                entering.await.unwrap();
+                release_tx.send(release).unwrap();
+            });
+            runner_done_tx.send(()).unwrap();
+        });
+
+        let release = release_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the removal must complete ahead of its close");
+        match runner_done_rx.recv_timeout(Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("Runner::start must not return before the blob closes: {other:?}"),
+        }
+        release.send(()).unwrap();
+        runner_done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runner::start must return after the blob closes");
+        runner.join().unwrap();
+        std::fs::remove_dir_all(storage_directory).unwrap();
     }
 
     #[test]

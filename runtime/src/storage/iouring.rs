@@ -124,6 +124,11 @@ pub struct Config {
 /// Namespace operations (open, scan, and removal) run synchronously on the calling worker, so
 /// [crate::Storage::start_remove_many] removes its whole batch before it returns.
 ///
+/// A blob removal holds the blob open across its unlink and closes that descriptor after
+/// releasing the namespace lock, so namespace operations on other workers do not wait for the
+/// close. The call returns after the close. Another handle or link to the file keeps its space in
+/// use after the call returns.
+///
 /// Errors from a durability barrier during content sync, or from the filesystem write of a
 /// [crate::WriteOptions::SYNC] request, remain errors on later opens through this instance until
 /// the blob is removed or recreated. Creation failures are retained only when the header is
@@ -162,6 +167,36 @@ impl Storage {
             hold,
             pending: Arc::new(Pending::default()),
         }
+    }
+
+    /// Remove a blob or a partition and make the removal durable. The caller holds the
+    /// namespace lock. A removed blob is left open in `unlinked` on success and on a failed
+    /// directory sync, so the caller decides where it is closed.
+    fn remove_locked(
+        &self,
+        partition: &str,
+        name: Option<&[u8]>,
+        unlinked: &mut Option<File>,
+    ) -> Result<(), Error> {
+        let path = self.storage_directory.join(partition);
+        let sync_path = if let Some(name) = name {
+            *unlinked = super::unlink(&path.join(hex(name)))
+                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+
+            &path
+        } else {
+            // Distinguish missing partitions from other filesystem failures.
+            fs::remove_dir_all(&path).map_err(|error| match error.kind() {
+                ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                _ => Error::Io(error.into()),
+            })?;
+
+            &self.storage_directory
+        };
+
+        // Retire the removed names before the directory sync makes the removal durable.
+        self.pending.forget(partition, name);
+        sync_dir(sync_path)
     }
 }
 
@@ -257,29 +292,20 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        // Remove under the filesystem lock. A removed blob stays open past it.
+        let guard = self.lock.lock();
+        let mut unlinked = None;
+        let result = self.remove_locked(partition, name, &mut unlinked);
+        drop(guard);
 
-        let path = self.storage_directory.join(partition);
-        let sync_path = if let Some(name) = name {
-            let blob_path = path.join(hex(name));
-            fs::remove_file(blob_path)
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
-
-            &path
-        } else {
-            // Distinguish missing partitions from other filesystem failures.
-            fs::remove_dir_all(&path).map_err(|error| match error.kind() {
-                ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
-                _ => Error::Io(error.into()),
-            })?;
-
-            &self.storage_directory
-        };
-
-        // Retire the removed names before the directory sync makes the removal durable.
-        self.pending.forget(partition, name);
-        sync_dir(sync_path)
+        // Closing the removed blob can free its blocks, which takes time. The close runs with
+        // the lock released, so namespace operations on other workers do not wait for it.
+        #[cfg(test)]
+        if unlinked.is_some() {
+            self.pending.before_close();
+        }
+        drop(unlinked);
+        result
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -1767,6 +1793,51 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&storage_directory);
         });
+    }
+
+    /// A blob removal releases the namespace lock before it closes the blob it unlinked, so
+    /// another thread's open and scan do not wait for that close.
+    #[test]
+    fn test_remove_releases_namespace_before_blob_closes() {
+        let (storage, storage_directory) = create_test_storage();
+        drop(futures::executor::block_on(storage.open("partition", b"blob")).unwrap());
+
+        // Hold the removal between releasing the lock and closing the blob.
+        let (mut entering, release) = storage.pending.pause_close();
+        let remover = thread::spawn({
+            let storage = storage.clone();
+            move || futures::executor::block_on(storage.remove("partition", Some(b"blob")))
+        });
+        while entering.try_recv().is_err() {
+            assert!(
+                !remover.is_finished(),
+                "removal must pause ahead of its close"
+            );
+            thread::yield_now();
+        }
+
+        // Another thread recreates the removed name and scans the partition while the blob is
+        // open.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let opener = thread::spawn({
+            let storage = storage.clone();
+            move || {
+                let opened = futures::executor::block_on(storage.open("partition", b"blob"));
+                let names = futures::executor::block_on(storage.scan("partition"));
+                tx.send((opened.unwrap().1, names.unwrap())).unwrap();
+            }
+        });
+        let (len, names) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the namespace must be free while the removed blob is open");
+        assert_eq!(len, 0);
+        assert_eq!(names, vec![b"blob".to_vec()]);
+        assert!(!remover.is_finished());
+        release.send(()).unwrap();
+        remover.join().unwrap().unwrap();
+        opener.join().unwrap();
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
     #[test]
