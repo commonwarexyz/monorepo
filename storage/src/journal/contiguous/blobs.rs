@@ -16,9 +16,23 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
-use commonware_utils::{Widen, futures::try_join_all};
-use futures::{FutureExt as _, future};
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
+use commonware_utils::{
+    Widen,
+    channel::{fallible::OneshotExt as _, oneshot},
+    futures::try_join_all,
+    sync::Mutex,
+};
+use futures::{
+    FutureExt as _,
+    future::{self, BoxFuture, Shared},
+};
+use std::{
+    collections::BTreeMap,
+    future::{Future, poll_fn},
+    num::NonZeroUsize,
+    sync::Arc,
+    task::{Poll, ready},
+};
 use tracing::{debug, warn};
 
 /// Metrics for a journal's blobs.
@@ -62,10 +76,10 @@ impl<E: Context> Partition<E> {
     }
 
     /// Open the given blob as a [`Writer`], creating it if it does not exist.
-    pub(super) async fn open(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
+    pub(super) async fn open(&self, blob: u64) -> Result<Writer<E::Blob>, RError> {
         let name = blob.to_be_bytes();
         let (blob, size) = self.context.open(&self.name, &name).await?;
-        Ok(Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone()).await?)
+        Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone()).await
     }
 
     /// Open a blob under exclusive initialization ownership.
@@ -188,13 +202,89 @@ impl<E: Context> Partition<E> {
     }
 }
 
+/// A journal's writable tail.
+enum Tail<B: RBlob> {
+    /// The open tail.
+    Open(Writer<B>),
+    /// A tail whose blob is still being created. It holds no data.
+    Opening {
+        /// The durable open of the blob. Dropping it with the journal drops the open.
+        open: Open<B>,
+        /// Polls `open` and sends its writer to `created`. It advances only while it is polled,
+        /// and it finishes without a writer once the journal is gone.
+        creation: Creation,
+        /// Receives the tail when `creation` finishes.
+        created: oneshot::Receiver<Result<Writer<B>, RError>>,
+    },
+}
+
+/// The durable open of a tail's blob, owned by the journal.
+///
+/// The creation polls the open under the slot's lock. Dropping this takes the same lock, so it
+/// waits for a poll in progress and then drops the open, and no later poll can advance it. That
+/// matches dropping an append that awaited the open.
+struct Open<B: RBlob>(Arc<Mutex<OpenSlot<B>>>);
+
+/// An open in flight, or nothing once it has finished or its journal has dropped it.
+type OpenSlot<B> = Option<BoxFuture<'static, Result<Writer<B>, RError>>>;
+
+impl<B: RBlob> Drop for Open<B> {
+    fn drop(&mut self) {
+        self.0.lock().take();
+    }
+}
+
+/// The creation of a tail's blob, shared so that a sync handle can start it and wait for it
+/// without owning the open it polls.
+type Creation = Shared<BoxFuture<'static, ()>>;
+
+impl<B: RBlob> Tail<B> {
+    /// Return the tail's writer, first waiting for its blob to be created.
+    async fn open(self) -> Result<Writer<B>, Error> {
+        match self {
+            Self::Open(writer) => Ok(writer),
+            Self::Opening {
+                open: _open,
+                creation,
+                created,
+            } => {
+                creation.await;
+                Ok(created.await.map_err(|_| RError::Closed)??)
+            }
+        }
+    }
+}
+
 /// A journal's blobs: contiguous sealed blobs ending in one writable tail.
+///
+/// # Rollover
+///
+/// [Self::seal_tail] seals a full tail without creating its successor, so the append that fills
+/// a blob does not pay for a durable blob creation. Until the successor is created, storage
+/// holds the sealed blob and nothing after it. Recovery accepts a full newest blob and creates
+/// the tail that follows it.
+///
+/// The successor holds no data, so reads, snapshots, and [Self::start_sync] proceed without it.
+/// An operation that writes to the tail or releases blobs first creates it and returns a failure
+/// to do so. The blobs it releases are therefore deleted only once the tail exists, and a
+/// journal reduced to its tail keeps that blob as the durable record of its position.
+///
+/// The creation syncs a directory, and that sync can delay other writes to the same storage. It
+/// therefore starts neither in the append that sealed the blob nor in the call that starts the
+/// next sync. A caller polls a handle from [Self::drive_tail] once it has left its append path
+/// to wait for durability, so that poll starts the creation, and the handle completes only once
+/// the creation has finished.
+///
+/// Otherwise the first operation that needs the tail creates it. A journal that is never synced
+/// creates each successor in the first append after the rollover.
 pub(super) struct Writable<E: Context> {
-    partition: Partition<E>,
+    /// A successor's creation holds its own reference, because it outlives the borrow that
+    /// prepared it.
+    partition: Arc<Partition<E>>,
     metrics: Metrics,
 
     /// The writable tail.
-    tail: Writer<E::Blob>,
+    tail: Tail<E::Blob>,
 
     /// Index of the first blob in [Self::sealed].
     oldest_blob_index: u64,
@@ -273,10 +363,10 @@ impl<E: Context> Writable<E> {
         let metrics = Metrics::new(&partition.context);
         let _ = metrics.tracked.try_set(sealed.len() + 1);
         Ok(Self {
-            partition,
+            partition: Arc::new(partition),
             metrics,
             oldest_blob_index,
-            tail,
+            tail: Tail::Open(tail),
             sealed,
             sealed_snapshot: None,
             tail_predecessor_sync: None,
@@ -295,21 +385,27 @@ impl<E: Context> Writable<E> {
     }
 
     /// Encode a value directly into the tail's write buffer if it fits, returning its logical
-    /// offset. See [Writer::try_append_value].
+    /// offset. See [Writer::try_append_value]. Nothing fits while the tail is still being created.
     pub(super) fn try_append_value<T: EncodeSize + Write>(&mut self, value: &T) -> Option<u64> {
-        self.tail.try_append_value(value)
+        match &mut self.tail {
+            Tail::Open(tail) => tail.try_append_value(value),
+            Tail::Opening { .. } => None,
+        }
     }
 
     /// Append `buf` to the tail's write buffer if it fits, returning its logical offset. See
-    /// [Writer::try_append].
+    /// [Writer::try_append]. Nothing fits while the tail is still being created.
     pub(super) fn try_append(&mut self, buf: &[u8]) -> Option<u64> {
-        self.tail.try_append(buf)
+        match &mut self.tail {
+            Tail::Open(tail) => tail.try_append(buf),
+            Tail::Opening { .. } => None,
+        }
     }
 
     /// Append owned bytes to the tail, returning the logical offset of the first byte.
     pub(super) async fn append_owned(mut self, buf: IoBuf) -> Result<(Self, u64), Error> {
-        let (tail, offset) = self.tail.append_owned(buf).await?;
-        self.tail = tail;
+        let (tail, offset) = self.tail.open().await?.append_owned(buf).await?;
+        self.tail = Tail::Open(tail);
         Ok((self, offset))
     }
 
@@ -318,7 +414,10 @@ impl<E: Context> Writable<E> {
         Blobs {
             oldest_blob_index: self.oldest_blob_index,
             sealed: SealedBlobs::Borrowed(&self.sealed),
-            tail: Blob::Writer(&self.tail),
+            tail: match &self.tail {
+                Tail::Open(tail) => Some(Blob::Writer(tail)),
+                Tail::Opening { .. } => None,
+            },
         }
     }
 
@@ -335,36 +434,80 @@ impl<E: Context> Writable<E> {
         };
 
         // Freeze the live tail before combining it with the immutable history.
-        let (tail, snapshot) = self.tail.snapshot().await?;
-        self.tail = tail;
+        let tail = match self.tail {
+            Tail::Open(tail) => {
+                let (tail, snapshot) = tail.snapshot().await?;
+                self.tail = Tail::Open(tail);
+                Some(Blob::Sealed(snapshot))
+            }
+            Tail::Opening { .. } => None,
+        };
         let blobs = Blobs {
             oldest_blob_index: self.oldest_blob_index,
             sealed: SealedBlobs::Owned(sealed),
-            tail: Blob::Sealed(snapshot),
+            tail,
         };
         Ok((self, blobs))
     }
 
-    /// Seal the tail, start syncing it, and open the next blob as the new tail.
+    /// Seal the tail, start syncing it, and prepare the creation of the next blob as the new
+    /// tail.
     pub(super) async fn seal_tail(mut self) -> Result<Self, Error> {
-        // Observe both outstanding syncs before creating a successor blob.
+        // Observe both outstanding syncs before sealing the tail.
         self.drain_tail_predecessor_sync().await?;
-        self.tail = self.tail.wait_for_sync().await?;
-
-        // Install a fresh tail and retain the sealed predecessor's durability completion.
         let next_blob = self
             .tail_blob_index()
             .checked_add(1)
             .ok_or(Error::OffsetOverflow)?;
-        let new_writer = self.partition.open(next_blob).await?;
-        let old_writer = std::mem::replace(&mut self.tail, new_writer);
-        let (sealed, handle) = old_writer.seal().await?;
+        let tail = self.tail.open().await?.wait_for_sync().await?;
+
+        // Seal the full tail and retain its durability completion.
+        let (sealed, handle) = tail.seal().await?;
         self.metrics.tracked.inc();
         self.metrics.synced.inc();
         self.sealed.push(sealed);
         self.sealed_snapshot = None;
         assert!(self.tail_predecessor_sync.is_none());
         self.tail_predecessor_sync = Some(handle.boxed().shared());
+
+        // Leave the successor's creation unstarted, so that it cannot delay the writes that
+        // follow the seal.
+        let partition = self.partition.clone();
+        let open = Open(Arc::new(Mutex::new(Some(
+            async move { partition.open(next_blob).await }.boxed(),
+        ))));
+
+        // The creation polls the open and delivers its writer under the slot's lock. It watches
+        // the journal's receiver so that a handle waiting for it wakes when the journal is
+        // dropped.
+        let slot = open.0.clone();
+        let (sender, created) = oneshot::channel();
+        let mut sender = Some(sender);
+        let creation = poll_fn(move |cx| {
+            let Some(journal) = sender.as_mut() else {
+                return Poll::Ready(());
+            };
+            if journal.poll_closed(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            let mut slot = slot.lock();
+            let Some(open) = slot.as_mut() else {
+                return Poll::Ready(());
+            };
+            let opened = ready!(open.poll_unpin(cx));
+            *slot = None;
+            if let Some(journal) = sender.take() {
+                journal.send_lossy(opened);
+            }
+            Poll::Ready(())
+        })
+        .boxed()
+        .shared();
+        self.tail = Tail::Opening {
+            open,
+            creation,
+            created,
+        };
         Ok(self)
     }
 
@@ -374,6 +517,7 @@ impl<E: Context> Writable<E> {
         min_position: u64,
         items_per_blob: u64,
     ) -> Option<(u64, u64)> {
+        // Cap the target to the tail. The tail exists before any blob below it is released.
         let blob =
             super::position_to_blob(min_position, items_per_blob).min(self.tail_blob_index());
         if blob <= self.oldest_blob_index() {
@@ -382,6 +526,33 @@ impl<E: Context> Writable<E> {
 
         // The retained blob starts at or before min_position, so the product fits.
         Some((blob, blob * items_per_blob))
+    }
+
+    /// Return a handle that completes with `sync` once the creation of a tail that is still
+    /// being created has also finished. Polling the handle starts that creation.
+    ///
+    /// The handle reports a failed `sync` only once the creation has finished. A failed creation
+    /// is returned by the next operation that needs the tail, not by the handle.
+    ///
+    /// Storage may order a partition's directory operations and keep the creation's place in
+    /// that order from its first poll. A creation that reaches its turn while nobody polls it
+    /// then holds up the partition's later directory operations, such as a runtime's shutdown
+    /// drain, until the handle, `commit`, `sync`, or an operation that needs the tail polls it
+    /// again, or the journal is dropped. A caller that polls the handle should therefore poll it
+    /// until it completes.
+    ///
+    /// A handle that outlives the journal starts no creation and holds no open. A creation that
+    /// storage has already begun may still finish and leave an empty blob, which recovery takes
+    /// as the tail.
+    pub(super) fn drive_tail(
+        &self,
+        sync: impl Future<Output = Result<(), RError>> + Send + 'static,
+    ) -> Handle<()> {
+        let Tail::Opening { creation, .. } = &self.tail else {
+            return Handle::from_future(sync);
+        };
+        let creation = creation.clone();
+        Handle::from_future(async move { future::join(creation, sync).await.1 })
     }
 
     /// Drop every blob below `min_blob`, returning the deletions to submit, oldest first. Safe
@@ -398,9 +569,9 @@ impl<E: Context> Writable<E> {
     ) -> Result<(Self, Vec<(String, Vec<u8>)>), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
 
-        // Observe outstanding sync failures before releasing any retained data.
-        self.drain_tail_predecessor_sync().await?;
-        self.tail = self.tail.wait_for_sync().await?;
+        // Observe outstanding sync failures before releasing any retained data. The release can
+        // leave the tail as the only blob, so its creation finishes first.
+        self = self.wait_for_sync().await?;
 
         // A released blob's cached pages are retired with its last handle, so a snapshot that
         // still holds the blob can keep reading them.
@@ -492,7 +663,11 @@ impl<E: Context> Writable<E> {
     pub(super) fn prune_below(&self, offset: u64) {
         match self.sealed.first() {
             Some(sealed) => sealed.prune(offset),
-            None => self.tail.prune(offset),
+            None => {
+                if let Tail::Open(tail) = &self.tail {
+                    tail.prune(offset);
+                }
+            }
         }
     }
 
@@ -501,15 +676,15 @@ impl<E: Context> Writable<E> {
     /// Safe with live readers, like [Self::release]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
     pub(super) async fn clear(mut self, tail_blob: u64) -> Result<Self, Error> {
-        // Observe outstanding sync failures before removing any retained data.
-        self.drain_tail_predecessor_sync().await?;
-        self.tail = self.tail.wait_for_sync().await?;
+        // Observe outstanding sync failures and finish the tail's creation before removing any
+        // retained data.
+        self = self.wait_for_sync().await?;
 
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
             self.partition.remove(blob).await?;
         }
         let _ = self.metrics.tracked.try_set(0);
-        self.tail = self.partition.open(tail_blob).await?;
+        self.tail = Tail::Open(self.partition.open(tail_blob).await?);
         self.metrics.tracked.inc();
         self.oldest_blob_index = tail_blob;
         self.sealed.clear();
@@ -532,12 +707,18 @@ impl<E: Context> Writable<E> {
 
         // Keep at most one tail sync in flight. A pending predecessor sync is not awaited here:
         // the returned handle joins it, so handles from consecutive calls can be pending at once.
-        self.tail = self.tail.wait_for_sync().await?;
+        // The tail writer retains its completion. A tail still being created has nothing to sync.
+        let tail_sync = match self.tail {
+            Tail::Open(tail) => {
+                let (tail, tail_sync) = tail.wait_for_sync().await?.start_sync().await?;
+                self.tail = Tail::Open(tail);
+                self.metrics.synced.inc();
+                tail_sync
+            }
+            Tail::Opening { .. } => Handle::ready(Ok(())),
+        };
 
-        // The tail writer retains its completion. The returned handle also joins the predecessor.
-        let (tail, tail_sync) = self.tail.start_sync().await?;
-        self.tail = tail;
-        self.metrics.synced.inc();
+        // The returned handle also joins the predecessor.
         let predecessor = self.tail_predecessor_sync.clone();
         let handle = Handle::from_future(async move {
             if let Some(predecessor) = predecessor {
@@ -551,15 +732,16 @@ impl<E: Context> Writable<E> {
         Ok((self, handle))
     }
 
-    /// Wait for every started sync to complete, surfacing a failure without changing any blob.
+    /// Wait for every started sync and for the tail's creation, surfacing a failure without
+    /// starting any other change to storage.
     pub(super) async fn wait_for_sync(mut self) -> Result<Self, Error> {
         self.drain_tail_predecessor_sync().await?;
-        self.tail = self.tail.wait_for_sync().await?;
+        self.tail = Tail::Open(self.tail.open().await?.wait_for_sync().await?);
         Ok(self)
     }
 
-    /// Remove every blob and the partition itself, after observing any started sync so a failed
-    /// sync removes nothing.
+    /// Remove every blob and the partition itself, after observing any started sync and the
+    /// tail's creation so a failure removes nothing.
     pub(super) async fn destroy(self) -> Result<(), Error> {
         let blobs = self.wait_for_sync().await?;
         let tail_blob = blobs.tail_blob_index();
@@ -579,8 +761,8 @@ pub(super) struct Blobs<'a, B: RBlob> {
     oldest_blob_index: u64,
     /// Sealed historical blobs.
     sealed: SealedBlobs<'a, B>,
-    /// Tail blob.
-    tail: Blob<'a, B>,
+    /// Tail blob, absent while it is still being created.
+    tail: Option<Blob<'a, B>>,
 }
 
 /// Storage for the sealed history slice.
@@ -966,10 +1148,11 @@ impl<'a, B: RBlob> Blobs<'a, B> {
         self.oldest_blob_index + self.sealed.as_slice().len() as u64
     }
 
-    /// Resolve a blob, if retained.
+    /// Resolve a blob, if retained. A tail still being created holds no position and does not
+    /// resolve.
     pub(super) fn get(&self, blob: u64) -> Option<Blob<'a, B>> {
         if blob == self.tail_blob_index() {
-            return Some(self.tail.clone());
+            return self.tail.clone();
         }
         self.sealed
             .as_slice()
@@ -988,13 +1171,13 @@ impl<E: Context> Writable<E> {
     /// Open `blob` as an independent writer, outside this journal's tracking
     /// (simulates a crash-artifact blob).
     pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
-        self.partition.open(blob).await
+        Ok(self.partition.open(blob).await?)
     }
 
     /// Make one blob durable.
     pub(crate) async fn sync_blob(mut self, blob: u64) -> Result<Self, Error> {
         if blob == self.tail_blob_index() {
-            self.tail = self.tail.sync().await?;
+            self.tail = Tail::Open(self.tail.open().await?.sync().await?);
             return Ok(self);
         }
         if blob < self.oldest_blob_index || blob >= self.tail_blob_index() {

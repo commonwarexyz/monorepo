@@ -1006,8 +1006,8 @@ pub(crate) mod tests {
         buffer::paged::CacheRef,
         deterministic,
         mocks::{
-            DeferredRemoveContext, DelayedSyncContext, PendingSyncs, drive_pending_syncs,
-            fail_pending_syncs,
+            DeferredOpenContext, DeferredRemoveContext, DelayedSyncContext, PendingSyncs,
+            drive_pending_syncs, fail_pending_syncs,
         },
         reschedule,
     };
@@ -1398,6 +1398,89 @@ pub(crate) mod tests {
             assert_eq!(db.get_metadata(), Some(O::value(2)));
             db.destroy().await.unwrap();
         });
+    }
+
+    /// A crash can leave the witness journal's data blob and offsets blob each sealed with no
+    /// successor, since a rollover seals the full blob before its successor is created. Whichever
+    /// successors exist at the crash, the reopened db holds the committed state.
+    pub(crate) fn test_compact_crash_before_witness_successor_exists<O: TestOperation>() {
+        fn cfg<O: TestOperation>() -> Config<O::Cfg, Sequential> {
+            Config {
+                strategy: Sequential,
+                witness: JournalConfig {
+                    items_per_section: NZU64!(2),
+                    ..witness_config::<O>("compact-pending-successor")
+                },
+            }
+        }
+        let partitions = [
+            "compact-pending-successor-witness_data",
+            "compact-pending-successor-witness_offsets-blobs",
+        ];
+        for created in 0..1usize << partitions.len() {
+            let executor = deterministic::Runner::default();
+            let (root, checkpoint) = executor.start_and_recover(|context| async move {
+                let (db_context, opens) = DeferredOpenContext::new(context.child("first"));
+                let db: Db<O::Family, _, O, Sha256, Sequential> =
+                    Db::init(db_context, cfg::<O>(), None).await.unwrap();
+
+                // The bootstrap witness and one applied batch fill the first section. Polling the
+                // sync handle makes it durable and starts the successors' creations. Both
+                // creations stay parked.
+                for partition in partitions {
+                    opens.defer(partition);
+                }
+                let batch = db
+                    .new_batch()
+                    .mutate(1)
+                    .with_metadata(Some(O::value(11)))
+                    .merkleize(&db)
+                    .await
+                    .unwrap();
+                let (db, mut handle) = db
+                    .apply_batch(batch)
+                    .await
+                    .unwrap()
+                    .start_sync()
+                    .await
+                    .unwrap();
+                assert!((&mut handle).now_or_never().is_none());
+                let root = db.root();
+
+                // The creations selected by `created` finish before the crash.
+                for (index, partition) in partitions.into_iter().enumerate() {
+                    assert_eq!(opens.parked(partition), 1);
+                    let exists = created & (1 << index) != 0;
+                    if exists {
+                        let name = 1u64.to_be_bytes();
+                        drop(context.open(partition, &name).await.unwrap());
+                    }
+                    let blobs = context.scan(partition).await.unwrap();
+                    assert_eq!(blobs.len(), 1 + usize::from(exists));
+                }
+                drop(db);
+                root
+            });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let db: TestDb<O> = Db::init(context.child("second"), cfg::<O>(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(db.root(), root, "{created:#b}");
+                assert_eq!(db.get_metadata(), Some(O::value(11)), "{created:#b}");
+
+                // The reopened db applies into the successors and stays durable.
+                let batch = db
+                    .new_batch()
+                    .mutate(2)
+                    .with_metadata(Some(O::value(22)))
+                    .merkleize(&db)
+                    .await
+                    .unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
+                db.destroy().await.unwrap();
+            });
+        }
     }
 
     /// State persisted via an awaited start_sync handle is recovered on reopen.
@@ -4264,6 +4347,7 @@ pub(crate) mod tests {
                 test_serve_refuses_requests_outside_witness,
                 test_serve_retained_witnesses,
                 test_compact_apply_overlaps_start_sync,
+                test_compact_crash_before_witness_successor_exists,
                 test_compact_start_sync_recovery,
                 test_compact_start_sync_failure_propagates,
                 test_compact_start_sync_then_noop_sync_drains,
