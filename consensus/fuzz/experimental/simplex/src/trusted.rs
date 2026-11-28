@@ -272,9 +272,9 @@ mod tests {
         Handoff, Viewable,
         simplex::{
             ForwardPolicy,
-            types::{Activity, Attributable as _, Notarize, Proposal, Vote},
+            types::{Activity, Notarize, Proposal, Vote},
         },
-        types::{Epoch, Round, TermLength, ViewDelta},
+        types::{Attributable as _, Epoch, Round, TermLength, ViewDelta},
     };
     use commonware_consensus_fuzz_core::{
         CertifyChoice, Configuration, DEFAULT_MAILBOX_SIZE, EPOCH, FAULT_PHASE, MAX_SLEEP_DURATION,

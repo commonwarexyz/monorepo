@@ -257,6 +257,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
             database: None,
+            operation_codec_config: (),
             mailbox_size: MAILBOX_SIZE,
             me: Some(local.clone()),
             fetch_timeout: NZDuration!(Duration::from_secs(2)),

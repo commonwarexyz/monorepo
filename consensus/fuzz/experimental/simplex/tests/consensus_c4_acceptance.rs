@@ -5,11 +5,11 @@ use commonware_consensus::{
     simplex::{
         scheme::ed25519,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
-            Nullify, NullifyFinalize, Proposal, Vote,
+            Activity, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize, Nullify,
+            NullifyFinalize, Proposal, Vote,
         },
     },
-    types::{Epoch, Round, TermLength, View, ViewDelta},
+    types::{Attributable, Epoch, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     EPOCH, MAX_RAW_BYTES, MAX_TERM_LENGTH, reach, sample_optimistic_views, state_bounds,

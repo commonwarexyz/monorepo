@@ -372,6 +372,7 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(identity.clone()),
                 database: None,
+                operation_codec_config: (),
                 mailbox_size: MAILBOX_SIZE,
                 me: Some(identity.clone()),
                 fetch_timeout: NZDuration!(RESOLVER_TIMEOUT),

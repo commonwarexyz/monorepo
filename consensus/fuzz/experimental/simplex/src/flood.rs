@@ -30,9 +30,9 @@ use commonware_consensus::{
     Handoff, Monitor, Reporter as _, Viewable,
     simplex::{
         ForwardPolicy,
-        types::{Activity, Attributable, Finalize, Notarize, Nullify, Proposal, Vote},
+        types::{Activity, Finalize, Notarize, Nullify, Proposal, Vote},
     },
-    types::{Epoch, Round, TermLength, View, ViewDelta},
+    types::{Attributable, Epoch, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX, BlockFilterChoice, CertifyChoice, DEFAULT_MAILBOX_SIZE, EPOCH,

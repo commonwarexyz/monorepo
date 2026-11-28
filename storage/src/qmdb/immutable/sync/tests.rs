@@ -49,7 +49,7 @@ pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
     /// Returns the key and value an operation sets, or `None` for a commit.
     fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)>;
     /// Number of set operations in the in-memory index.
-    fn snapshot_len(db: &Self::Db) -> usize;
+    fn index_len(db: &Self::Db) -> usize;
     /// Returns the value stored under `key`, if any.
     fn lookup(db: &Self::Db, key: &Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
@@ -110,7 +110,7 @@ where
 
         assert_eq!(H::ops_root(&synced_db), target_root);
         assert_eq!(H::inactivity_floor(&synced_db), first_commit_end);
-        assert_eq!(H::snapshot_len(&synced_db), late_ops.len());
+        assert_eq!(H::index_len(&synced_db), late_ops.len());
 
         // Keys from the second batch (after the floor) should be findable.
         for op in &late_ops {
@@ -366,8 +366,8 @@ pub(crate) mod harnesses {
             }
         }
 
-        fn snapshot_len(db: &Self::Db) -> usize {
-            db.snapshot.len()
+        fn index_len(db: &Self::Db) -> usize {
+            db.index.len()
         }
 
         async fn lookup(db: &Self::Db, key: &Self::Key) -> Option<Self::Value> {

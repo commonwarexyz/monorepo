@@ -10,13 +10,14 @@
 //! # Submission and Cancellation
 //!
 //! Staging keeps every SQE-referenced resource alive until the operation CQE,
-//! including when submission returns a transient error. Cancellation CQEs only
-//! acknowledge the cancellation attempt. They cannot release those resources.
+//! including when submission returns a transient error. A successful
+//! cancellation posts no CQE of its own (CQE_SKIP_SUCCESS), and a failed one
+//! only reports the attempt. Neither can release those resources.
 //!
 //! Dropping a local or forwarded observer cancels reads and network operations.
 //! Queued requests can finish immediately, while in-flight requests need a cancellation
-//! SQE and must await their operation CQE. Writes and syncs continue through all
-//! follow-up SQEs after their observers are dropped.
+//! SQE and must await their operation CQE. Writes, syncs, and resizes continue through
+//! all follow-up SQEs after their observers are dropped.
 //!
 //! Cancellations stage first, followed by operations in FIFO order. The
 //! operation limit excludes cancellation and ring wait SQEs. A full SQ needs a
@@ -44,6 +45,11 @@
 //! until its CQE is reaped. See [`super::idle`] for how pool worker
 //! selection fits with this wait.
 //!
+//! A park counts as iowait while storage requests are in flight. Otherwise it
+//! passes NO_IOWAIT, so waiting only on network requests is not iowait. A
+//! request still waiting for its durability permit does not count, since the
+//! request holding the permit already counts on the worker that staged it.
+//!
 //! # Cleanup
 //!
 //! Observer callbacks and request-resource destruction go through [`Deferred`],
@@ -67,7 +73,7 @@ use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
 use io_uring::{
     EnterFlags, IoUring,
     opcode::AsyncCancel,
-    squeue::SubmissionQueue,
+    squeue::{Flags as SqeFlags, SubmissionQueue},
     types::{CancelBuilder, SubmitArgs, Timespec},
 };
 use std::{
@@ -80,7 +86,7 @@ use std::{
 };
 use tracing::warn;
 
-/// Shared acknowledgement token for cancellation SQEs.
+/// Shared user data of cancellation SQEs, which post CQEs only on failure.
 ///
 /// Like the ring wait token, this uses the slot index reserved by
 /// [`Waiters::insert`].
@@ -143,6 +149,8 @@ enum Enter {
         /// When to stop waiting, or `None` to wait without a bound. A
         /// deadline that already passed does not sleep.
         deadline: Option<Instant>,
+        /// Whether a blocking wait should count as waiting for storage I/O.
+        iowait: bool,
     },
 }
 
@@ -283,7 +291,8 @@ impl Driver {
         }
     }
 
-    /// Clear local and forwarded observation before draining retained writes and syncs.
+    /// Clear local and forwarded observation before draining retained writes, syncs, and
+    /// resizes.
     pub fn close(&mut self, deferred: &mut Deferred) {
         for id in self.state.waiters.close(deferred) {
             self.state.cancel(id, deferred);
@@ -384,18 +393,19 @@ impl Driver {
 
         // Keep the arm guard alive through the wait. A notification racing this
         // check either prevents sleeping or wakes the ring wait.
-        let arm = parker.arm(seen);
+        let arm = parker.arm_ring(seen);
         if !arm.still_idle() {
             return Ok(false);
         }
 
-        // A ring wait that an earlier park left queued serves this park. Its
-        // compare belonged to that park, so this arm alone guards the sequence
-        // since `seen`, and a later notification finds the waiter bit and
-        // wakes that wait.
+        // A ring wait that an earlier ring park left queued serves this park,
+        // even when thread parks came in between, since their wakes pass over
+        // it. Its compare belonged to the ring park that installed it, so this
+        // arm alone guards the sequence since `seen`, and a later notification
+        // finds the ring bit and wakes that wait.
         //
         // A transient enter can leave a new wait's SQE unsubmitted. Its
-        // snapshot carries the waiter bit, so a later enter queues it only
+        // snapshot carries the ring bit, so a later enter queues it only
         // inside a park armed with the same word and otherwise fails it with
         // EAGAIN.
         if self.state.ring_wait_needed {
@@ -403,7 +413,8 @@ impl Driver {
             self.state.ring_wait_needed = false;
         }
 
-        Self::enter(&mut self.ring, Enter::Wait { deadline })?;
+        let iowait = self.state.waiters.storage_in_flight() != 0;
+        Self::enter(&mut self.ring, Enter::Wait { deadline, iowait })?;
         Ok(true)
     }
 
@@ -427,6 +438,7 @@ impl Driver {
         let mut timeout = Duration::ZERO;
         if let Enter::Wait {
             deadline: Some(deadline),
+            ..
         } = mode
         {
             timeout = deadline.saturating_duration_since(Instant::now());
@@ -446,6 +458,7 @@ impl Driver {
             Enter::TaskWork => {
                 let to_submit =
                     u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+
                 // SAFETY: `to_submit` counts only entries already published to
                 // the SQ, whose resources stay alive until their CQEs, and no
                 // argument pointer is passed.
@@ -458,14 +471,40 @@ impl Driver {
                     )
                 }
             }
-            Enter::Wait { deadline: None } => ring.submit_and_wait(1),
-            Enter::Wait { deadline: Some(_) } => {
+            Enter::Wait { deadline, iowait } => {
+                let to_submit =
+                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+                let mut flags = EnterFlags::GETEVENTS;
+
+                if !iowait {
+                    flags |= EnterFlags::NO_IOWAIT;
+                }
+
                 // EXT_ARG bounds the wait without reserving an SQE for a timeout.
-                let ts = Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos());
-                let args = SubmitArgs::new().timespec(&ts);
-                match ring.submitter().submit_with_args(1, &args) {
+                let ts = deadline.map(|_| {
+                    Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos())
+                });
+                let args = ts.as_ref().map(|ts| SubmitArgs::new().timespec(ts));
+
+                if args.is_some() {
+                    flags |= EnterFlags::EXT_ARG;
+                }
+
+                #[cfg(test)]
+                tests::record_wait(flags);
+
+                // SAFETY: `to_submit` counts only entries already published to
+                // the SQ, whose resources stay alive until their CQEs, and
+                // `args` outlives the call. Without EXT_ARG the kernel reads the
+                // null argument as an absent signal mask and ignores its size.
+                let result = unsafe {
+                    ring.submitter()
+                        .enter(to_submit, 1, flags.bits(), args.as_ref())
+                };
+
+                match result {
                     // This timeout bounds the enter. Request expiry belongs to
                     // the wheel.
                     Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
@@ -515,8 +554,10 @@ impl Drop for Driver {
         // a live wait synchronously, and keep the word allocated if that fails.
         //
         // SINGLE_ISSUER rejects the cancel from any thread but the owner with
-        // EEXIST, which would leak the word, so the driver must drop on its
-        // owner thread, as worker cleanup does.
+        // EEXIST. That would leak the word, and until the ring's teardown
+        // cancels the wait, it could take a ring wake meant for a later driver
+        // on the same parker. So the driver must drop on its owner thread, as
+        // worker cleanup does.
         //
         // No wait is live once its completion was reaped.
         if self.state.ring_wait_needed {
@@ -745,8 +786,11 @@ impl State {
                 continue;
             }
 
+            // Only the target's CQE can retire it, so a successful
+            // cancellation posts no CQE. The kernel still posts a failure.
             let cancel = AsyncCancel::new(id.user_data())
                 .build()
+                .flags(SqeFlags::SKIP_SUCCESS)
                 .user_data(CANCEL_USER_DATA);
 
             // SAFETY: AsyncCancel carries only the stable user_data identity.
@@ -814,10 +858,10 @@ impl State {
         }
 
         // Only the target operation's CQE can retire its resource owners.
+        // SKIP_SUCCESS suppresses a successful cancellation's CQE, so this
+        // token arrives only with a failure.
         if user_data == CANCEL_USER_DATA {
-            if result == 0 {
-                // Cancellation successful.
-            } else if result == -libc::EALREADY {
+            if result == -libc::EALREADY {
                 // Cancellation is no longer possible at this stage. The target
                 // operation CQE should follow shortly.
             } else if result == -libc::ENOENT {
@@ -851,7 +895,7 @@ pub mod tests {
             park::tests::{handles, unpark_when_armed, wait_until_armed, wake},
             request::{
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
-                SyncRequest, WriteAtRequest, WriteAtState,
+                ResizeRequest, SyncRequest, WriteAtRequest, WriteAtState,
             },
             wheel::BUDGET,
         },
@@ -899,6 +943,9 @@ pub mod tests {
         /// Callback run once at the end of this thread's next service turn
         /// that leaves a durability request waiting for its permit.
         static WHILE_ACQUIRING: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+
+        /// Flags of this thread's latest wait enter.
+        static LAST_WAIT: Cell<Option<EnterFlags>> = const { Cell::new(None) };
     }
 
     /// Clear an unused injection when its test scope exits or unwinds.
@@ -941,6 +988,11 @@ pub mod tests {
     /// counter.
     pub fn drop_completion(ring: &IoUring) -> bool {
         take_fault(ring, Fault::DropCompletion)
+    }
+
+    /// Remember a wait's flags for assertions on the calling thread.
+    pub fn record_wait(flags: EnterFlags) {
+        LAST_WAIT.set(Some(flags));
     }
 
     /// Fail service when retired resources are awaiting deferred cleanup, and
@@ -1753,14 +1805,14 @@ pub mod tests {
     }
 
     #[test]
-    fn test_cancel_acknowledgements_leave_requests_and_results_untouched() {
+    fn test_failed_cancellations_leave_requests_and_results_untouched() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
         let id = harness.stage(recv(left, 5, None), None, 0);
         harness.driver.state.cancel(id, &mut harness.deferred);
 
-        // Acknowledgements cannot release the operation's kernel resources.
-        for result in [0, -libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
+        // Failed cancellations cannot release the operation's kernel resources.
+        for result in [-libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
             harness
                 .driver
                 .state
@@ -1785,14 +1837,11 @@ pub mod tests {
             .state
             .complete(id, result, &mut harness.deferred);
 
-        for result in [0, -libc::ENOENT] {
-            harness
-                .driver
-                .state
-                .handle_cqe(CANCEL_USER_DATA, result, &mut harness.deferred);
-
-            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
-        }
+        harness
+            .driver
+            .state
+            .handle_cqe(CANCEL_USER_DATA, -libc::ENOENT, &mut harness.deferred);
+        assert_eq!(harness.driver.state.waiters.in_flight(), 0);
 
         harness.collect();
         assert_eq!(harness.completed.len(), 1);
@@ -1800,8 +1849,51 @@ pub mod tests {
         harness.drain();
     }
 
+    /// A successful cancellation posts only its target's CQE.
     #[test]
-    fn test_cancel_acknowledgement_invariants() {
+    fn test_successful_cancellation_posts_only_its_target_cqe() {
+        let mut harness = Harness::new(1);
+
+        // A receive without data stays in the kernel until cancelled.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let id = harness.admit(recv(left, 1, None), 0);
+        harness.service();
+        assert!(harness.driver.state.waiters.is_in_flight(id));
+        harness.driver.orphan(id, &mut harness.deferred);
+        assert!(
+            !harness
+                .driver
+                .state
+                .stage_cancellations(&mut harness.driver.ring.submission())
+        );
+
+        // Enter until the target's CQE arrives, then once more so a
+        // cancellation CQE would show.
+        let mut cqes = Vec::new();
+        let mut last = false;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !last {
+            assert!(Instant::now() < deadline, "target CQE missing");
+            last = !cqes.is_empty();
+            Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
+            let completion = harness.driver.ring.completion();
+            cqes.extend(completion.map(|cqe| (cqe.user_data(), cqe.result())));
+        }
+        assert_eq!(cqes, [(id.user_data(), -libc::ECANCELED)]);
+
+        for (user_data, result) in cqes {
+            harness
+                .driver
+                .state
+                .handle_cqe(user_data, result, &mut harness.deferred);
+        }
+        assert!(!harness.driver.state.waiters.is_in_flight(id));
+
+        harness.drain();
+    }
+
+    #[test]
+    fn test_cancellation_cqe_invariants() {
         // Both control tokens use the index that Waiters refuses to allocate.
         assert_ne!(CANCEL_USER_DATA, RING_WAIT_USER_DATA);
         for token in [CANCEL_USER_DATA, RING_WAIT_USER_DATA] {
@@ -1824,7 +1916,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_request_retirement_releases_hold_before_cancel_acknowledgement() {
+    fn test_request_retirement_releases_hold_before_cancellation_cqe() {
         for consume_cancel in [false, true] {
             for reuse in [false, true] {
                 let mut harness = Harness::new(1);
@@ -1893,10 +1985,17 @@ pub mod tests {
                 probe.unlock().unwrap();
 
                 if consume_cancel {
-                    // Leave the real cancellation acknowledgement unobserved.
+                    // The cancellation finds no target, and its failure CQE is
+                    // consumed without the driver seeing it.
                     harness.driver.ring.submit_and_wait(1).unwrap();
                     assert!(harness.driver.ring.submission().is_empty());
-                    assert!(!harness.driver.ring.completion().is_empty());
+                    let cqes: Vec<_> = harness
+                        .driver
+                        .ring
+                        .completion()
+                        .map(|cqe| (cqe.user_data(), cqe.result()))
+                        .collect();
+                    assert_eq!(cqes, [(CANCEL_USER_DATA, -libc::ENOENT)]);
                 } else {
                     assert_eq!(harness.driver.ring.submission().len(), 1);
                 }
@@ -2029,7 +2128,7 @@ pub mod tests {
 
     /// Cancelling a direct read never stages a successor. When its observer is dropped or its
     /// worker closes, a read the kernel holds keeps its open and buffer until its operation CQE
-    /// decides its outcome, even when the cancellation acknowledgement arrives first. A read the
+    /// decides its outcome, even when a failed cancellation's CQE arrives first. A read the
     /// kernel does not hold releases them at once when its observer is dropped, whether it is
     /// queued for its first submission or requeued after aligned progress or a switch to a
     /// buffered read.
@@ -2061,7 +2160,7 @@ pub mod tests {
         };
 
         for close in [false, true] {
-            for acknowledged in [false, true] {
+            for cancel_failed in [false, true] {
                 for (result, outcome) in [
                     (-libc::EAGAIN, Err(Error::Timeout)),
                     (DIRECT_ALIGN as i32, Err(Error::Timeout)),
@@ -2073,8 +2172,9 @@ pub mod tests {
                     (3 * DIRECT_ALIGN as i32, Ok(())),
                 ] {
                     // Orphan a staged read or close its worker, with or without a simulated
-                    // cancellation acknowledgement. The kernel may write the buffer until the
-                    // operation CQE, so the request keeps its open and buffer.
+                    // failed cancellation, the only cancellation CQE the kernel posts. The
+                    // kernel may write the buffer until the operation CQE, so the request
+                    // keeps its open and buffer.
                     let mut harness = Harness::new(1);
                     let (request, target) = request();
                     let id = harness.stage(request, None, 0);
@@ -2083,11 +2183,12 @@ pub mod tests {
                     } else {
                         harness.orphan(id);
                     }
-                    if acknowledged {
-                        harness
-                            .driver
-                            .state
-                            .handle_cqe(CANCEL_USER_DATA, 0, &mut harness.deferred);
+                    if cancel_failed {
+                        harness.driver.state.handle_cqe(
+                            CANCEL_USER_DATA,
+                            -libc::EALREADY,
+                            &mut harness.deferred,
+                        );
                         harness.collect();
                     }
                     assert_eq!(Arc::strong_count(&file), 2);
@@ -2739,11 +2840,7 @@ pub mod tests {
 
     #[test]
     fn test_same_open_sync_waits_for_failure_accounting() {
-        for state in [
-            None,
-            Some(WriteAtState::WritingSync),
-            Some(WriteAtState::WritingBeforeSync),
-        ] {
+        for write in [false, true] {
             let (directory, held) = make_file("sync_order");
             held.tracker.write();
             held.tracker.complete();
@@ -2751,25 +2848,17 @@ pub mod tests {
             // Both barriers are accepted while staging capacity remains available.
             let mut harness = Harness::new(2);
             let first = harness.admit(Request::Sync(SyncRequest::new(held.clone())), 0);
-            let successor = state.map_or_else(
-                || Request::Sync(SyncRequest::new(held.clone())),
-                |state| {
-                    let bufs = if state == WriteAtState::WritingBeforeSync {
-                        (0..IOVEC_BATCH_SIZE + 1)
-                            .map(|_| IoBuf::from(b"x"))
-                            .collect()
-                    } else {
-                        IoBufs::from(IoBuf::from(b"new"))
-                    };
-                    Request::WriteAt(WriteAtRequest::new(
-                        held.clone(),
-                        0,
-                        bufs.into(),
-                        state,
-                        Cache::Enabled,
-                    ))
-                },
-            );
+            let successor = if write {
+                Request::WriteAt(WriteAtRequest::new(
+                    held.clone(),
+                    0,
+                    IoBufs::from(IoBuf::from(b"new")).into(),
+                    WriteAtState::WritingBeforeSync,
+                    Cache::Enabled,
+                ))
+            } else {
+                Request::Sync(SyncRequest::new(held.clone()))
+            };
             let second = harness.admit(successor, 1);
             assert_eq!(harness.driver.len(), 2);
             assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
@@ -2805,7 +2894,7 @@ pub mod tests {
             assert_eq!(harness.completed.len(), 2);
             assert!(matches!(
                 &harness.completed[0].output,
-                RequestOutput::Sync(Err(Error::Io(error)))
+                RequestOutput::Sync(Err(Error::BlobSyncFailed(_, _, error)))
                     if error.raw_os_error() == Some(libc::EIO)
             ));
             assert!(matches!(
@@ -2824,8 +2913,7 @@ pub mod tests {
 
     #[test]
     fn test_durable_write_keeps_permit_through_follow_up_sqes() {
-        for state in [WriteAtState::WritingSync, WriteAtState::WritingBeforeSync] {
-            let multibatch = state == WriteAtState::WritingBeforeSync;
+        for multibatch in [false, true] {
             let (directory, file) = make_file("durable_follow_up");
             file.tracker.write();
             file.tracker.complete();
@@ -2833,7 +2921,7 @@ pub mod tests {
             let (bufs, completions) = if !multibatch {
                 (
                     IoBufs::from(IoBuf::from(b"hello")),
-                    vec![-libc::EOPNOTSUPP, -libc::EINTR, 2, 3],
+                    vec![-libc::EOPNOTSUPP, -libc::EINTR, 2, 3, 0],
                 )
             } else {
                 (
@@ -2854,7 +2942,7 @@ pub mod tests {
                     file.clone(),
                     0,
                     bufs.into(),
-                    state,
+                    WriteAtState::WritingBeforeSync,
                     Cache::Disabled,
                 )),
                 Observer::Local(None),
@@ -2890,21 +2978,17 @@ pub mod tests {
             assert!(harness.driver.state.acquiring.is_empty());
             assert!(!harness.driver.state.waiters.is_pending(first));
 
-            // A trailing sync credits the write completed before it under the permit, so the
-            // successor resolves without an SQE. A fused write covers only its own range.
-            if multibatch {
-                assert!(harness.driver.state.ready_queue.is_empty());
-                assert!(!harness.driver.state.waiters.is_pending(second));
-                harness.collect();
-            } else {
-                assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(second));
+            // The whole-file sync credits the write completed before it under the permit, so the
+            // successor resolves without an SQE.
+            assert!(harness.driver.state.ready_queue.is_empty());
+            assert!(!harness.driver.state.waiters.is_pending(second));
+            if !multibatch {
                 assert!(matches!(
                     harness.driver.observe(first, Waker::noop()),
                     Observation::Ready(RequestOutput::WriteAt(Ok(())))
                 ));
-                harness.driver.state.waiters.stage(second);
-                harness.simulated_completion(second, 0);
             }
+            harness.collect();
             assert_eq!(harness.completed.len(), 1 + usize::from(multibatch));
             assert!(harness.completed.iter().all(|completion| matches!(
                 completion.output,
@@ -3255,6 +3339,74 @@ pub mod tests {
         harness.drain();
     }
 
+    /// A blocking wait counts as iowait only while a storage operation is in
+    /// flight, including a cancelled one whose operation CQE has not arrived.
+    #[test]
+    fn test_blocking_wait_counts_as_iowait_only_with_storage_in_flight() {
+        let mut harness = Harness::new(4);
+        let (directory, file) = make_file("iowait");
+
+        // Return whether an unbounded park passed NO_IOWAIT. A NOP the park
+        // submits ends its wait, so the check depends on no deadline.
+        let no_iowait = |harness: &mut Harness| {
+            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+
+            // SAFETY: A NOP references no memory.
+            unsafe { harness.driver.ring.submission().push(&nop).unwrap() };
+            assert!(harness.park(0, None).unwrap());
+
+            LAST_WAIT.take().unwrap().contains(EnterFlags::NO_IOWAIT)
+        };
+
+        // A receive without data keeps only network I/O in flight.
+        let (left, _right) = UnixStream::pair().unwrap();
+        harness.admit(recv(left, 1, None), 0);
+        harness.service();
+        assert!(no_iowait(&mut harness));
+
+        // A read kept out of the kernel stands in for one in flight.
+        let read = harness.stage(
+            Request::ReadAt(ReadAtRequest::new(
+                file.clone(),
+                0,
+                IoBufMut::zeroed(1),
+                Cache::Enabled,
+            )),
+            None,
+            1,
+        );
+        assert!(!no_iowait(&mut harness));
+
+        // Cancellation leaves the read in flight until its operation CQE.
+        harness.orphan(read);
+        harness.service();
+        assert!(harness.driver.state.waiters.is_in_flight(read));
+        assert!(!no_iowait(&mut harness));
+
+        // A failed cancellation does not release it either.
+        harness
+            .driver
+            .state
+            .handle_cqe(CANCEL_USER_DATA, -libc::EALREADY, &mut harness.deferred);
+        assert_eq!(harness.driver.state.waiters.storage_in_flight(), 1);
+        assert!(!no_iowait(&mut harness));
+
+        // Its operation CQE does.
+        harness.simulated_completion(read, -libc::ECANCELED);
+        assert!(no_iowait(&mut harness));
+
+        // A resize counts as storage until its operation CQE.
+        file.tracker.write();
+        let resize = harness.stage(Request::Resize(ResizeRequest::new(file, 0)), None, 2);
+        assert!(!no_iowait(&mut harness));
+
+        harness.simulated_completion(resize, 0);
+        assert!(no_iowait(&mut harness));
+
+        harness.drain();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn test_enter_distinguishes_timeout_from_failure() {
         let mut harness = Harness::new(1);
@@ -3267,9 +3419,11 @@ pub mod tests {
             Enter::TaskWork,
             Enter::Wait {
                 deadline: Some(Instant::now() + TIMED_WAIT),
+                iowait: false,
             },
             Enter::Wait {
                 deadline: Some(Instant::now()),
+                iowait: false,
             },
         ] {
             Driver::enter(&mut harness.driver.ring, enter).unwrap();
@@ -3281,12 +3435,17 @@ pub mod tests {
         let results = [
             Enter::Flush,
             Enter::TaskWork,
-            Enter::Wait { deadline: None },
+            Enter::Wait {
+                deadline: None,
+                iowait: false,
+            },
             Enter::Wait {
                 deadline: Some(Instant::now() + Duration::from_secs(1)),
+                iowait: false,
             },
             Enter::Wait {
                 deadline: Some(Instant::now()),
+                iowait: false,
             },
         ]
         .map(|enter| Driver::enter(&mut harness.driver.ring, enter));

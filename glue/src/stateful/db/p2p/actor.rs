@@ -3,7 +3,7 @@
 use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
 use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
-use commonware_codec::{Codec, Decode, Encode};
+use commonware_codec::{Codec, Decode, Encode, Read};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
@@ -42,6 +42,8 @@ where
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
+    Shared<DB>: Source,
+    Op<DB>: Read,
 {
     /// Provider for the current peer set.
     pub peer_provider: D,
@@ -52,6 +54,15 @@ where
     /// Database to serve peer requests from, if already open ([`Mailbox::attach_database`] can
     /// attach one later).
     pub database: Option<Shared<DB>>,
+
+    /// Configuration for decoding operations in peer responses.
+    ///
+    /// Use the codec configuration of the database's operations, and the same value across the
+    /// network. A narrower configuration than a peer's database fails to decode its honest
+    /// responses, which blocks that peer, so sync from it never completes. Use `()` for
+    /// operations that need no configuration. For variable-size operations, use the same size
+    /// limits when computing the [network payload bound](super::max_payload_size).
+    pub operation_codec_config: <Op<DB> as Read>::Cfg,
 
     /// Capacity of resolver mailboxes.
     pub mailbox_size: NonZeroUsize,
@@ -92,7 +103,7 @@ where
     F: Family,
     DB: Send + Sync + 'static,
     Shared<DB>: Source<Family = F>,
-    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    Op<DB>: Codec + Send + Clone + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
@@ -114,7 +125,7 @@ where
     F: Family,
     DB: Send + Sync + 'static,
     Shared<DB>: Source<Family = F>,
-    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    Op<DB>: Codec + Send + Clone + 'static,
 {
     /// Creates the actor and its mailbox.
     pub fn new(context: E, cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
@@ -273,7 +284,10 @@ where
         }
 
         // Leave subscriptions intact on invalid data so the resolver can retry.
-        let cfg = (key.max_ops().get() as usize, ());
+        let cfg = (
+            key.max_ops().get() as usize,
+            self.config.operation_codec_config.clone(),
+        );
         let response = match Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &cfg) {
             Ok(response)
                 if matches!(
@@ -362,13 +376,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::p2p::max_payload_size;
     use bytes::Bytes;
     use commonware_actor::Feedback;
+    use commonware_codec::{FixedSize as _, MaxEncodeSize as _, RangeCfg, util::max_items_size};
     use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519, sha256};
     use commonware_macros::select;
     use commonware_p2p::{
         Provider, TrackedPeers,
-        simulated::{Link, Network},
+        simulated::{Link, Network, Oracle},
+        utils::mocks::NoopBlocker,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -377,16 +394,18 @@ mod tests {
     };
     use commonware_storage::{
         journal::{
-            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig,
+            authenticated::Config as MerkleConfig,
+            contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
         },
         mmr::{self, Location, Proof},
-        qmdb::{any::unordered::fixed, sync},
+        qmdb::{any::unordered::fixed, immutable::variable, sync},
         translator::TwoCap,
     };
     use commonware_utils::{
         NZDuration, NZU16, NZU32, NZU64, NZUsize,
         channel::{mpsc, oneshot},
         probability,
+        sequence::FixedBytes,
         sync::Mutex,
     };
     use futures::FutureExt as _;
@@ -408,23 +427,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct DummyBlocker;
-
-    impl commonware_p2p::Blocker for DummyBlocker {
-        type PublicKey = ed25519::PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> commonware_actor::Feedback {
-            commonware_actor::Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) =
-                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
-            receiver
-        }
-    }
-
     type TestDb = fixed::Db<
         mmr::Family,
         deterministic::Context,
@@ -436,11 +438,12 @@ mod tests {
     >;
     type TestOp = <Shared<TestDb> as Source>::Op;
 
+    type TestBlocker = NoopBlocker<ed25519::PublicKey>;
     type TestActor = Actor<
         deterministic::Context,
         ed25519::PublicKey,
         DummyProvider,
-        DummyBlocker,
+        TestBlocker,
         mmr::Family,
         TestDb,
     >;
@@ -550,11 +553,16 @@ mod tests {
 
     fn test_config<DB>(
         database: Option<Shared<DB>>,
-    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, DB> {
+    ) -> Config<ed25519::PublicKey, DummyProvider, TestBlocker, DB>
+    where
+        Shared<DB>: Source,
+        Op<DB>: Read<Cfg = ()>,
+    {
         Config {
             peer_provider: DummyProvider,
-            blocker: DummyBlocker,
+            blocker: NoopBlocker::default(),
             database,
+            operation_codec_config: (),
             mailbox_size: NZUsize!(16),
             me: None,
             fetch_timeout: NZDuration!(Duration::from_millis(10)),
@@ -620,29 +628,139 @@ mod tests {
         Shared::new("test", db)
     }
 
-    type LiveMailbox = SyncMailbox<mmr::Family, TestDb>;
+    type VariableKey = FixedBytes<32>;
+    type VariableDb = variable::Db<
+        mmr::Family,
+        deterministic::Context,
+        VariableKey,
+        Bytes,
+        Sha256,
+        TwoCap,
+        Sequential,
+    >;
+    type VariableOp = Op<VariableDb>;
+    type VariableCodecConfig = <VariableOp as Read>::Cfg;
+
+    /// Widest value the variable database tests decode.
+    const MAX_VALUE_SIZE: usize = 4096;
+
+    fn variable_codec_config(max_value_size: usize) -> VariableCodecConfig {
+        ((), RangeCfg::from(..=max_value_size))
+    }
+
+    /// Bound on a variable operation whose values encode at most `max_value_size` bytes.
+    fn max_variable_operation_size(max_value_size: usize) -> usize {
+        let value = max_items_size(max_value_size, u8::SIZE);
+        let set = VariableKey::SIZE + value;
+        let commit = u8::SIZE + value + Location::MAX_ENCODE_SIZE;
+        u8::SIZE + set.max(commit)
+    }
+
+    fn variable_db_config(
+        suffix: &str,
+        max_value_size: usize,
+    ) -> variable::Config<TwoCap, VariableCodecConfig, Sequential> {
+        variable::Config {
+            merkle: MerkleConfig {
+                partition: format!("{suffix}-merkle"),
+                replay_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                resident_height: Default::default(),
+            },
+            log: VariableLogConfig {
+                partition: format!("{suffix}-log"),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: variable_codec_config(max_value_size),
+                page_cache: CacheRef::new(NZU16!(101), NZUsize!(11)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            },
+            translator: TwoCap,
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
+        }
+    }
+
+    /// Create a variable database, applying `entries` and `metadata` in one batch if any.
+    async fn init_variable_db(
+        context: deterministic::Context,
+        suffix: &str,
+        max_value_size: usize,
+        entries: &[(VariableKey, Bytes)],
+        metadata: Option<Bytes>,
+    ) -> VariableDb {
+        let db = VariableDb::init(context, variable_db_config(suffix, max_value_size), None)
+            .await
+            .unwrap();
+        if entries.is_empty() && metadata.is_none() {
+            return db;
+        }
+        let mut batch = db
+            .new_batch()
+            .with_inactivity_floor(Location::new(1))
+            .with_metadata(metadata);
+        for (key, value) in entries {
+            batch = batch.set(key.clone(), value.clone());
+        }
+        let batch = batch.merkleize(&db).await.unwrap();
+        db.apply_batch(batch).await.unwrap()
+    }
 
     /// Two connected resolver services with distinct databases, indexed by peer.
-    struct LivePair {
+    struct LivePair<DB>
+    where
+        Shared<DB>: Source<Family = mmr::Family>,
+    {
         /// Databases served by each peer.
-        databases: [Shared<TestDb>; 2],
+        databases: [Shared<DB>; 2],
         /// Mailboxes for requesting data from peers.
-        mailboxes: [LiveMailbox; 2],
+        mailboxes: [SyncMailbox<mmr::Family, DB>; 2],
         /// Actor counters used to observe admission and cancellation.
         metrics: [ResolverMetrics; 2],
         /// Actor handles used to verify that shutdown releases their child tasks.
         handles: Vec<Handle<()>>,
+        /// Identities of each peer.
+        peers: [ed25519::PublicKey; 2],
+        /// Network oracle used to observe blocked peers.
+        oracle: Oracle<ed25519::PublicKey, deterministic::Context>,
+    }
+
+    async fn spawn_live_pair(context: &deterministic::Context, prefix: &str) -> LivePair<TestDb> {
+        // Independent replicas allow one database to serve while the other is locked.
+        let databases = [
+            init_db(context.child("database_0"), &format!("{prefix}-0")).await,
+            init_db(context.child("database_1"), &format!("{prefix}-1")).await,
+        ];
+        assert_eq!(
+            databases[0].read().await.root(),
+            databases[1].read().await.root()
+        );
+        spawn_connected_pair(context, databases, (), TestOp::SIZE).await
     }
 
     /// Connect two replicas over reliable links, with wire timeouts beyond the
     /// one-second progress checks.
-    async fn spawn_live_pair(context: &deterministic::Context, prefix: &str) -> LivePair {
+    async fn spawn_connected_pair<DB>(
+        context: &deterministic::Context,
+        databases: [Shared<DB>; 2],
+        operation_codec_config: <Op<DB> as Read>::Cfg,
+        max_operation_size: usize,
+    ) -> LivePair<DB>
+    where
+        DB: Send + Sync + 'static,
+        Shared<DB>: Source<Family = mmr::Family>,
+        Op<DB>: Codec + Send + Clone + 'static,
+    {
+        let max_serve_ops = NZU64!(16);
+        let payload =
+            max_payload_size::<mmr::Family, DatabaseRoot<DB>>(max_serve_ops, max_operation_size);
         // Reliable links isolate actor scheduling and database availability from packet loss.
         let peers = [1, 2].map(|seed| ed25519::PrivateKey::from_seed(seed).public_key());
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: commonware_p2p::max_message_size([payload]),
                 max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -667,16 +785,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Independent replicas allow one database to serve while the other is locked.
-        let databases = [
-            init_db(context.child("database_0"), &format!("{prefix}-0")).await,
-            init_db(context.child("database_1"), &format!("{prefix}-1")).await,
-        ];
-        assert_eq!(
-            databases[0].read().await.root(),
-            databases[1].read().await.root()
-        );
-
         // Start both actors and retain their task handles for cleanup.
         let mut mailboxes = Vec::new();
         let mut metrics = Vec::new();
@@ -687,17 +795,18 @@ mod tests {
                 .register(0, Quota::per_second(NZU32!(100)))
                 .await
                 .unwrap();
-            let (actor, mailbox) = Actor::<_, _, _, _, mmr::Family, TestDb>::new(
+            let (actor, mailbox) = Actor::<_, _, _, _, mmr::Family, DB>::new(
                 context.child(if index == 0 { "actor_0" } else { "actor_1" }),
                 Config {
                     peer_provider: manager.clone(),
                     blocker: control,
                     database: Some(databases[index].clone()),
+                    operation_codec_config: operation_codec_config.clone(),
                     mailbox_size: NZUsize!(16),
                     me: Some(peer.clone()),
                     fetch_timeout: NZDuration!(Duration::from_secs(5)),
                     fetch_retry_delay: Duration::from_millis(10),
-                    max_serve_ops: NZU64!(16),
+                    max_serve_ops,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -712,6 +821,8 @@ mod tests {
             mailboxes: mailboxes.try_into().ok().unwrap(),
             metrics: metrics.try_into().ok().unwrap(),
             handles,
+            peers,
+            oracle,
         }
     }
 
@@ -1717,6 +1828,169 @@ mod tests {
     }
 
     #[test]
+    fn variable_operation_bound_covers_widest_operations() {
+        let bound = max_variable_operation_size(MAX_VALUE_SIZE);
+        let cfg = variable_codec_config(MAX_VALUE_SIZE);
+        let value = Bytes::from(vec![42; MAX_VALUE_SIZE]);
+        let key = VariableKey::new([1; 32]);
+
+        // The widest operation of each variant decodes and stays within the bound.
+        for op in [
+            VariableOp::Set(key.clone(), value.clone()),
+            VariableOp::Commit(Some(value), mmr::Family::MAX_LEAVES),
+        ] {
+            let encoded = op.encode();
+            assert!(encoded.len() <= bound, "{} > {bound}", encoded.len());
+            assert_eq!(VariableOp::decode_cfg(encoded, &cfg).unwrap(), op);
+        }
+
+        // One more value byte exceeds the configured limit.
+        let value = Bytes::from(vec![42; MAX_VALUE_SIZE + 1]);
+        for op in [
+            VariableOp::Set(key, value.clone()),
+            VariableOp::Commit(Some(value), mmr::Family::MAX_LEAVES),
+        ] {
+            assert!(VariableOp::decode_cfg(op.encode(), &cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn variable_operations_sync_through_live_mailbox() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            const PREFIX: &str = "variable_live";
+            let pair_context = context.child(PREFIX);
+            let entries = [
+                (
+                    VariableKey::new([1; 32]),
+                    Bytes::from(vec![42; MAX_VALUE_SIZE]),
+                ),
+                (VariableKey::new([2; 32]), Bytes::from_static(b"short")),
+                (VariableKey::new([3; 32]), Bytes::new()),
+            ];
+            let metadata = Bytes::from(vec![7; MAX_VALUE_SIZE]);
+            let source = init_variable_db(
+                pair_context.child("source"),
+                "variable-source",
+                MAX_VALUE_SIZE,
+                &entries,
+                Some(metadata.clone()),
+            )
+            .await;
+            let target = sync::Target {
+                root: source.root(),
+                range: (source.sync_boundary()..source.bounds().end)
+                    .try_into()
+                    .unwrap(),
+            };
+            let client = init_variable_db(
+                pair_context.child("client"),
+                "variable-client",
+                MAX_VALUE_SIZE,
+                &[],
+                None,
+            )
+            .await;
+            let pair = spawn_connected_pair(
+                &pair_context,
+                [Shared::new("client", client), Shared::new("source", source)],
+                variable_codec_config(MAX_VALUE_SIZE),
+                max_variable_operation_size(MAX_VALUE_SIZE),
+            )
+            .await;
+
+            // The final commit carries the widest metadata over the wire.
+            let synced: VariableDb = select! {
+                result = sync::sync(sync::Config {
+                    context: pair_context.child("destination"),
+                    source: pair.mailboxes[0].clone(),
+                    target: target.clone(),
+                    max_outstanding_requests: NZUsize!(4),
+                    fetch_batch_size: NZU64!(2),
+                    apply_batch_size: NZU64!(1),
+                    db_config: variable_db_config("variable-destination", MAX_VALUE_SIZE),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                }) => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("variable sync stopped making progress");
+                },
+            };
+            assert_eq!(synced.root(), target.root);
+            assert_eq!(synced.bounds(), target.range.start()..target.range.end());
+            assert_eq!(synced.get_metadata().await.unwrap(), Some(metadata));
+            for (key, value) in entries {
+                assert_eq!(synced.get(&key).await.unwrap(), Some(value));
+            }
+            wait_for_no_pending(&context, &pair.metrics[0]).await;
+            shutdown_actors(&context, PREFIX, pair.handles).await;
+        });
+    }
+
+    #[test]
+    fn variable_operation_over_limit_blocks_peer() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            const PREFIX: &str = "variable_over_limit";
+            let pair_context = context.child(PREFIX);
+
+            // The source's database admits a value one byte wider than the network decodes.
+            let source = init_variable_db(
+                pair_context.child("source"),
+                "over-limit-source",
+                MAX_VALUE_SIZE + 1,
+                &[(
+                    VariableKey::new([1; 32]),
+                    Bytes::from(vec![42; MAX_VALUE_SIZE + 1]),
+                )],
+                None,
+            )
+            .await;
+            let request = Request::Operations {
+                size: source.bounds().end,
+                start: Location::new(0),
+                max_ops: NZU64!(2),
+            };
+            let client = init_variable_db(
+                pair_context.child("client"),
+                "over-limit-client",
+                MAX_VALUE_SIZE,
+                &[],
+                None,
+            )
+            .await;
+            let pair = spawn_connected_pair(
+                &pair_context,
+                [Shared::new("client", client), Shared::new("source", source)],
+                variable_codec_config(MAX_VALUE_SIZE),
+                max_variable_operation_size(MAX_VALUE_SIZE + 1),
+            )
+            .await;
+
+            // The over-limit response fails to decode, so the client blocks its sender and never
+            // completes the fetch.
+            let mut fetch = Box::pin(pair.mailboxes[0].serve(request));
+            select! {
+                _ = &mut fetch => panic!("over-limit response was accepted"),
+                _ = async {
+                    while pair.oracle.blocked().await.unwrap().is_empty() {
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                } => {},
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("over-limit sender was not blocked");
+                },
+            }
+            assert_eq!(
+                pair.oracle.blocked().await.unwrap(),
+                vec![(pair.peers[0].clone(), pair.peers[1].clone())]
+            );
+            drop(fetch);
+            wait_for_no_pending(&context, &pair.metrics[0]).await;
+            shutdown_actors(&context, PREFIX, pair.handles).await;
+        });
+    }
+
+    #[test]
     fn invalid_peer_retries_same_qmdb_source_registration() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             const PREFIX: &str = "invalid_peer_same_registration";
@@ -1784,6 +2058,7 @@ mod tests {
                         peer_provider: manager.clone(),
                         blocker: control,
                         database: Some(database),
+                        operation_codec_config: (),
                         mailbox_size: NZUsize!(16),
                         me: Some(peer),
                         fetch_timeout: NZDuration!(Duration::from_secs(2)),
@@ -1807,6 +2082,7 @@ mod tests {
                     peer_provider: manager,
                     blocker: control,
                     database: None,
+                    operation_codec_config: (),
                     mailbox_size: NZUsize!(16),
                     me: Some(client.clone()),
                     fetch_timeout: NZDuration!(Duration::from_secs(2)),

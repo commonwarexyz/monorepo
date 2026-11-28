@@ -3,12 +3,9 @@ use commonware_consensus::{
     simplex::{
         elector::{Config as ElectorConfig, Elector as _, RoundRobin},
         scheme::secp256r1,
-        types::{
-            Attributable as _, Finalization, Finalize, Notarization, Notarize, Nullification,
-            Nullify, Proposal,
-        },
+        types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     },
-    types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
+    types::{Attributable as _, Epoch, Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     CertifyChoice, EPOCH, NAMESPACE, ReporterWiring,

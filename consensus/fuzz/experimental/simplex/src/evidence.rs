@@ -51,11 +51,11 @@ use commonware_consensus::{
         mocks::{application, relay, reporter},
         scheme::reporter::AttributableReporter,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
-            Nullify, NullifyFinalize, Proposal, Vote,
+            Activity, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize, Nullify,
+            NullifyFinalize, Proposal, Vote,
         },
     },
-    types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
+    types::{Attributable, Epoch, Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX, BlockFilterChoice, CertifyChoice, DEFAULT_MAILBOX_SIZE, EPOCH,

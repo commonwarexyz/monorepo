@@ -24,8 +24,8 @@ use crate::{
 };
 use commonware_consensus::{
     Viewable,
-    simplex::types::{Activity, Attributable},
-    types::{Participant, TermLength, View, ViewDelta},
+    simplex::types::Activity,
+    types::{Attributable, Participant, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{Digest, certificate};
 use std::{collections::BTreeSet, fmt};

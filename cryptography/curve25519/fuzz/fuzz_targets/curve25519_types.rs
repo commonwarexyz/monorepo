@@ -63,8 +63,8 @@ struct Signing {
     sources: Vec<Source>,
     namespace: Vec<u8>,
     message: Vec<u8>,
-    /// A verifying key sampled through its `Arbitrary` implementation, which need not encode a
-    /// point.
+    /// A verifying key sampled through its `Arbitrary` implementation: a curve point of any order,
+    /// in a canonical or a non-canonical encoding.
     stray: VerifyingKey,
     /// A signature sampled through its `Arbitrary` implementation.
     forged: Signature,
@@ -246,13 +246,13 @@ fn check_signing(context: &mut deterministic::Context, signing: &Signing, shape_
         assert_eq!(decoded.verifying_key(), verifying_key);
         assert_eq!(decoded.sign(namespace, message), signature);
 
-        // A verifying key serializes as the bytes it exposes, and a decoded copy, which caches
-        // no point, is the same key and verifies the same signatures.
+        // A verifying key serializes as the bytes it exposes, and a decoded copy is the same key
+        // and verifies the same signatures.
         let encoded = verifying_key.encode();
         assert_eq!(encoded.len(), VerifyingKey::SIZE);
         assert_eq!(encoded.as_ref(), verifying_key.as_ref());
         assert_eq!(&*verifying_key, verifying_key.as_ref());
-        let decoded = VerifyingKey::decode(encoded).expect("32 bytes decode");
+        let decoded = VerifyingKey::decode(encoded).expect("a key's encoding decodes");
         assert_eq!(decoded, verifying_key);
         assert_eq!(format!("{decoded}"), format!("{verifying_key:?}"));
         assert!(verifying_key.verify(namespace, message, &signature));
@@ -316,7 +316,7 @@ fn check_signing(context: &mut deterministic::Context, signing: &Signing, shape_
 
     let encoded = stray.encode();
     assert_eq!(encoded.as_ref(), stray.as_ref());
-    verifying_keys.push(VerifyingKey::decode(encoded).expect("32 bytes decode"));
+    verifying_keys.push(VerifyingKey::decode(encoded).expect("a key's encoding decodes"));
     check_identity(&verifying_keys);
 }
 

@@ -1,9 +1,9 @@
 use commonware_consensus::{
     simplex::{
         mocks::scheme as certificate_mock,
-        types::{Activity, Attributable, Finalization, Finalize, Notarize, Nullify, Proposal},
+        types::{Activity, Finalization, Finalize, Notarize, Nullify, Proposal},
     },
-    types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
+    types::{Attributable, Epoch, Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     EPOCH,

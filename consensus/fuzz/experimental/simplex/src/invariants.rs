@@ -6,9 +6,9 @@ use commonware_consensus::{
         mocks::reporter::Reporter,
         scheme,
         scheme::Scheme,
-        types::{Activity, Attributable, Proposal},
+        types::{Activity, Proposal},
     },
-    types::{Epoch, Round, TermLength, View, ViewDelta},
+    types::{Attributable, Epoch, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     Configuration, FUZZ_LOG_ENV, bounds,

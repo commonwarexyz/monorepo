@@ -2,11 +2,8 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Copying, DecodeExt};
 use commonware_consensus::{
     Handoff, Viewable,
-    simplex::{
-        ForwardPolicy,
-        types::{Attributable, Vote},
-    },
-    types::{Epoch, Participant, TermLength, View, ViewDelta},
+    simplex::{ForwardPolicy, types::Vote},
+    types::{Attributable, Epoch, Participant, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     BlockFilterChoice, CertifyChoice, Configuration, DEFAULT_MAILBOX_SIZE, EPOCH,

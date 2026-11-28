@@ -171,9 +171,9 @@
 //! mailbox once its root is gone.
 //!
 //! Work spawned by root destruction participates in shutdown. Each worker keeps
-//! TLS installed while destroying tasks, draining retained writes and syncs,
-//! retiring cancellations, and running deferred callbacks. Native thread-local
-//! destruction on dedicated threads can follow registration release.
+//! TLS installed while destroying tasks, draining retained writes, syncs, and
+//! resizes, retiring cancellations, and running deferred callbacks. Native
+//! thread-local destruction on dedicated threads can follow registration release.
 
 use super::{
     driver::Driver,
@@ -297,11 +297,12 @@ pub struct RingConfig {
     /// Must be nonzero and round to at most 32,768. Defaults to 128. The runtime
     /// chooses 1024 for its production default and 128 when built for tests.
     ///
-    /// The CQ uses the kernel default of twice the rounded SQ size. Cancellation
-    /// and ring wait CQEs also use that space, and cancellation acknowledgements
-    /// can outlive their requests. The operation limit therefore does not bound
-    /// all pending CQEs. The runtime relies on the kernel's CQ overflow backlog
-    /// (`IORING_FEAT_NODROP`), drained by subsequent completion-service enters.
+    /// The CQ uses the kernel default of twice the rounded SQ size. Failed
+    /// cancellation and ring wait CQEs also use that space, and a failed
+    /// cancellation's CQE can outlive its request. The operation limit therefore
+    /// does not bound all pending CQEs. The runtime relies on the kernel's CQ
+    /// overflow backlog (`IORING_FEAT_NODROP`), drained by subsequent
+    /// completion-service enters.
     pub size: u32,
 }
 
@@ -316,7 +317,7 @@ impl Default for RingConfig {
 /// A pool of [`Self::with_worker_threads`] workers polls ordinary tasks, the
 /// first on the thread calling [`crate::Runner::start`]. Tasks marked dedicated
 /// or blocking each receive a fresh thread and io_uring ring. Shutdown
-/// completes retained writes and syncs without a configured time limit.
+/// completes retained writes, syncs, and resizes without a configured time limit.
 #[derive(Clone)]
 pub struct Config {
     /// Pool workers, including the calling thread.
@@ -1945,8 +1946,8 @@ impl Worker {
         }
         self.callbacks(None);
 
-        // Retained writes and syncs still need to finish. Cancelled operations
-        // retain their resources until their own completion arrives.
+        // Retained writes, syncs, and resizes still need to finish. Cancelled
+        // operations retain their resources until their own completion arrives.
         loop {
             // Observe before service checks permits and completions, so a wait
             // blocks only while nothing notified since.
@@ -2528,9 +2529,9 @@ impl Drop for TaskRoot {
 /// The root future doesn't have to be Send and always runs on the calling
 /// thread. Ordinary spawned futures run on whichever pool worker takes them,
 /// and dedicated and blocking ones on threads of their own. The runner waits
-/// for every pool worker, dedicated worker cleanup, and retained writes and
-/// syncs before returning or resuming a panic. Native thread-local destruction
-/// may follow.
+/// for every pool worker, dedicated worker cleanup, and retained writes,
+/// syncs, and resizes before returning or resuming a panic. Native thread-local
+/// destruction may follow.
 pub struct Runner {
     /// Settings validated before any runtime resources are created.
     cfg: Config,
