@@ -16,9 +16,10 @@ use std::sync::Arc;
 pub(crate) struct Metrics<E: Clock> {
     /// Logical operation end.
     size: Gauge,
-    /// Oldest retained operation location.
+    /// Oldest readable operation location.
     pruning_boundary: Gauge,
-    /// Retained operation count.
+    /// Operations from the log's retained start to its end, including pruned operations in the
+    /// log's oldest retained blob.
     retained: Gauge,
     /// Application-declared pruning floor location.
     inactivity_floor: Gauge,
@@ -64,8 +65,8 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         Self {
             size: context.gauge("size", "Logical operation end"),
             pruning_boundary: context
-                .gauge("pruning_boundary", "Oldest retained operation location"),
-            retained: context.gauge("retained", "Number of retained operations"),
+                .gauge("pruning_boundary", "Oldest readable operation location"),
+            retained: context.gauge("retained", "Number of operations retained in storage"),
             inactivity_floor: context.gauge(
                 "inactivity_floor",
                 "Application-declared pruning floor location",
@@ -134,17 +135,18 @@ impl<E: Clock> Metrics<E> {
         self.prune_duration.scoped(&self.clock)
     }
 
-    /// Update state gauges.
+    /// Update state gauges. `retained_start` is the oldest location the operation log stores.
     pub(crate) fn update(
         &self,
         size: u64,
         pruning_boundary: u64,
+        retained_start: u64,
         inactivity_floor: u64,
         last_commit: u64,
     ) {
         let _ = self.size.try_set(size);
         let _ = self.pruning_boundary.try_set(pruning_boundary);
-        let _ = self.retained.try_set(size.saturating_sub(pruning_boundary));
+        let _ = self.retained.try_set(size.saturating_sub(retained_start));
         let _ = self.inactivity_floor.try_set(inactivity_floor);
         let _ = self.last_commit.try_set(last_commit);
     }

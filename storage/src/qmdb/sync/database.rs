@@ -847,14 +847,15 @@ mod tests {
                 .await
                 .unwrap();
             let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
-            assert_eq!(boundary, Location::new(28));
+            assert_eq!(boundary, Location::new(30));
+            assert_eq!(log.frontier.boundary().0, Location::new(28));
             let root = log.root(0).unwrap();
             let expected = log.pinned_nodes_at(Location::new(30)).await.unwrap();
             drop(log.sync().await.unwrap());
 
-            // A sync journal pruned to 30 still holds operations from boundary 28, so replay
-            // rebuilds the target root and its pins. A sync journal pruned to 35 lacks them.
-            for (start, pins) in [(30, Some(expected)), (35, None)] {
+            // A sync journal that reads from boundary 28 replays its operations to rebuild the
+            // target root and its pins. A sync journal pruned to 30 or to 35 no longer reads them.
+            for (start, prune, pins) in [(30, 28, Some(expected)), (30, 30, None), (35, 35, None)] {
                 let target = Target {
                     root,
                     range: non_empty_range!(Location::new(start), Location::new(50)),
@@ -866,7 +867,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (journal, _) = journal.prune(start).await.unwrap();
+                let (journal, _) = journal.prune(prune).await.unwrap();
                 let local = local_pinned_nodes::<MmrFamily, _, Sha256, _>(
                     context.child("local_pins"),
                     &merkle_config(),
@@ -875,7 +876,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert_eq!(local, pins, "target start {start}");
+                assert_eq!(local, pins, "target start {start} pruned to {prune}");
                 drop(journal);
             }
         });

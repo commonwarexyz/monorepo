@@ -850,20 +850,22 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let db = H::db_sync(db).await;
 
         let bounds = H::bounds(&db);
-        let local_start = bounds.start;
         let local_end = bounds.end;
-        assert!(local_start > Location::new(0));
         let sync_root = H::ops_root(&db);
 
-        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        // Reopen the operation journal independently to probe the persisted Merkle boundary. It
+        // sits where the reopened journal starts, at or below the pruning boundary.
         drop(db);
         let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
             context.child("journal"),
             qmdb::sync::DatabaseConfig::journal_config(&config),
-            non_empty_range!(local_start, local_end),
+            non_empty_range!(bounds.start, local_end),
         )
         .await
         .unwrap();
+        let local_start =
+            Location::new(crate::journal::contiguous::Contiguous::bounds(&journal).start);
+        assert!(local_start > Location::new(0) && local_start <= bounds.start);
 
         let stale_target = sync::Target {
             root: sync_root,

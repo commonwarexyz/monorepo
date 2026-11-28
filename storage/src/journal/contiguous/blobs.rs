@@ -406,6 +406,17 @@ impl<E: Context> Writable<E> {
         Ok(self)
     }
 
+    /// Prune the oldest retained blob below logical `offset`. A sealed blob prunes through
+    /// [Sealed::prune] and the tail through [Writer::prune]. The pages lying entirely below the
+    /// pruned bytes leave the page cache, and snapshots taken earlier read them from the blob
+    /// without caching them again.
+    pub(super) fn prune_below(&self, offset: u64) {
+        match self.sealed.first() {
+            Some(sealed) => sealed.prune(offset),
+            None => self.tail.prune(offset),
+        }
+    }
+
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
     ///
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which

@@ -273,11 +273,11 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 }
 
 /// Look up the inactivity floor declared by the commit at `size - 1`. Returns `None` for
-/// size zero or when the retained operation at `size - 1` is not a commit.
+/// size zero or when the readable operation at `size - 1` is not a commit.
 ///
 /// # Errors
 ///
-/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the pruning boundary.
 /// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
 pub(crate) async fn commit_floor_at<F, R>(
     reader: &R,
@@ -312,9 +312,9 @@ where
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `size` is zero or the retained operation at
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero or the readable operation at
 ///   `size - 1` has no commit floor.
-/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the pruning boundary.
 /// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
 pub(crate) async fn find_inactivity_floor_at<F, R>(
     reader: &R,

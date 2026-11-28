@@ -616,23 +616,25 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let db = db.prune(prune_loc).await.unwrap();
 
         let bounds = db.bounds();
-        let local_start = bounds.start;
         let local_end = bounds.end;
         let sync_root = SyncDatabase::target(&db).root;
 
-        assert!(local_start > crate::merkle::Location::new(0));
-
-        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        // Reopen the operation journal independently to probe the persisted Merkle boundary. It
+        // sits where the reopened journal starts, at or below the pruning boundary.
         drop(db);
         let journal = <<Db as SyncDatabase>::Journal as crate::qmdb::sync::Journal<
             crate::merkle::mmr::Family,
         >>::new(
             context.child("journal"),
             crate::qmdb::sync::DatabaseConfig::journal_config(&config),
-            non_empty_range!(local_start, local_end),
+            non_empty_range!(bounds.start, local_end),
         )
         .await
         .unwrap();
+        let local_start = crate::merkle::Location::new(
+            crate::journal::contiguous::Contiguous::bounds(&journal).start,
+        );
+        assert!(local_start > crate::merkle::Location::new(0) && local_start <= bounds.start);
 
         let stale_target = crate::qmdb::sync::Target {
             root: sync_root,
