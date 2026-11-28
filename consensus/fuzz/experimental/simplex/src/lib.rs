@@ -130,6 +130,39 @@ fn configure_block_filter<P: simplex::Simplex>(
     });
 }
 
+/// Validators that certify slowly in a quiet run with a slow pair.
+const SLOW_CERTIFIERS: usize = 2;
+/// Application latency `(mean ms, deviation ms)` of every honest validator.
+const BASE_APP_LATENCY: (f64, f64) = (10.0, 5.0);
+/// Certify latency of a slow certifier, far below the certification timeout.
+const SLOW_CERTIFY_LATENCY: (f64, f64) = (80.0, 5.0);
+/// The first view with a new leader after the engines start: the first view of
+/// the second term, `term_length + 1`.
+pub(crate) fn startup_view(term_length: TermLength) -> u64 {
+    term_length.get() + 1
+}
+
+/// A run with no Byzantine participant, no network fault and no failing
+/// certifier: true only when the run is not a trusted continuation (`trusted`
+/// is false), `faults == 0`, the configuration is valid, the partition is
+/// connected, the network is not degraded, certification is
+/// `CertifyChoice::Always` and no block is withheld (`BlockFilterChoice::None`).
+pub(crate) fn quiet_run(input: &FuzzInput, trusted: bool) -> bool {
+    !trusted
+        && input.configuration.faults == 0
+        && input.configuration.is_valid()
+        && input.partition.is_connected()
+        && !input.degraded_network
+        && matches!(input.certify, CertifyChoice::Always)
+        && matches!(input.block_filter, BlockFilterChoice::None)
+}
+
+/// Whether the two highest-index validators certify slowly: a quiet run
+/// (see [`quiet_run`]) whose `heterogeneous_optimism` bit is set.
+pub(crate) fn slow_pair(input: &FuzzInput, trusted: bool) -> bool {
+    quiet_run(input, trusted) && input.heterogeneous_optimism
+}
+
 fn should_bound_standard_liveness(input: &FuzzInput) -> bool {
     input.partition.is_connected()
         && input.configuration.is_valid()
@@ -573,6 +606,19 @@ fn run_standard_once<P: simplex::Simplex>(
                 &relay,
             )
         });
+        let quiet = quiet_run(&input, runner.is_some());
+        if slow_pair(&input, runner.is_some()) {
+            for slow in participants.iter().rev().take(SLOW_CERTIFIERS) {
+                relay.set_latency(
+                    slow,
+                    Some(continuation::Latencies {
+                        propose: BASE_APP_LATENCY,
+                        verify: BASE_APP_LATENCY,
+                        certify: SLOW_CERTIFY_LATENCY,
+                    }),
+                );
+            }
+        }
 
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
@@ -768,6 +814,12 @@ fn run_standard_once<P: simplex::Simplex>(
                 .collect();
             let reporter_only = summaries(&recordings);
             invariants::check_no_invalid_certificates(&recordings);
+            if quiet {
+                invariants::check_no_nullification_in_quiet_run(
+                    &invariants::nullified_views(&reporter_only),
+                    startup_view(term_length),
+                );
+            }
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_recorded_vote_invariants(
                 config.faults as usize,
@@ -2572,7 +2624,7 @@ mod tests {
     use commonware_consensus_fuzz_core::{
         DEFAULT_MAILBOX_SIZE, FUZZ_RUNTIME_TIMEOUT_FLOOR, HANDOFF_DECISIONS,
         MAX_REQUIRED_CONTAINERS, MAX_TERM_LENGTH, MIN_REQUIRED_CONTAINERS, NAMESPACE,
-        fuzz_runtime_timeout, strategy::StrategyChoice,
+        QUIET_PAIR_MIN_CONTAINERS, fuzz_runtime_timeout, strategy::StrategyChoice,
     };
     use commonware_invariants::minifuzz;
     use commonware_macros::{test_group, test_traced};
@@ -2626,6 +2678,113 @@ mod tests {
             certify: CertifyChoice::Always,
             block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,
+        }
+    }
+
+    /// A quiet input with term length 5, optimistic views 2 and the slow-pair bit.
+    fn quiet_slow_pair_input() -> FuzzInput {
+        FuzzInput {
+            term_length: TermLength::new(NZU32!(5)),
+            optimistic_views: ViewDelta::new(2),
+            heterogeneous_optimism: true,
+            required_containers: 30,
+            raw_bytes: vec![],
+            ..audit_input()
+        }
+    }
+
+    #[test]
+    fn quiet_run_needs_every_condition() {
+        let quiet = quiet_slow_pair_input();
+        assert!(quiet_run(&quiet, false));
+
+        let broken = [
+            FuzzInput {
+                configuration: N4F1C3,
+                ..quiet.clone()
+            },
+            FuzzInput {
+                partition: Partition::Static(SetPartition::n4(5)),
+                ..quiet.clone()
+            },
+            FuzzInput {
+                degraded_network: true,
+                ..quiet.clone()
+            },
+            FuzzInput {
+                certify: CertifyChoice::SingleCancel { target_idx: 1 },
+                ..quiet.clone()
+            },
+            FuzzInput {
+                block_filter: BlockFilterChoice::DropRecipient {
+                    view: View::new(1),
+                    target_idx: 1,
+                },
+                ..quiet.clone()
+            },
+        ];
+        for (case, input) in broken.iter().enumerate() {
+            assert!(!quiet_run(input, false), "case {case} is not quiet");
+            assert!(!slow_pair(input, false), "case {case} has no slow pair");
+        }
+        assert!(
+            !quiet_run(&quiet, true),
+            "a trusted continuation is not quiet"
+        );
+        assert!(!slow_pair(&quiet, true));
+    }
+
+    #[test]
+    fn slow_pair_follows_the_heterogeneous_optimism_bit() {
+        let on = quiet_slow_pair_input();
+        assert!(slow_pair(&on, false));
+        let off = FuzzInput {
+            heterogeneous_optimism: false,
+            ..on
+        };
+        assert!(quiet_run(&off, false));
+        assert!(!slow_pair(&off, false));
+    }
+
+    #[test]
+    fn startup_view_is_the_first_view_of_the_second_term() {
+        assert_eq!(startup_view(TermLength::ONE), 2);
+        assert_eq!(startup_view(TermLength::new(NZU32!(2))), 3);
+        assert_eq!(startup_view(TermLength::new(NZU32!(5))), 6);
+    }
+
+    #[test]
+    fn configuration_draw_selects_the_quiet_pair_band() {
+        let empty =
+            <FuzzInput as arbitrary::Arbitrary>::arbitrary(&mut Unstructured::new(&[])).unwrap();
+        assert_eq!(empty.configuration, N4F1C3);
+        for b in 0..=255u8 {
+            let bytes = [0, b];
+            let input =
+                <FuzzInput as arbitrary::Arbitrary>::arbitrary(&mut Unstructured::new(&bytes))
+                    .unwrap();
+            match b % 100 {
+                85..=94 => {
+                    assert_eq!(input.configuration, N4F0C4, "byte {b}");
+                    assert_eq!(input.partition, Partition::Connected, "byte {b}");
+                    assert!(matches!(input.certify, CertifyChoice::Always), "byte {b}");
+                    assert!(input.heterogeneous_optimism, "byte {b}");
+                    assert!(input.optimistic_views.get() >= 1, "byte {b}");
+                    assert!(
+                        input.required_containers >= QUIET_PAIR_MIN_CONTAINERS,
+                        "byte {b}"
+                    );
+                    if input.term_length.get() == 1 {
+                        assert_eq!(input.handoff, Handoff::Vote(()), "byte {b}");
+                    }
+                    assert!(quiet_run(&input, false) && slow_pair(&input, false));
+                }
+                95..=99 => {
+                    assert_eq!(input.configuration, N4F0C4, "byte {b}");
+                    assert!(!input.heterogeneous_optimism, "byte {b}");
+                }
+                _ => assert_eq!(input.configuration, N4F1C3, "byte {b}"),
+            }
         }
     }
 

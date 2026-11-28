@@ -74,6 +74,9 @@ pub const FAULT_INJECTION_RATIO: u64 = 5;
 pub const MIN_NUMBER_OF_FAULTS: u64 = 2;
 pub const MIN_REQUIRED_CONTAINERS: u64 = 1;
 pub const MAX_REQUIRED_CONTAINERS: u64 = 30;
+
+/// Fewest containers a quiet pair run finalizes.
+pub const QUIET_PAIR_MIN_CONTAINERS: u64 = 16;
 pub const MAX_TERM_LENGTH: u32 = 5;
 /// Scripted adversarial rounds a twins campaign generates at most. Each round
 /// is one leader term, so the scripted prefix spans `rounds * term_length`
@@ -388,8 +391,15 @@ pub struct FuzzInput {
     /// under a multi-view term skips the entry-evidence invariants for
     /// intra-term views, which assume non-optimistic view entry.
     pub optimistic_views: ViewDelta,
-    /// Sampled but not yet handed to engines: per-node lookaheads are not
-    /// wired, so every engine runs `optimistic_views`.
+    /// Selects slow certifiers, not per-node lookaheads (every engine runs
+    /// `optimistic_views`): in a standard run with no Byzantine participant,
+    /// no network fault, no failing certifier and no withheld block, `true`
+    /// makes the two highest-index validators certify with an 80 ms mean
+    /// latency. Other drivers ignore it. Always `true` for a quiet pair input
+    /// (values 86 to 95 of the configuration draw), which also gets a connected
+    /// partition, `CertifyChoice::Always`, at least one optimistic view, at
+    /// least [`QUIET_PAIR_MIN_CONTAINERS`] containers and `Handoff::Vote` at
+    /// term length 1.
     pub heterogeneous_optimism: bool,
     /// Handoff decision every honest application returns for a term-start
     /// proposal whose parent is not yet certified.
@@ -432,9 +442,14 @@ impl Arbitrary<'_> for FuzzInput {
             _ => Partition::Adaptive(Vec::new()),
         };
 
-        let configuration = match u.int_in_range(1..=100)? {
-            1..=95 => N4F1C3, // 95%
-            _ => N4F0C4,      // 5%
+        // Configuration distribution:
+        //   85%  N4F1C3
+        //   10%  quiet pair: N4F0C4 with the coercions after the last draw
+        //    5%  N4F0C4
+        let (configuration, quiet_pair) = match u.int_in_range(1..=100)? {
+            1..=85 => (N4F1C3, false),
+            86..=95 => (N4F0C4, true),
+            _ => (N4F0C4, false),
         };
 
         // Bias degraded networking - 1%
@@ -510,6 +525,39 @@ impl Arbitrary<'_> for FuzzInput {
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
+
+        // A quiet pair input is a fault-free run with two slow certifiers that is
+        // long enough, and pipelined enough, for a follower to lag its leader.
+        let (
+            partition,
+            certify,
+            heterogeneous_optimism,
+            optimistic_views,
+            required_containers,
+            handoff,
+        ) = if quiet_pair {
+            (
+                Partition::Connected,
+                CertifyChoice::Always,
+                true,
+                ViewDelta::new(optimistic_views.get().max(1)),
+                required_containers.max(QUIET_PAIR_MIN_CONTAINERS),
+                if term_length.get() == 1 {
+                    Handoff::Vote(())
+                } else {
+                    handoff
+                },
+            )
+        } else {
+            (
+                partition,
+                certify,
+                heterogeneous_optimism,
+                optimistic_views,
+                required_containers,
+                handoff,
+            )
+        };
 
         Ok(Self {
             raw_bytes,

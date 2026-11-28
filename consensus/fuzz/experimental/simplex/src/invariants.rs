@@ -1006,6 +1006,49 @@ pub fn check_no_invalid_reports_if_no_faults<E, S, L>(
     }
 }
 
+/// The views each reporter holds a nullification certificate for, sorted
+/// ascending, one entry per reporter in input order. Reads certificates only,
+/// never `nullify` votes.
+pub fn nullified_views<E, S, L>(reporters: &[Reporter<E, S, L, Sha256Digest>]) -> Vec<Vec<u64>>
+where
+    E: CryptoRng,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    reporters
+        .iter()
+        .map(|reporter| {
+            let mut views: Vec<u64> = reporter
+                .nullifications
+                .lock()
+                .keys()
+                .map(|view| view.get())
+                .collect();
+            views.sort_unstable();
+            views
+        })
+        .collect()
+}
+
+/// No nullification certificate in a quiet run, except for `startup_view`:
+/// panics when any entry of `nullified` (one per honest reporter, as
+/// [`nullified_views`] gives) holds a view other than `startup_view`. The
+/// message starts with `quiet run: reporter <index>` and lists the judged
+/// views only. Returns when no entry holds such a view.
+pub fn check_no_nullification_in_quiet_run(nullified: &[Vec<u64>], startup_view: u64) {
+    for (idx, views) in nullified.iter().enumerate() {
+        let judged: Vec<u64> = views
+            .iter()
+            .copied()
+            .filter(|view| *view != startup_view)
+            .collect();
+        assert!(
+            judged.is_empty(),
+            "quiet run: reporter {idx} observed nullifications at views {judged:?}"
+        );
+    }
+}
+
 /// One honest reporter as [`check_no_invalid_certificates`] judged it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Judged {
@@ -3389,6 +3432,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "quiet run: reporter 1 observed nullifications at views [2]")]
+    fn quiet_run_nullification_panics() {
+        check_no_nullification_in_quiet_run(&[vec![], vec![2]], 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "quiet run: reporter 0 observed nullifications at views [5]")]
+    fn quiet_run_nullification_lists_judged_views_only() {
+        check_no_nullification_in_quiet_run(&[vec![2, 5]], 2);
+    }
+
+    #[test]
+    fn quiet_run_startup_view_nullification_returns() {
+        check_no_nullification_in_quiet_run(&[vec![2], vec![2], vec![2], vec![2]], 2);
+    }
+
+    #[test]
+    fn quiet_run_without_nullification_returns() {
+        check_no_nullification_in_quiet_run(&[vec![], vec![], vec![], vec![]], 2);
+        check_no_nullification_in_quiet_run(&[], 2);
+    }
+
     use commonware_consensus::{
         simplex::{
             elector::{Random, RandomVersion, RoundRobin},

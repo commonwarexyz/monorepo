@@ -125,7 +125,7 @@ impl<P: PublicKey> Relay<P> {
     }
 
     /// Overrides `who`'s application latencies, or restores its own with `None`.
-    pub(crate) fn set_latency(&self, who: &P, latencies: Option<crate::continuation::Latencies>) {
+    pub fn set_latency(&self, who: &P, latencies: Option<crate::continuation::Latencies>) {
         let mut overrides = self.latencies.lock();
         match latencies {
             Some(latencies) => {
