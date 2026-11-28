@@ -545,7 +545,8 @@ where
     ///
     /// Bounded initialization and compact sync can only use witnesses that survive. The current
     /// commit's witness always survives. A pending compact-sync import is journaled first. The
-    /// prune is made durable before this method returns.
+    /// current state is durable when this method returns. Storage may delete the dropped
+    /// witnesses later, so a reopen after a crash can still find them.
     #[tracing::instrument(
         name = "qmdb.compact.db.prune",
         level = "info",

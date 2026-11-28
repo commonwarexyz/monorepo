@@ -8,6 +8,7 @@ use crate::{
 use commonware_codec::CodecShared;
 use commonware_macros::boxed;
 use commonware_runtime::{
+    Removal,
     buffer::paged::CacheRef,
     telemetry::metrics::{Gauge, GaugeExt as _},
 };
@@ -89,9 +90,10 @@ type Snapshot<E, V> = Arc<variable::Reader<'static, E, V>>;
 ///
 /// On restart, `ack_floor` is set to the start of the oldest section still on disk. Committed
 /// items survive unless their section was removed, so acknowledged items in the oldest section
-/// are delivered again. The journal may also recover a prefix of later appends, even if the
-/// writer never called commit. The reader delivers those items too. Applications must handle
-/// duplicates (idempotent processing).
+/// are delivered again, as are pruned items whose sections were released but not yet deleted.
+/// The journal may also recover a prefix of later appends, even if the writer never called
+/// commit. The reader delivers those items too. Applications must handle duplicates (idempotent
+/// processing).
 ///
 /// Storage-mutating functions consume the queue and return it only on success: an error (or a
 /// dropped future) destroys the handle. The reader then delivers every published item and returns
@@ -249,6 +251,17 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
 
         // Publish a view with the retained bounds.
         self.publish().await
+    }
+
+    /// A [Removal] that completes once every blob released by an earlier [Self::sync] is deleted.
+    pub fn removals(&self) -> Removal {
+        self.journal.removals()
+    }
+
+    /// Wait until every blob released by an earlier [Self::sync] is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        Ok(self.journal.wait_for_removals().await?)
     }
 
     /// Returns the total number of items that have been appended.

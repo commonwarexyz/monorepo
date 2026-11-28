@@ -127,13 +127,18 @@ mod tests {
         let latest_root = db.root();
         let latest_end = db.bounds().end;
 
-        // The frontier becomes durable before the first obsolete blob is removed. Failing every
+        // The frontier becomes durable before the first obsolete blob is released. Failing every
         // removal leaves the frontier at boundary 5 while the blob holding operations 0 to 4
-        // stays on disk.
+        // stays on disk. The prune returns once the deletion is submitted, and the next prune
+        // reports its failure.
         let faults = context.storage_fault_config();
         faults.write().remove_rate = Some(probability!(1.0));
-        assert!(db.prune(Location::new(5)).await.is_err());
+        let db = db.prune(Location::new(5)).await.unwrap();
         faults.write().remove_rate = None;
+        assert!(matches!(
+            db.prune(Location::new(5)).await,
+            Err(Error::Journal(crate::journal::Error::Removal(_)))
+        ));
 
         // The commit ending size 6 declares floor 1, which lies before the recorded boundary.
         let result = Db::<F, _, Digest, Digest, Sha256, _, _>::init(

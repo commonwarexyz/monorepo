@@ -12,7 +12,7 @@
 //! recoverable.
 
 use super::Error;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Removal};
 use futures::{Stream, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 
@@ -314,7 +314,7 @@ pub trait Mutable: Contiguous + Sized {
 
     /// Prune items at positions strictly less than `min_position`.
     ///
-    /// Returns `true` if any blobs were removed, `false` otherwise.
+    /// Returns `true` if any blobs were released, `false` otherwise.
     ///
     /// # Behavior
     ///
@@ -326,6 +326,20 @@ pub trait Mutable: Contiguous + Sized {
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during pruning
     ///
+    /// # Removal
+    ///
+    /// The prune's effect on reads through this journal is settled when it returns. The storage
+    /// layer deletes the released storage in order, once every earlier prune's deletions have
+    /// succeeded, and deletion may continue after the prune returns. The [Removal] from
+    /// [Self::start_prune] completes when deletion finishes.
+    ///
+    /// A deletion failure is fatal. Deletions of later prunes of this journal do not run, and the
+    /// failure surfaces from that [Removal] and from the next prune, sync, reset, and destroy. A
+    /// crash before deletion finishes leaves a prefix of the released storage removed, and
+    /// recovery may expose the rest again until the next prune releases it. Deletion still queued
+    /// when the runtime shuts down may be abandoned the same way, so a process that needs it
+    /// before it exits awaits [Self::removals].
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
@@ -333,6 +347,22 @@ pub trait Mutable: Contiguous + Sized {
         self,
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
+
+    /// Like [Self::prune], also returning a [Removal] that completes once the released storage is
+    /// deleted.
+    fn start_prune(
+        self,
+        min_position: u64,
+    ) -> impl std::future::Future<Output = Result<(Self, bool, Removal), Error>> + Send {
+        async move {
+            let (journal, pruned) = self.prune(min_position).await?;
+            let removals = journal.removals();
+            Ok((journal, pruned, removals))
+        }
+    }
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    fn removals(&self) -> Removal;
 
     /// Return the retained start that [Self::prune] with `min_position` would leave. The retained
     /// start is the oldest position the journal still stores, at most the start of

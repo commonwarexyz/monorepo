@@ -672,7 +672,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
 }
 
 /// Persisting a sync result writes the grafted metadata before the operation frontier, so a
-/// catch-up sync whose boundary prune fails reopens at the target.
+/// catch-up sync whose boundary prune cannot delete its blobs reopens at the target.
 #[test_traced]
 fn test_current_sync_persist_failure_reopens_at_target() {
     type Db = crate::qmdb::current::unordered::fixed::Db<
@@ -726,11 +726,12 @@ fn test_current_sync_persist_failure_reopens_at_target() {
         assert_eq!(local.root(), canonical_root);
         drop(local);
 
-        // Failing every blob removal fails the prune that records the boundary, after the
-        // frontier is written.
+        // Failing every blob removal fails the deletion that recording the boundary submits,
+        // after the frontier is written. The sync completes, and the database reports the failed
+        // deletion from its next sync.
         let faults = context.storage_fault_config();
         faults.write().remove_rate = Some(probability!(1.0));
-        let result = crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
+        let synced = crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
             context: context.child("sync"),
             db_config: local_config.clone(),
             fetch_batch_size: NZU64!(64),
@@ -742,11 +743,17 @@ fn test_current_sync_persist_failure_reopens_at_target() {
             finish_rx: None,
             reached_target_tx: None,
         })
-        .await;
-        assert!(matches!(result, Err(crate::qmdb::sync::Error::Database(_))));
+        .await
+        .unwrap();
         faults.write().remove_rate = None;
+        assert!(matches!(
+            synced.sync().await,
+            Err(crate::qmdb::Error::Journal(crate::journal::Error::Removal(
+                _
+            )))
+        ));
 
-        // The database opens at the target and finishes the interrupted deletion.
+        // The database opens at the target and submits the interrupted deletion again.
         let reopened: Db = Db::init(context.child("reopened"), local_config, None)
             .await
             .unwrap();
@@ -855,16 +862,31 @@ fn test_current_sync_interrupted_persist_is_retried() {
                     Db::init(context.child(label), fixed_config::<TwoCap>("local"), None)
                 };
 
-                // Sync fails exactly when one of its mutations was refused.
+                // Sync fails when one of its mutations was refused, unless that mutation deletes
+                // a blob the recorded boundary released. Such a sync completes, and the database
+                // reports the failed deletion from its next sync.
                 faults.allow(interrupted);
                 let result = sync("sync").await;
                 let stopped = faults.failed();
                 faults.disarm();
                 let scenario = format!("rounds {rounds}, stopped after {interrupted}");
-                assert_eq!(result.is_err(), stopped, "{scenario}");
-                if let Ok(db) = result {
-                    assert_eq!(db.root(), canonical_root, "{scenario}");
-                    return (true, false);
+                match result {
+                    Ok(db) => {
+                        assert_eq!(db.root(), canonical_root, "{scenario}");
+                        if !stopped {
+                            return (true, false);
+                        }
+                        assert!(
+                            matches!(
+                                db.sync().await,
+                                Err(crate::qmdb::Error::Journal(crate::journal::Error::Removal(
+                                    _
+                                )))
+                            ),
+                            "{scenario}"
+                        );
+                    }
+                    Err(_) => assert!(stopped, "{scenario}"),
                 }
 
                 let db = reopen("reopen").await.unwrap();

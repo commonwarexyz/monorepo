@@ -707,6 +707,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_internal().await?;
 
+        // A clean journal is not synced below, so observe a failed node blob deletion here.
+        self.journal.check_removals()?;
+
         // Observe pending sync failures and persist nodes from this or earlier flushes.
         if self.journal_dirty {
             self.journal = self.journal.sync().await?;
@@ -784,6 +787,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// This implementation ensures that no failure can leave the structure in an unrecoverable
     /// state, requiring it sync the structure to write any potential unsynced updates.
     ///
+    /// Deletion of the released node blobs may continue after this returns, and its failure is
+    /// reported by the next [Self::sync] or [Self::prune].
+    ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
     pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
@@ -792,6 +798,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Err(Error::LeafOutOfBounds(loc));
         }
         if pos <= self.pruned_to_pos {
+            // Nothing below reaches the journal, so observe a failed node blob deletion here.
+            self.journal.check_removals()?;
             return Ok(self);
         }
 
@@ -1634,6 +1642,68 @@ mod tests {
     fn test_full_prune_out_of_bounds_returns_error_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_prune_out_of_bounds_returns_error_inner::<mmb::Family>);
+    }
+
+    /// A node blob deletion that fails after its prune returned is reported by the next sync,
+    /// or by the next prune when `prune` is set, even though neither has anything to write.
+    async fn failed_node_deletion_surfaces_inner<F: Family>(
+        context: deterministic::Context,
+        prune: bool,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("first"),
+            &hasher,
+            test_config(),
+        )
+        .await
+        .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..100 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+
+        // The prune releases node blobs and returns before storage refuses to delete them.
+        context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+        merkle = merkle.prune(Location::new(60)).await.unwrap();
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+        assert!(merkle.journal.removals().await.is_err());
+
+        // Every node is synced and the boundary is already at 60, so neither call writes.
+        let result = if prune {
+            merkle.prune(Location::new(60)).await
+        } else {
+            merkle.sync().await
+        };
+        assert!(
+            matches!(
+                result,
+                Err(Error::Journal(crate::journal::Error::Removal(_)))
+            ),
+            "prune: {prune}"
+        );
+    }
+
+    #[test_traced]
+    fn test_full_sync_and_prune_report_failed_node_deletion_mmr() {
+        for prune in [false, true] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| {
+                failed_node_deletion_surfaces_inner::<mmr::Family>(context, prune)
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_full_sync_and_prune_report_failed_node_deletion_mmb() {
+        for prune in [false, true] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| {
+                failed_node_deletion_surfaces_inner::<mmb::Family>(context, prune)
+            });
+        }
     }
 
     async fn full_initialization_bounds_preserve_state_inner<F: Family>(
