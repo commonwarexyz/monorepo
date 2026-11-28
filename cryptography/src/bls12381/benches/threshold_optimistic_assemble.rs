@@ -1,16 +1,12 @@
 use super::utils::optimistic_assemble::{BenchSubject, Case, bench_case};
 use commonware_cryptography::{
     Signer as _,
-    bls12381::{
-        dkg::feldman_desmedt::deal,
-        primitives::{
-            sharing::Mode,
-            variant::{MinPk, MinSig, Variant},
-        },
-    },
+    bls::{dkg::feldman_desmedt::deal, sharing::Mode, variant::Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
     certificate::{Attestation, Scheme as _},
-    ed25519::{self, PrivateKey},
-    impl_certificate_bls12381_threshold,
+    ed25519,
+    ed25519::PrivateKey,
+    impl_certificate_bls_threshold,
     sha256::Digest as Sha256Digest,
 };
 use commonware_utils::{Faults, N3f1, TestRng, TryCollect, ordered::Set};
@@ -19,7 +15,7 @@ use rand::seq::SliceRandom;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_THRESHOLD_OPTIMISTIC_ASSEMBLE";
 
-impl_certificate_bls12381_threshold!(BenchSubject, Vec<u8>, N3f1);
+impl_certificate_bls_threshold!(BenchSubject, Vec<u8>, N3f1);
 
 type Threshold<V> = Scheme<ed25519::PublicKey, V>;
 

@@ -63,17 +63,18 @@ use commonware_codec::{
     Buf, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
 };
 #[commonware_macros::stability(ALPHA)]
-use commonware_cryptography::bls12381::tle;
+use commonware_cryptography::bls::tle;
 use commonware_cryptography::{
     Digest, PublicKey,
-    bls12381::primitives::{
-        group::Share,
-        ops::{self, batch, threshold},
-        sharing::Sharing,
+    bls::{
+        ops,
+        ops::{batch, threshold},
+        sharing::{Share, Sharing},
         variant::{PartialSignature, Variant},
     },
+    certificate,
     certificate::{
-        self, AssemblyError, Attestation, Membership, Signers, Subject as CertificateSubject,
+        AssemblyError, Attestation, Membership, Signers, Subject as CertificateSubject,
         Verification,
     },
 };
@@ -101,7 +102,7 @@ enum Role<P: PublicKey, V: Variant> {
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
-        share: Share,
+        share: Share<V::Scalar>,
         /// Pre-computed namespaces for domain separation.
         namespace: Namespace,
     },
@@ -158,7 +159,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
-        share: Share,
+        share: Share<V::Scalar>,
     ) -> Option<Self> {
         assert_eq!(
             polynomial.total().get() as usize,
@@ -302,7 +303,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Returns the local share if this instance can generate partial signatures.
-    pub const fn share(&self) -> Option<&Share> {
+    pub const fn share(&self) -> Option<&Share<V::Scalar>> {
         match &self.role {
             Role::Signer { share, .. } => Some(share),
             _ => None,
@@ -391,7 +392,7 @@ where
     V: Variant,
     R: rand_core::CryptoRng,
 {
-    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+    commonware_cryptography::bls::certificate::threshold::mocks::fixture::<_, V, _>(
         rng,
         namespace,
         n,
@@ -1025,15 +1026,8 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         Hasher, Sha256, Signer as _,
-        bls12381::{
-            dkg::feldman_desmedt as dkg,
-            primitives::{
-                group::Scalar,
-                ops::threshold,
-                sharing::Mode,
-                variant::{MinPk, MinSig, Variant},
-            },
-        },
+        bls::{dkg::feldman_desmedt as dkg, ops::threshold, sharing::Mode, variant::Variant},
+        bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{Scheme as _, Verifier as _, mocks::Fixture},
         ed25519,
         ed25519::certificate::mocks::participants as ed25519_participants,
@@ -2195,7 +2189,7 @@ mod tests {
             &Sequential,
         ));
 
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let att_sig = attestation.signature.get().unwrap();
         let forged_attestation: Attestation<Scheme<V>> = Attestation {
@@ -2258,7 +2252,7 @@ mod tests {
         assert!(verification.invalid.is_empty());
         assert_eq!(verification.verified.len(), 2);
 
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let att1_sig = attestation1.signature.get().unwrap();
         let att2_sig = attestation2.signature.get().unwrap();
@@ -2464,7 +2458,7 @@ mod tests {
         ));
 
         let cert = certificate.get().unwrap();
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_certificate: Certificate<V> = Signature {
             vote_signature: cert.vote_signature - &delta,
@@ -2554,7 +2548,7 @@ mod tests {
 
         let cert1 = certificate1.get().unwrap();
         let cert2 = certificate2.get().unwrap();
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_certificate1: Certificate<V> = Signature {
             vote_signature: cert1.vote_signature - &delta,

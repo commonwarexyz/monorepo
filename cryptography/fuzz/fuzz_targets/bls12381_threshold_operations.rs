@@ -2,11 +2,16 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Encode, ReadExt};
-use commonware_cryptography::bls12381::primitives::{
-    group::{G1, G2, Share},
-    ops::threshold,
-    sharing::Sharing,
-    variant::{MinPk, MinSig, PartialSignature},
+use commonware_cryptography::{
+    bls::{
+        ops::threshold,
+        sharing::{Share, Sharing},
+        variant::PartialSignature,
+    },
+    bls12381::primitives::{
+        group::{G1, G2, Scalar},
+        variant::{MinPk, MinSig},
+    },
 };
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, Participant, non_empty, test_rng};
@@ -24,12 +29,12 @@ use common::{
 enum FuzzOperation {
     SignProofOfPossessionMinPk {
         public: Sharing<MinPk>,
-        share: Share,
+        share: Share<Scalar>,
         namespace: Vec<u8>,
     },
     SignProofOfPossessionMinSig {
         public: Sharing<MinSig>,
-        share: Share,
+        share: Share<Scalar>,
         namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinPk {
@@ -93,17 +98,17 @@ enum FuzzOperation {
         partials_2: Vec<PartialSignature<MinSig>>,
     },
     SignMessageMinPk {
-        share: Share,
+        share: Share<Scalar>,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMessageMinSig {
-        share: Share,
+        share: Share<Scalar>,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SerializeShare {
-        share: Share,
+        share: Share<Scalar>,
     },
 }
 

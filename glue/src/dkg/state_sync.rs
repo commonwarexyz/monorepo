@@ -36,10 +36,10 @@ use commonware_consensus::{
     types::{Epoch, Epocher, FixedEpocher, Height},
 };
 #[cfg(feature = "arbitrary")]
-use commonware_cryptography::bls12381::dkg::feldman_desmedt::Output;
+use commonware_cryptography::bls::dkg::feldman_desmedt::Output;
 use commonware_cryptography::{
     Digest,
-    bls12381::primitives::{sharing::ModeVersion, variant::Variant},
+    bls::{sharing::ModeVersion, variant::Variant},
     certificate::Verifier,
 };
 use commonware_storage::{
@@ -901,7 +901,7 @@ mod tests {
     };
     use commonware_cryptography::{
         Digested, Digestible as _, Hasher as _, Sha256, Signer as _,
-        bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
+        bls::{dkg::feldman_desmedt::deal, sharing::Mode},
         ed25519,
     };
     use commonware_p2p::Address;

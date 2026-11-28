@@ -206,7 +206,7 @@ mod tests {
     use super::*;
     use crate::config::{self, PeerConfig};
     use commonware_cryptography::{
-        Signer as _, bls12381::dkg::feldman_desmedt::deal, ed25519::PrivateKey,
+        Signer as _, bls::dkg::feldman_desmedt::deal, ed25519::PrivateKey,
     };
     use commonware_math::algebra::Random;
     use commonware_utils::{N3f1, ordered::Set, test_rng};

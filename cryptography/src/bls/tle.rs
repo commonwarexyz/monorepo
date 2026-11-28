@@ -1,6 +1,6 @@
-//! Timelock Encryption (TLE) over BLS12-381.
+//! Timelock Encryption (TLE) from BLS signatures.
 //!
-//! This crate implements Timelock Encryption (TLE) over BLS12-381 using
+//! This module implements Timelock Encryption (TLE) over any [Variant] using
 //! Identity-Based Encryption (IBE) with the Boneh-Franklin scheme. TLE enables
 //! encrypting messages that can only be decrypted when a valid signature over
 //! a specific target (e.g., timestamp or round number) becomes available.
@@ -33,12 +33,12 @@
 //! signatures in production (where no single party owns the private key)._
 //!
 //! ```rust
-//! use commonware_cryptography::bls12381::{
-//!     tle::{encrypt, decrypt, Block},
-//!     primitives::{
+//! use commonware_cryptography::{
+//!     bls::{
 //!         ops::{keypair, sign_message},
-//!         variant::MinPk,
+//!         tle::{encrypt, decrypt, Block},
 //!     },
+//!     bls12381::primitives::variant::MinPk,
 //! };
 //! use commonware_utils::test_rng;
 //!
@@ -83,25 +83,18 @@
 //! * <https://github.com/drand/tlock> tlock: Timelock Encryption/Decryption Made Practical
 
 use crate::{
-    bls12381::primitives::{
-        group::{DST, GT, Scalar},
-        ops::hash_with_namespace,
-        variant::Variant,
-    },
+    bls::{ops::hash_with_namespace, variant::Variant},
     sha256::Digest,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_math::algebra::{Additive, CryptoGroup};
+use commonware_codec::{Buf, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::{Additive, CryptoGroup, HashToField as _, PairingGroup};
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;
 use thiserror::Error;
 use zeroize::Zeroizing;
-
-/// Domain separation tag for hashing the `h3` message to a scalar.
-const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
 
 /// Block size for encryption operations.
 const BLOCK_SIZE: usize = Digest::SIZE;
@@ -177,25 +170,26 @@ mod hash {
     use super::*;
     use crate::{Hasher, Sha256};
 
-    /// H2: GT -> Block
+    /// H2: GT -> Block, over the encoding of the pairing output.
     ///
     /// Used to mask the random sigma value.
-    pub fn h2(gt: &GT) -> Block {
-        let gt = Zeroizing::new(gt.as_slice());
-        Sha256::hash(&[b"h2", gt.as_ref()]).into()
+    pub fn h2(gt: &impl Encode) -> Block {
+        let mut encoded = Zeroizing::new(Vec::with_capacity(gt.encode_size()));
+        gt.write(&mut *encoded);
+        Sha256::hash(&[b"h2", encoded.as_slice()]).into()
     }
 
     /// H3: (sigma, M) -> Scalar
     ///
     /// Used to derive the random scalar r using RFC9380 hash-to-field.
-    pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
+    pub fn h3<V: Variant>(sigma: &Block, message: &[u8]) -> V::Scalar {
         // Combine sigma and message
         let mut combined = Zeroizing::new(Vec::with_capacity(sigma.len() + message.len()));
         combined.extend_from_slice(sigma.as_ref());
         combined.extend_from_slice(message);
 
         // Map the combined bytes to a scalar via RFC9380 hash-to-field.
-        Scalar::map(DST, &combined)
+        V::Scalar::hash_to_field(V::TLE, &combined)
     }
 
     /// H4: sigma -> Block
@@ -252,7 +246,7 @@ pub fn encrypt<R: CryptoRng, V: Variant>(
     let sigma = Zeroizing::new(Block::new(*sigma_array));
 
     // Derive scalar r from sigma and message
-    let r = hash::h3(&sigma, message.as_ref());
+    let r = hash::h3::<V>(&sigma, message.as_ref());
 
     // Compute U = r * Public::generator()
     let mut u = V::Public::generator();
@@ -263,7 +257,7 @@ pub fn encrypt<R: CryptoRng, V: Variant>(
     // The latter expression is more efficient to compute.
     let mut r_pub = public;
     r_pub *= &r;
-    let gt = V::pairing(&r_pub, &q_id);
+    let gt = r_pub.pairing(&q_id);
 
     // Compute V = sigma XOR H2(e(P_pub, Q_id)^r)
     let h2_value = Zeroizing::new(hash::h2(&gt));
@@ -298,7 +292,7 @@ pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>)
     }
 
     // Compute e(U, signature)
-    let gt = V::pairing(&ciphertext.u, signature);
+    let gt = ciphertext.u.pairing(signature);
 
     // Recover sigma = V XOR H2(e(U, signature))
     let h2_value = hash::h2(&gt);
@@ -309,7 +303,7 @@ pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>)
     let message = xor(&ciphertext.w, &h4_value);
 
     // Recompute r and verify U = r * Public::generator()
-    let r = hash::h3(&sigma, &message);
+    let r = hash::h3::<V>(&sigma, &message);
     let mut expected_u = V::Public::generator();
     expected_u *= &r;
     if ciphertext.u != expected_u {
@@ -322,9 +316,12 @@ pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::{
-        ops,
-        variant::{MinPk, MinSig},
+    use crate::{
+        bls::ops,
+        bls12381::primitives::{
+            group::Scalar,
+            variant::{MinPk, MinSig},
+        },
     };
     use commonware_math::algebra::Random as _;
     use commonware_utils::test_rng;
@@ -332,11 +329,11 @@ mod tests {
     fn identity_signature_cannot_decrypt<V: Variant>() {
         let sigma = Block::new([1; BLOCK_SIZE]);
         let message = Block::new([2; BLOCK_SIZE]);
-        let r = hash::h3(&sigma, message.as_ref());
+        let r = hash::h3::<V>(&sigma, message.as_ref());
 
         let mut u = V::Public::generator();
         u *= &r;
-        let identity_pairing = V::pairing(&V::Public::zero(), &V::Signature::generator());
+        let identity_pairing = V::Public::zero().pairing(&V::Signature::generator());
         let ciphertext = Ciphertext {
             u,
             v: xor(&sigma, &hash::h2(&identity_pairing)),

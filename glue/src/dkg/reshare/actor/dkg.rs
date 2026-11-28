@@ -12,9 +12,7 @@ use commonware_consensus::{
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, Epocher, Height},
 };
-use commonware_cryptography::{
-    BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
-};
+use commonware_cryptography::{BatchVerifier, Signer, bls::variant::Variant as BlsVariant};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Sender, utils::mux::MuxHandle};
 use commonware_parallel::Strategy;
@@ -34,7 +32,7 @@ where
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     T: Strategy,
     C::PublicKey: BatchVerifier,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,

@@ -8,7 +8,7 @@ use crate::dkg::{
 };
 use commonware_cryptography::{
     Signer,
-    bls12381::{dkg::feldman_desmedt::Reveal, primitives::sharing::Mode},
+    bls::{dkg::feldman_desmedt::Reveal, sharing::Mode},
 };
 use commonware_p2p::simulated::Oracle;
 use commonware_parallel::Sequential;

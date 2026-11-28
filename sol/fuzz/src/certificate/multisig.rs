@@ -6,10 +6,8 @@ use alloy_sol_types::SolValue;
 use clap::{Args, Subcommand};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        ops::{self, aggregate},
-        variant::{MinPk, MinSig, Variant},
-    },
+    bls::{ops, ops::aggregate, variant::Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
     certificate::Signers,
 };
 use commonware_utils::{Participant, non_empty};

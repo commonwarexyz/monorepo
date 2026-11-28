@@ -14,14 +14,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Reveal},
-        primitives::{
-            group::Share,
-            sharing::{Mode, ModeVersion},
-            variant::{MinSig, Variant},
-        },
+        sharing::{Mode, ModeVersion, Share},
+        variant::Variant,
     },
+    bls12381::primitives::{group::Scalar, variant::MinSig},
     certificate::{Provider as CertificateProvider, Scoped},
     ed25519, sha256,
     transcript::Summary,
@@ -62,7 +60,7 @@ use std::{
 use tracing::info;
 
 /// Threshold certificate scheme used for consensus votes and certificates.
-pub type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>;
+pub type Scheme = simplex::scheme::bls_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>;
 /// QMDB holding the application state.
 pub type Qmdb<E> = fixed::Db<mmr::Family, E, U64, U64, Sha256, TwoCap, Sequential>;
 /// Shared handle to the application QMDB.
@@ -515,12 +513,12 @@ impl<E: StorageContext> Secrets<E> {
     }
 }
 
-impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
-    async fn put_share(&mut self, epoch: Epoch, share: Share) {
+impl<E: StorageContext> dkg::SecretStore<Scalar> for Secrets<E> {
+    async fn put_share(&mut self, epoch: Epoch, share: Share<Scalar>) {
         self.put(key(SHARE, epoch, None), share).await;
     }
 
-    async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {
+    async fn get_share(&mut self, epoch: Epoch) -> Option<Share<Scalar>> {
         self.get(&key(SHARE, epoch, None)).await
     }
 
@@ -532,23 +530,23 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
         self.get(&key(SEED, epoch, None)).await
     }
 
-    async fn put_dealing<V: Variant, P: commonware_cryptography::PublicKey>(
+    async fn put_dealing<V: Variant<Scalar = Scalar>, P: commonware_cryptography::PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
         public: &DealerPubMsg<V>,
-        private: DealerPrivMsg,
+        private: DealerPrivMsg<Scalar>,
     ) {
         let dealing = Sha256::hash(&[&dealer, &public.encode()]);
         self.put(key(DEALING, epoch, Some(dealing)), private).await;
     }
 
-    async fn get_dealing<V: Variant, P: commonware_cryptography::PublicKey>(
+    async fn get_dealing<V: Variant<Scalar = Scalar>, P: commonware_cryptography::PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
         public: &DealerPubMsg<V>,
-    ) -> Option<DealerPrivMsg> {
+    ) -> Option<DealerPrivMsg<Scalar>> {
         let dealing = Sha256::hash(&[dealer, &public.encode()]);
         self.get(&key(DEALING, epoch, Some(dealing))).await
     }
@@ -684,10 +682,8 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         Signer as _,
-        bls12381::{
-            dkg::feldman_desmedt::{Dealer, Info, deal},
-            primitives::group::Scalar,
-        },
+        bls::dkg::feldman_desmedt::{Dealer, Info, deal},
+        bls12381::primitives::group::Scalar,
     };
     use commonware_glue::dkg::SecretStore as _;
     use commonware_math::algebra::Random;

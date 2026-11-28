@@ -2,13 +2,16 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Copying, Encode, Read, ReadExt};
-use commonware_cryptography::bls12381::primitives::{
-    group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Private, Scalar, ScalarReadCfg, Share},
-    ops,
-    variant::{MinPk, MinSig, Variant},
+use commonware_cryptography::{
+    bls::{key::Private, ops, sharing::Share, variant::Variant},
+    bls12381::primitives::{
+        group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Scalar},
+        variant::{MinPk, MinSig},
+    },
+    curve::ScalarReadCfg,
 };
 use commonware_math::{
-    algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
+    algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space, Twin},
     poly::Poly,
 };
 use commonware_parallel::Sequential;
@@ -67,10 +70,10 @@ enum FuzzOperation {
     // Key operations
     KeypairGeneration,
     ComputePublicKey {
-        private: Private,
+        private: Private<Scalar>,
     },
     SharePublicKey {
-        share: Share,
+        share: Share<Scalar>,
         use_minpk: bool,
     },
 
@@ -87,12 +90,12 @@ enum FuzzOperation {
 
     // Single signature operations (MinPk)
     SignMinPk {
-        private: Private,
+        private: Private<Scalar>,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMinPkLowLevel {
-        private: Private,
+        private: Private<Scalar>,
         message: Vec<u8>,
     },
     VerifyMinPk {
@@ -109,29 +112,29 @@ enum FuzzOperation {
 
     // Single signature operations (MinSig)
     SignMinSig {
-        private: Private,
+        private: Private<Scalar>,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMinSigLowLevel {
-        private: Private,
+        private: Private<Scalar>,
         message: Vec<u8>,
     },
     VerifyMinSig {
-        public: G2,
+        public: <MinSig as Variant>::Public,
         namespace: Vec<u8>,
         message: Vec<u8>,
         signature: G1,
     },
     VerifyMinSigLowLevel {
-        public: G2,
+        public: <MinSig as Variant>::Public,
         message: Vec<u8>,
         signature: G1,
     },
 
     // Proof of possession
     SignProofOfPossessionMinPk {
-        private: Private,
+        private: Private<Scalar>,
         namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinPk {
@@ -140,11 +143,11 @@ enum FuzzOperation {
         signature: G2,
     },
     SignProofOfPossessionMinSig {
-        private: Private,
+        private: Private<Scalar>,
         namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinSig {
-        public: G2,
+        public: <MinSig as Variant>::Public,
         namespace: Vec<u8>,
         signature: G1,
     },
@@ -264,13 +267,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
             22 => Ok(FuzzOperation::VerifyMinSig {
-                public: arbitrary_g2(u)?,
+                public: Twin::new(arbitrary_g2(u)?),
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
             23 => Ok(FuzzOperation::VerifyMinSigLowLevel {
-                public: arbitrary_g2(u)?,
+                public: Twin::new(arbitrary_g2(u)?),
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
@@ -288,7 +291,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 namespace: arbitrary_bytes(u, 0, 50)?,
             }),
             27 => Ok(FuzzOperation::VerifyProofOfPossessionMinSig {
-                public: arbitrary_g2(u)?,
+                public: Twin::new(arbitrary_g2(u)?),
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 signature: arbitrary_g1(u)?,
             }),
@@ -344,7 +347,7 @@ fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
     }
 }
 
-fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
+fn arbitrary_share(u: &mut Unstructured) -> Result<Share<Scalar>, arbitrary::Error> {
     Ok(Share::new(
         Participant::new(u.int_in_range(1..=100)?),
         u.arbitrary()?,
@@ -460,14 +463,14 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::ComputePublicKey { private } => {
             let _pub_pk: G1 = ops::compute_public::<MinPk>(&private);
-            let _pub_sig: G2 = ops::compute_public::<MinSig>(&private);
+            let _pub_sig: <MinSig as Variant>::Public = ops::compute_public::<MinSig>(&private);
         }
 
         FuzzOperation::SharePublicKey { share, use_minpk } => {
             if use_minpk {
                 let _: G1 = share.public::<MinPk>();
             } else {
-                let _: G2 = share.public::<MinSig>();
+                let _: <MinSig as Variant>::Public = share.public::<MinSig>();
             }
         }
 

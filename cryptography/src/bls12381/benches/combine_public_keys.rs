@@ -1,4 +1,4 @@
-use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_cryptography::{bls::ops, bls12381::primitives::variant::MinSig};
 use commonware_utils::{non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;

@@ -10,16 +10,12 @@ use commonware_bridge::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     Viewable,
-    simplex::{scheme::bls12381_threshold::standard as bls12381_threshold, types::Finalization},
+    simplex::{scheme::bls_threshold::standard as bls_threshold, types::Finalization},
     types::View,
 };
 use commonware_cryptography::{
-    ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _,
-    bls12381::primitives::{
-        group::G2,
-        variant::{MinSig, Variant},
-    },
-    ed25519::{self, PublicKey},
+    ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _, bls::variant::Variant,
+    bls12381::primitives::variant::MinSig, ed25519, ed25519::PublicKey,
     sha256::Digest as Sha256Digest,
 };
 use commonware_formatting::from_hex;
@@ -44,7 +40,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+type Scheme = bls_threshold::Scheme<PublicKey, MinSig>;
 
 enum Message<D: Digest> {
     PutBlock {
@@ -129,10 +125,15 @@ fn main() {
         .expect("public keys are unique");
 
     // Configure networks
-    let mut verifiers: HashMap<G2, Scheme> = HashMap::new();
-    let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G2, BTreeMap<View, Finalization<Scheme, Sha256Digest>>> =
-        HashMap::new();
+    let mut verifiers: HashMap<<MinSig as Variant>::Public, Scheme> = HashMap::new();
+    let mut blocks: HashMap<
+        <MinSig as Variant>::Public,
+        HashMap<Sha256Digest, BlockFormat<Sha256Digest>>,
+    > = HashMap::new();
+    let mut finalizations: HashMap<
+        <MinSig as Variant>::Public,
+        BTreeMap<View, Finalization<Scheme, Sha256Digest>>,
+    > = HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
         .expect("Please provide networks");
@@ -150,7 +151,7 @@ fn main() {
             let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
             verifiers.insert(
                 public,
-                bls12381_threshold::Scheme::certificate_verifier(&namespace, public),
+                bls_threshold::Scheme::certificate_verifier(&namespace, public),
             );
             blocks.insert(public, HashMap::new());
             finalizations.insert(public, BTreeMap::new());

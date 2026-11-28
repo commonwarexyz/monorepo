@@ -13,42 +13,40 @@
 //! group operations can still be the identity, so an API that treats it as invalid must reject it
 //! at its own boundary.
 
-use super::variant::Variant;
-use crate::Secret;
+use crate::curve::{DST, ScalarReadCfg};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    BLS12_381_G1, BLS12_381_G2, BLST_ERROR, Pairing, blst_bendian_from_fp12,
-    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
-    blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
-    blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
-    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
-    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
-    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
-    blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
-    blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
-    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
-    blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-    blst_scalar_from_fr,
+    BLS12_381_G1, BLS12_381_G2, BLST_ERROR, blst_bendian_from_fp12, blst_bendian_from_scalar,
+    blst_expand_message_xmd, blst_fp12, blst_fp12_conjugate, blst_fp12_cyclotomic_sqr, blst_fr,
+    blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
+    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
+    blst_miller_loop_n, blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg,
+    blst_p1_compress, blst_p1_double, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf,
+    blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
+    blst_p1s_mult_pippenger_scratch_sizeof, blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2,
+    blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_double,
+    blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine,
+    blst_p2_uncompress, blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof,
+    blst_p2s_tile_pippenger, blst_p2s_to_affine, blst_scalar, blst_scalar_fr_check,
+    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize,
+    Buf,
     Error::{self, Invalid},
     FixedArray, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, Random, Ring,
-    Space,
+    Additive, CryptoGroup, Field, FieldNTT, HashToField, HashToGroup, Multiplicative, Object,
+    PairingGroup, Random, Ring, Space,
 };
 use commonware_parallel::{Grid, Strategy};
-use commonware_utils::{Participant, Widen};
+use commonware_utils::Widen;
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
-    iter,
     num::NonZeroUsize,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Range, Sub, SubAssign},
     ptr,
@@ -181,20 +179,6 @@ where
     })
 }
 
-/// Domain separation tag used when hashing a message to a curve (G1 or G2).
-///
-/// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
-pub type DST = &'static [u8];
-
-/// Configuration for [`Scalar`]'s [`Read`] implementation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScalarReadCfg {
-    /// Accept any in-range scalar, including zero.
-    AllowZero,
-    /// Reject the zero scalar.
-    RejectZero,
-}
-
 /// Wrapper around [blst_fr] that represents an element of the BLS12-381
 /// scalar field `F_r`.
 ///
@@ -285,6 +269,12 @@ impl SmallScalar {
         Self {
             inner: blst_scalar::default(),
         }
+    }
+}
+
+impl Random for SmallScalar {
+    fn random(rng: impl CryptoRng) -> Self {
+        Self::random(rng)
     }
 }
 
@@ -450,11 +440,6 @@ pub struct GT(blst_fp12);
 pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
 
 impl GT {
-    /// Create GT from blst_fp12.
-    pub(crate) const fn from_blst_fp12(fp12: blst_fp12) -> Self {
-        Self(fp12)
-    }
-
     /// Converts the GT element to its canonical big-endian byte representation.
     pub fn as_slice(&self) -> [u8; GT_ELEMENT_BYTE_LENGTH] {
         let mut slice = [0u8; GT_ELEMENT_BYTE_LENGTH];
@@ -467,64 +452,83 @@ impl GT {
     }
 }
 
-/// The private key type.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Private {
-    scalar: Secret<Scalar>,
-}
+// `GT` is written additively, like every other group in this crate: `+` is multiplication in
+// `F_p^12`, `zero` is its one, and `-` is the inverse.
+//
+// Every `GT` value is a pairing output or a combination of pairing outputs, so it lies in the
+// cyclotomic subgroup. There, conjugation is the inverse and the cyclotomic square is the square.
+// `GT` has no decoder, which keeps this invariant. A decoder must check `blst_fp12_in_group`.
 
-impl Private {
-    /// Creates a new private key from a scalar.
-    pub const fn new(private: Scalar) -> Self {
-        Self {
-            scalar: Secret::new(private),
-        }
-    }
-
-    /// Temporarily exposes the inner scalar to a closure.
-    ///
-    /// See [`Secret::expose`](crate::Secret::expose) for more details.
-    pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
-        self.scalar.expose(f)
-    }
-
-    /// Consumes the private key and returns the inner scalar.
-    ///
-    /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
-    pub fn expose_unwrap(self) -> Scalar {
-        self.scalar.expose_unwrap()
-    }
-}
-
-impl Write for Private {
+impl Write for GT {
     fn write(&self, buf: &mut impl BufMut) {
-        self.expose(|scalar| scalar.write(buf));
+        let slice = Zeroizing::new(self.as_slice());
+        buf.put_slice(slice.as_ref());
     }
 }
 
-impl Read for Private {
-    type Cfg = ();
+impl FixedSize for GT {
+    const SIZE: usize = GT_ELEMENT_BYTE_LENGTH;
+}
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?;
-        Ok(Self::new(scalar))
+impl Object for GT {}
+
+impl<'a> AddAssign<&'a Self> for GT {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.0 *= rhs.0;
     }
 }
 
-impl FixedSize for Private {
-    const SIZE: usize = PRIVATE_KEY_LENGTH;
-}
+impl<'a> Add<&'a Self> for GT {
+    type Output = Self;
 
-impl Random for Private {
-    fn random(rng: impl CryptoRng) -> Self {
-        Self::new(Scalar::random(rng))
+    fn add(mut self, rhs: &'a Self) -> Self::Output {
+        self += rhs;
+        self
     }
 }
 
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Private {
+impl Neg for GT {
+    type Output = Self;
+
+    fn neg(mut self) -> Self::Output {
+        // SAFETY: self.0 is a valid blst_fp12, conjugated in place.
+        unsafe { blst_fp12_conjugate(&mut self.0) };
+        self
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for GT {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        *self += &-*rhs;
+    }
+}
+
+impl<'a> Sub<&'a Self> for GT {
+    type Output = Self;
+
+    fn sub(mut self, rhs: &'a Self) -> Self::Output {
+        self -= rhs;
+        self
+    }
+}
+
+impl Additive for GT {
+    fn zero() -> Self {
+        Self(blst_fp12::default())
+    }
+
+    fn double(&mut self) {
+        let mut out = blst_fp12::default();
+        // SAFETY: Both pointers are valid and do not alias.
+        unsafe { blst_fp12_cyclotomic_sqr(&mut out, &self.0) };
+        self.0 = out;
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl arbitrary::Arbitrary<'_> for GT {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(u.arbitrary::<Scalar>()?))
+        Ok(u.arbitrary::<G1>()?.pairing(&u.arbitrary::<G2>()?))
     }
 }
 
@@ -544,47 +548,6 @@ impl Scalar {
             blst_fr_from_scalar(&mut ret, &sc);
         }
         Self(ret)
-    }
-
-    /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
-    pub fn map(dst: &[u8], msg: &[u8]) -> Self {
-        // The BLS12-381 scalar field has a modulus of approximately 255 bits.
-        // According to RFC9380, when mapping to a field element, we need to
-        // generate uniform bytes with length L = ceil((ceil(log2(p)) + k) / 8),
-        // where p is the field modulus and k is the security parameter.
-        //
-        // For BLS12-381's scalar field:
-        // - log2(p) is about 255 bits
-        // - k = 128 bits (for 128-bit security)
-        // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
-        //
-        // These 48 bytes provide sufficient entropy to ensure uniform distribution
-        // in the scalar field after modular reduction, maintaining the security
-        // properties required by the hash-to-field construction.
-        const L: usize = 48;
-        let mut uniform_bytes = Zeroizing::new([0u8; L]);
-        // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
-        unsafe {
-            blst_expand_message_xmd(
-                uniform_bytes.as_mut_ptr(),
-                L,
-                msg.as_ptr(),
-                msg.len(),
-                dst.as_ptr(),
-                dst.len(),
-            );
-        }
-
-        // Transform expanded bytes with modular reduction
-        let mut fr = blst_fr::default();
-        // SAFETY: uniform_bytes is a valid 48-byte buffer.
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
-            blst_fr_from_scalar(&mut fr, &scalar);
-        }
-
-        Self(fr)
     }
 
     /// Creates a new scalar from the given limbs in little-endian representation.
@@ -903,6 +866,49 @@ impl Field for Scalar {
     }
 }
 
+impl HashToField for Scalar {
+    /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
+    fn hash_to_field(domain_separator: &[u8], message: &[u8]) -> Self {
+        // The BLS12-381 scalar field has a modulus of approximately 255 bits.
+        // According to RFC9380, when mapping to a field element, we need to
+        // generate uniform bytes with length L = ceil((ceil(log2(p)) + k) / 8),
+        // where p is the field modulus and k is the security parameter.
+        //
+        // For BLS12-381's scalar field:
+        // - log2(p) is about 255 bits
+        // - k = 128 bits (for 128-bit security)
+        // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
+        //
+        // These 48 bytes provide sufficient entropy to ensure uniform distribution
+        // in the scalar field after modular reduction, maintaining the security
+        // properties required by the hash-to-field construction.
+        const L: usize = 48;
+        let mut uniform_bytes = Zeroizing::new([0u8; L]);
+        // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
+        unsafe {
+            blst_expand_message_xmd(
+                uniform_bytes.as_mut_ptr(),
+                L,
+                message.as_ptr(),
+                message.len(),
+                domain_separator.as_ptr(),
+                domain_separator.len(),
+            );
+        }
+
+        // Transform expanded bytes with modular reduction
+        let mut fr = blst_fr::default();
+        // SAFETY: uniform_bytes is a valid 48-byte buffer.
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
+            blst_fr_from_scalar(&mut fr, &scalar);
+        }
+
+        Self(fr)
+    }
+}
+
 impl Random for Scalar {
     /// Returns a random **non-zero** scalar.
     fn random(mut rng: impl CryptoRng) -> Self {
@@ -940,68 +946,6 @@ impl FieldNTT for Scalar {
         // SAFETY: blst_fr_rshift supports in-place (ret==a). Both pointers valid.
         unsafe { blst_fr_rshift(&mut ret, &self.0, 1) };
         Self(ret)
-    }
-}
-
-/// A share of a threshold signing key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Share {
-    /// The share's index in the polynomial.
-    pub index: Participant,
-    /// The scalar corresponding to the share's secret.
-    pub private: Private,
-}
-
-impl Share {
-    /// Creates a new `Share` with the given index and private key.
-    pub const fn new(index: Participant, private: Private) -> Self {
-        Self { index, private }
-    }
-
-    /// Returns the public key corresponding to the share.
-    ///
-    /// This can be verified against the public polynomial.
-    pub fn public<V: Variant>(&self) -> V::Public {
-        self.private
-            .expose(|private| V::Public::generator() * private)
-    }
-}
-
-impl Write for Share {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
-        self.private.expose(|private| private.write(buf));
-    }
-}
-
-impl Read for Share {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let index = Participant::read(buf)?;
-        let private = Private::read(buf)?;
-        Ok(Self { index, private })
-    }
-}
-
-impl EncodeSize for Share {
-    fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.private.expose(|private| private.encode_size())
-    }
-}
-
-impl Display for Share {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Share {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let index = u.arbitrary()?;
-        let private = u.arbitrary::<Private>()?;
-        Ok(Self { index, private })
     }
 }
 
@@ -1065,29 +1009,6 @@ impl G1 {
         }
 
         out
-    }
-
-    /// Checks that `sum_i e(p1[i], p2[i]) + e(t1, t2) == 0`.
-    ///
-    /// `p1` and `p2` MUST have the same length.
-    #[must_use]
-    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G2], t1: &Self, t2: &G2) -> bool {
-        assert_eq!(p1.len(), p2.len());
-        // We deal with group elements directly, so there's no need for hashing,
-        // or a domain separation tag, hence `false`, `&[]`.
-        let mut pairing = Pairing::new(false, &[]);
-        let p1_affine = Self::batch_to_affine(p1);
-        let p2_affine = G2::batch_to_affine(p2);
-        for (p1, p2) in iter::once((&t1.as_blst_p1_affine(), &t2.as_blst_p2_affine()))
-            .chain(p1_affine.iter().zip(p2_affine.iter()))
-        {
-            pairing.raw_aggregate(p2, p1);
-        }
-
-        // These final two steps check that the sum of the pairings is equal to 0.
-        pairing.commit();
-        // Passing `None` here indicates that our target is 0.
-        pairing.finalverify(None)
     }
 
     fn msm_inner<'a>(
@@ -1456,6 +1377,82 @@ impl HashToGroup for G1 {
     }
 }
 
+// G1 is the group with the cheaper scalar multiplication, so it implements `PairingGroup` and
+// the provided `scaled_multi_pairing` multiplies G1 elements.
+impl PairingGroup for G1 {
+    type Twin = G2;
+    type Target = GT;
+
+    fn pairing(&self, other: &G2) -> GT {
+        if *self == Self::zero() || *other == G2::zero() {
+            return GT::zero();
+        }
+        let product = blst_fp12::miller_loop(&other.as_blst_p2_affine(), &self.as_blst_p1_affine());
+        GT(product.final_exp())
+    }
+
+    fn multi_pairing(lefts: &[Self], rights: &[G2], strategy: &impl Strategy) -> GT {
+        assert_eq!(
+            lefts.len(),
+            rights.len(),
+            "lefts and rights must have the same length"
+        );
+        // A pair with an identity contributes nothing, and blst's Miller loop expects
+        // finite points.
+        let (lefts, rights): (Vec<Self>, Vec<G2>) = lefts
+            .iter()
+            .zip(rights)
+            .filter(|(p, q)| **p != Self::zero() && **q != G2::zero())
+            .map(|(p, q)| (*p, *q))
+            .unzip();
+        let lefts = Self::batch_to_affine(&lefts);
+        let rights = G2::batch_to_affine(&rights);
+
+        // Each chunk runs one multi-Miller loop, which shares the accumulator's squarings across
+        // its pairs. The chunk results are multiplied together and share one final
+        // exponentiation.
+        let product = strategy.fold(
+            lefts
+                .chunks(MILLER_LOOP_CHUNK)
+                .zip(rights.chunks(MILLER_LOOP_CHUNK)),
+            blst_fp12::default,
+            |mut acc, (ps, qs)| {
+                acc *= miller_loop_n(qs, ps);
+                acc
+            },
+            |mut a, b| {
+                a *= b;
+                a
+            },
+        );
+        GT(product.final_exp())
+    }
+}
+
+/// The number of pairs in one call to blst's multi-Miller loop, matching the batch size of blst's
+/// own pairing aggregator.
+const MILLER_LOOP_CHUNK: usize = 8;
+
+/// Returns the product of the Miller loops of the pairs `(ps[i], qs[i])`, computed with one shared
+/// accumulator.
+///
+/// Every point must be finite: blst's multi-Miller loop does not handle the identity, even for a
+/// single pair. `G1::multi_pairing` drops pairs with an identity beforehand, since they pair to the
+/// identity of the target group.
+fn miller_loop_n(qs: &[blst_p2_affine], ps: &[blst_p1_affine]) -> blst_fp12 {
+    assert_eq!(qs.len(), ps.len(), "qs and ps must have the same length");
+    assert!(!qs.is_empty(), "the Miller loop needs at least one pair");
+    // A null second pointer tells blst that the first points to all `n` elements contiguously.
+    let q_ptrs = [qs.as_ptr(), ptr::null()];
+    let p_ptrs = [ps.as_ptr(), ptr::null()];
+    let mut out = blst_fp12::default();
+    // SAFETY: `q_ptrs[0]` and `p_ptrs[0]` point to `qs.len()` contiguous, initialized affine
+    // points, and the null second entries select blst's contiguous-array mode. `out` is a valid,
+    // exclusively borrowed output.
+    unsafe { blst_miller_loop_n(&mut out, q_ptrs.as_ptr(), p_ptrs.as_ptr(), qs.len()) };
+    out
+}
+
 impl G2 {
     /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
@@ -1510,14 +1507,6 @@ impl G2 {
         }
 
         out
-    }
-
-    /// Checks that `sum_i e(p1[i], p2[i]) + e(t1, t2) == 0`.
-    ///
-    /// `p1` and `p2` MUST have the same length.
-    #[must_use]
-    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G1], t1: &Self, t2: &G1) -> bool {
-        G1::multi_pairing_check(p2, p1, t2, t1)
     }
 
     fn msm_inner<'a>(
@@ -1889,17 +1878,21 @@ impl HashToGroup for G2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::group::Scalar;
+    use crate::{
+        Secret,
+        bls::{key::Private, sharing::Share},
+        bls12381::primitives::group::Scalar,
+    };
     use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
-    use commonware_math::algebra::{Random, test_suites};
+    use commonware_math::algebra::{Random, Twin, test_suites};
     use commonware_parallel::{
         Rayon, Sequential,
         mocks::{Explorer, explore, pooled},
         rayon::ThreadPoolBuilder,
     };
-    use commonware_utils::{NZUsize, sync::Mutex, test_rng};
+    use commonware_utils::{NZUsize, Participant, sync::Mutex, test_rng};
     use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
         collections::{BTreeSet, HashMap},
@@ -1915,6 +1908,11 @@ mod tests {
     #[test]
     fn test_scalar_as_field_ntt() {
         minifuzz::test(test_suites::fuzz_field_ntt::<Scalar>);
+    }
+
+    #[test]
+    fn test_scalar_hash_to_field() {
+        minifuzz::test(test_suites::fuzz_hash_to_field::<Scalar>);
     }
 
     #[test]
@@ -1935,6 +1933,61 @@ mod tests {
     #[test]
     fn test_hash_to_g2() {
         minifuzz::test(test_suites::fuzz_hash_to_group::<G2>);
+    }
+
+    #[test]
+    fn test_g1_as_pairing_group() {
+        minifuzz::test(test_suites::fuzz_pairing_group::<G1>);
+    }
+
+    #[test]
+    fn test_twin_g1_as_pairing_group() {
+        minifuzz::test(test_suites::fuzz_pairing_group::<Twin<G1>>);
+    }
+
+    #[test]
+    fn test_gt_as_additive() {
+        minifuzz::test(test_suites::fuzz_additive::<GT>);
+    }
+
+    // `fuzz_additive` does not check `double`, which `GT` overrides with a cyclotomic square.
+    #[test]
+    fn test_gt_double_matches_add() {
+        minifuzz::test(|u| {
+            let x: GT = u.arbitrary()?;
+            let mut doubled = x;
+            doubled.double();
+            assert_eq!(doubled, x + &x);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_multi_pairing_spans_chunks_and_skips_identities() {
+        let mut rng = test_rng();
+        // More pairs than one Miller-loop chunk, with identities on either side.
+        let n = 2 * MILLER_LOOP_CHUNK + 3;
+        let mut lefts: Vec<G1> = (0..n)
+            .map(|_| G1::generator() * &Scalar::random(&mut rng))
+            .collect();
+        let mut rights: Vec<G2> = (0..n)
+            .map(|_| G2::generator() * &Scalar::random(&mut rng))
+            .collect();
+        lefts[3] = G1::zero();
+        rights[MILLER_LOOP_CHUNK] = G2::zero();
+
+        let expected = lefts
+            .iter()
+            .zip(&rights)
+            .fold(GT::zero(), |acc, (p, q)| acc + &p.pairing(q));
+        assert!(explore(|strategy| G1::multi_pairing(
+            &lefts, &rights, strategy
+        ) == expected));
+        let twins: Vec<Twin<G1>> = rights.iter().copied().map(Twin::new).collect();
+        assert_eq!(
+            Twin::<G1>::multi_pairing(&twins, &lefts, &Sequential),
+            expected
+        );
     }
 
     #[test]
@@ -1976,7 +2029,7 @@ mod tests {
     #[test]
     fn test_private_decode_rejects_zero_scalar() {
         let encoded = Scalar::zero().encode();
-        assert!(Private::decode(encoded).is_err());
+        assert!(Private::<Scalar>::decode(encoded).is_err());
     }
 
     #[test]
@@ -2325,13 +2378,13 @@ mod tests {
         // Test 1: Basic functionality
         let msg = b"test message";
         let dst = b"TEST_DST";
-        let scalar1 = Scalar::map(dst, msg);
-        let scalar2 = Scalar::map(dst, msg);
+        let scalar1 = Scalar::hash_to_field(dst, msg);
+        let scalar2 = Scalar::hash_to_field(dst, msg);
         assert_eq!(scalar1, scalar2, "Same input should produce same output");
 
         // Test 2: Different messages produce different scalars
         let msg2 = b"different message";
-        let scalar3 = Scalar::map(dst, msg2);
+        let scalar3 = Scalar::hash_to_field(dst, msg2);
         assert_ne!(
             scalar1, scalar3,
             "Different messages should produce different scalars"
@@ -2339,7 +2392,7 @@ mod tests {
 
         // Test 3: Different DSTs produce different scalars
         let dst2 = b"DIFFERENT_DST";
-        let scalar4 = Scalar::map(dst2, msg);
+        let scalar4 = Scalar::hash_to_field(dst2, msg);
         assert_ne!(
             scalar1, scalar4,
             "Different DSTs should produce different scalars"
@@ -2347,7 +2400,7 @@ mod tests {
 
         // Test 4: Empty message
         let empty_msg = b"";
-        let scalar_empty = Scalar::map(dst, empty_msg);
+        let scalar_empty = Scalar::hash_to_field(dst, empty_msg);
         assert_ne!(
             scalar_empty,
             Scalar::zero(),
@@ -2356,7 +2409,7 @@ mod tests {
 
         // Test 5: Large message
         let large_msg = vec![0x42u8; 1000];
-        let scalar_large = Scalar::map(dst, &large_msg);
+        let scalar_large = Scalar::hash_to_field(dst, &large_msg);
         assert_ne!(
             scalar_large,
             Scalar::zero(),
@@ -2391,7 +2444,7 @@ mod tests {
     #[test]
     fn test_share_redacted() {
         let mut rng = test_rng();
-        let share = Share::new(Participant::new(1), Private::random(&mut rng));
+        let share = Share::<Scalar>::new(Participant::new(1), Private::random(&mut rng));
         let debug = format!("{:?}", share);
         let display = format!("{}", share);
         assert!(debug.contains("REDACTED"));
@@ -2682,9 +2735,9 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<G1>,
             CodecConformance<G2>,
-            CodecConformance<Private>,
+            CodecConformance<Private<Scalar>>,
             CodecConformance<Scalar>,
-            CodecConformance<Share>
+            CodecConformance<Share<Scalar>>
         }
     }
 

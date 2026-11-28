@@ -1,4 +1,4 @@
-//! BLS12-381 certificate scheme implementations.
+//! BLS certificate scheme implementations.
 //!
 //! This module provides two signing scheme implementations:
 //!
@@ -9,7 +9,7 @@ pub mod multisig;
 pub mod threshold;
 
 use crate::{
-    bls12381::primitives::{sharing::Sharing, variant::Variant},
+    bls::{sharing::Sharing, variant::Variant},
     certificate::{AssemblyError, Signers},
 };
 use commonware_utils::Participant;

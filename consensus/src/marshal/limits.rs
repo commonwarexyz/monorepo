@@ -53,7 +53,7 @@ mod tests {
             standard::Standard,
         },
         simplex::{
-            scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+            scheme::{Scheme, bls_multisig, bls_threshold, ed25519, secp256r1},
             types::{Finalization, Notarization, Proposal, Subject},
         },
         types::{Epoch, Height, Round, View, coding::Commitment},
@@ -171,19 +171,19 @@ mod tests {
         // Threshold certificates have one fixed size for any committee and signer count.
         let mut rng = test_rng();
         check_encoding::<StandardVariant, _>(
-            bls12381_threshold::standard::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
+            bls_threshold::standard::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
             0,
         );
         check_encoding::<StandardVariant, _>(
-            bls12381_threshold::standard::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
+            bls_threshold::standard::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
             1000,
         );
         check_encoding::<StandardVariant, _>(
-            bls12381_threshold::vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
+            bls_threshold::vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
             0,
         );
         check_encoding::<StandardVariant, _>(
-            bls12381_threshold::vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
+            bls_threshold::vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
             1000,
         );
     }
@@ -201,11 +201,11 @@ mod tests {
         }
         check_encoding::<StandardVariant, _>(secp256r1::fixture(&mut rng, NAMESPACE, 4), 0);
         check_encoding::<StandardVariant, _>(
-            bls12381_multisig::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
+            bls_multisig::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
             0,
         );
         check_encoding::<StandardVariant, _>(
-            bls12381_multisig::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
+            bls_multisig::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
             1000,
         );
     }
@@ -215,7 +215,7 @@ mod tests {
         // Coding commitments are wider than digests, and a coded block adds its configuration.
         let mut rng = test_rng();
         check_encoding::<CodingVariant, _>(
-            bls12381_threshold::vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
+            bls_threshold::vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
             1000,
         );
         for participants in [4, 128] {
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn coding_covers_shards() {
-        type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
+        type S = bls_threshold::standard::Scheme<PublicKey, MinSig>;
 
         // With a small certificate and block, the widest shard exceeds the backfill bound, so the
         // buffer bound sets the payload bound.

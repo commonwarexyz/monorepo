@@ -150,8 +150,14 @@ impl arbitrary::Arbitrary<'_> for F {
 /// This is constructed as a subgroup of the units in `F_q`.
 ///
 /// `q = 2p + 1`, so the group of units has a subgroup of order `p`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct G(u64);
+
+impl core::fmt::Display for G {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl FixedSize for G {
     const SIZE: usize = 8;
@@ -383,30 +389,6 @@ impl Additive for GT {
     }
 }
 
-impl<'a> Mul<&'a F> for GT {
-    type Output = Self;
-
-    fn mul(self, rhs: &'a F) -> Self::Output {
-        Self(self.0 * rhs)
-    }
-}
-
-impl<'a> MulAssign<&'a F> for GT {
-    fn mul_assign(&mut self, rhs: &'a F) {
-        self.0 *= rhs;
-    }
-}
-
-impl Space<F> for GT {}
-
-impl CryptoGroup for GT {
-    type Scalar = F;
-
-    fn generator() -> Self {
-        Self(G::generator())
-    }
-}
-
 #[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for GT {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -491,8 +473,13 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 mod test {
     use super::*;
-    use commonware_codec::Encode;
+    use crate::algebra::Twin;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::test_rng;
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
 
     #[test]
     fn test_field_and_group_guards() {
@@ -503,6 +490,51 @@ mod test {
         assert!(F::read(&mut P.encode()).is_err());
         assert!(G::read(&mut Q.encode()).is_err());
         assert!(G::read(&mut 0u64.encode()).is_err());
+    }
+
+    fn hash_of<T: Hash>(value: &T) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    // `G` has an encoding, a hash, and a `Display` impl, and `G2` does not, so
+    // these checks wrap `G` as `Twin<Twin<G>>`.
+    #[test]
+    fn test_twin_encodes_hashes_and_formats_like_inner() {
+        let x = G::generator() * &F::from(5u8);
+        let twin = Twin::<Twin<G>>::new(x);
+        let copy = twin;
+        assert_eq!(copy, twin);
+
+        assert_eq!(Twin::<Twin<G>>::SIZE, G::SIZE);
+        assert_eq!(twin.encode(), x.encode());
+        assert_eq!(Twin::<Twin<G>>::decode(x.encode()).unwrap(), twin);
+        assert!(Twin::<Twin<G>>::decode(Q.encode()).is_err());
+        assert!(Twin::<Twin<G>>::decode(0u64.encode()).is_err());
+
+        assert_eq!(hash_of(&twin), hash_of(&x));
+
+        assert_eq!(format!("{twin:?}"), format!("{x:?}"));
+        assert_eq!(format!("{twin}"), format!("{x}"));
+    }
+
+    #[test]
+    #[should_panic(expected = "elements and scalars must have the same length")]
+    fn test_mul_each_panics_on_length_mismatch() {
+        let mut elements = [G::generator(); 2];
+        G::mul_each(&mut elements, &[F::one()], &commonware_parallel::Sequential);
+    }
+
+    #[test]
+    #[should_panic(expected = "scalars must not be longer than lefts")]
+    fn test_scaled_multi_pairing_panics_on_extra_scalars() {
+        G::scaled_multi_pairing(
+            &[G::generator()],
+            &[G2::generator()],
+            &[F::one(); 2],
+            &commonware_parallel::Sequential,
+        );
     }
 
     #[cfg(feature = "arbitrary")]
@@ -517,8 +549,8 @@ mod test {
     }
 }
 
-// `Twin`'s `msm` and batch pairing methods view a slice of twins as a slice of
-// `G2` through an unsafe cast, which Miri checks here.
+// `Twin`'s `msm`, `mul_each`, and batch pairing methods view a slice of twins as a
+// slice of `G2` through an unsafe cast, which Miri checks here.
 #[cfg(test)]
 #[commonware_macros::test_group("miri")]
 mod twin {
@@ -547,6 +579,37 @@ mod twin {
         assert_eq!(
             Twin::<G>::msm(&lefts, &scalars, &Sequential),
             msm_naive(&lefts, &scalars)
+        );
+
+        // `Twin`'s `scaled_multi_pairing` multiplies `G`'s elements, so only a
+        // direct `mul_each` call runs the mutable cast.
+        let mut products = lefts.clone();
+        Twin::<G>::mul_each(&mut products, &scalars, &Sequential);
+        let expected_products: Vec<Twin<G>> =
+            lefts.iter().zip(&scalars).map(|(x, s)| *x * s).collect();
+        assert_eq!(products, expected_products);
+
+        assert_eq!(
+            Twin::<G>::scaled_multi_pairing(&lefts, &rights, &scalars, &Sequential),
+            Twin::<G>::multi_pairing(&products, &rights, &Sequential)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "elements and scalars must have the same length")]
+    fn test_twin_mul_each_panics_on_length_mismatch() {
+        let mut elements = [Twin::<G>::generator(); 2];
+        Twin::<G>::mul_each(&mut elements, &[F::one()], &Sequential);
+    }
+
+    #[test]
+    #[should_panic(expected = "scalars must not be longer than lefts")]
+    fn test_twin_scaled_multi_pairing_panics_on_extra_scalars() {
+        Twin::<G>::scaled_multi_pairing(
+            &[Twin::generator()],
+            &[G::generator()],
+            &[F::one(); 2],
+            &Sequential,
         );
     }
 }

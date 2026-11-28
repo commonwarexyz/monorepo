@@ -46,15 +46,15 @@ hash = "e203b657e753c8c8d10e5ad0d8c1893a88d9ea4fbda92d960667dc6007215cfe"
 n_cases = 512
 hash = "b892972a5b3cad361beebcc4f90a81dff4833c96411d02f0c5151e29689f1baf"
 
-["commonware_consensus::simplex::scheme::bls12381_threshold::vrf::tests::conformance::CodecConformance<Certificate<MinSig>>"]
+["commonware_consensus::simplex::scheme::bls_threshold::vrf::tests::conformance::CodecConformance<Certificate<MinSig>>"]
 n_cases = 65536
 hash = "16b2dec188a1bd12146d62909bffdbb560f5a54e81de57aec8ec4aef2e8a5e88"
 
-["commonware_consensus::simplex::scheme::bls12381_threshold::vrf::tests::conformance::CodecConformance<Seed<MinSig>>"]
+["commonware_consensus::simplex::scheme::bls_threshold::vrf::tests::conformance::CodecConformance<Seed<MinSig>>"]
 n_cases = 65536
 hash = "a9fce1350322f848f62aaa67572eb6d510d88ebfa272b6b13371084aae1c3e51"
 
-["commonware_consensus::simplex::scheme::bls12381_threshold::vrf::tests::conformance::CodecConformance<Signature<MinSig>>"]
+["commonware_consensus::simplex::scheme::bls_threshold::vrf::tests::conformance::CodecConformance<Signature<MinSig>>"]
 n_cases = 65536
 hash = "16b2dec188a1bd12146d62909bffdbb560f5a54e81de57aec8ec4aef2e8a5e88"
 

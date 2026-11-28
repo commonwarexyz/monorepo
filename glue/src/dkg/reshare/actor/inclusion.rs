@@ -20,11 +20,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{
             DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
         },
-        primitives::{group::Share, variant::Variant as BlsVariant},
+        sharing::Share,
+        variant::Variant as BlsVariant,
     },
 };
 use commonware_macros::{select, select_loop};
@@ -241,7 +242,7 @@ where
 #[derive(Clone)]
 struct Artifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     info: EpochInfo<V, C::PublicKey, D>,
-    share: Option<Share>,
+    share: Option<Share<V::Scalar>>,
 }
 
 /// The output of successful dealer-log verification.
@@ -250,7 +251,7 @@ struct Artifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
 /// it only observed the public ceremony.
 struct Ceremony<V: BlsVariant, C: Signer> {
     output: Output<V, C::PublicKey>,
-    share: Option<Share>,
+    share: Option<Share<V::Scalar>>,
 }
 
 /// A verification result and the dealer logs it was computed from (`ceremony`
@@ -601,7 +602,7 @@ where
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     T: Strategy,
     C::PublicKey: BatchVerifier,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
@@ -1456,13 +1457,14 @@ mod tests {
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
         Signer,
-        bls12381::{
+        bls::{
             dkg::feldman_desmedt::{
                 Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Player as CryptoPlayer,
                 Reveal, SignedDealerLog, deal,
             },
-            primitives::sharing::Mode as SharingMode,
+            sharing::Mode as SharingMode,
         },
+        bls12381::primitives::group::Scalar,
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
         transcript::Summary,
@@ -3010,9 +3012,9 @@ mod tests {
     struct FinalizationFixture {
         info: Info<TestBlsVariant, PublicKey>,
         current: EpochInfo<TestBlsVariant, PublicKey>,
-        share: Share,
+        share: Share<Scalar>,
         logs: BTreeMap<PublicKey, DealerLog<TestBlsVariant, PublicKey>>,
-        dealings: BTreeMap<PublicKey, (DealerPubMsg<TestBlsVariant>, DealerPrivMsg)>,
+        dealings: BTreeMap<PublicKey, (DealerPubMsg<TestBlsVariant>, DealerPrivMsg<Scalar>)>,
     }
 
     fn finalization_fixture(seed: u64) -> FinalizationFixture {

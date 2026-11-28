@@ -13,7 +13,7 @@
 //!
 //! # Security Rationale
 //!
-//! With [`super::bls12381_threshold`], any `t` valid partial signatures
+//! With [`super::bls_threshold`], any `t` valid partial signatures
 //! can be used to forge a partial signature for any participant. If per-validator activities
 //! were exposed for such schemes, adversaries could fabricate evidence of either liveness or of committing a fault.
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
@@ -142,7 +142,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
+            scheme::{bls_threshold::vrf as bls_threshold_vrf, ed25519},
             types::{Notarization, Notarize, Proposal, Subject},
         },
         types::{Epoch, Round, View},
@@ -290,10 +290,10 @@ mod tests {
         let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
+        } = bls_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
-            !bls12381_threshold_vrf::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
+            !bls_threshold_vrf::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
@@ -340,10 +340,10 @@ mod tests {
         let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
+        } = bls_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
-            !bls12381_threshold_vrf::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
+            !bls_threshold_vrf::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 

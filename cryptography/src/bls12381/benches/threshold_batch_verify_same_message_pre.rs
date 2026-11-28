@@ -1,10 +1,8 @@
 use commonware_bench::Inputs;
 use commonware_cryptography::{
     Signer as _,
-    bls12381::{
-        dkg::feldman_desmedt::deal,
-        primitives::{self, sharing::Mode, variant::MinSig},
-    },
+    bls::{dkg::feldman_desmedt::deal, ops::threshold, sharing::Mode},
+    bls12381::primitives::variant::MinSig,
     ed25519::PrivateKey,
 };
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
@@ -58,13 +56,9 @@ fn bench_threshold_batch_verify_same_message_pre(c: &mut Criterion) {
                                         .enumerate()
                                         .map(|(idx, s)| {
                                             if idx < invalid as usize {
-                                                primitives::ops::threshold::sign_message::<MinSig>(
-                                                    s, b"wrong", msg,
-                                                )
+                                                threshold::sign_message::<MinSig>(s, b"wrong", msg)
                                             } else {
-                                                primitives::ops::threshold::sign_message::<MinSig>(
-                                                    s, namespace, msg,
-                                                )
+                                                threshold::sign_message::<MinSig>(s, namespace, msg)
                                             }
                                         })
                                         .collect::<Vec<_>>();
@@ -76,35 +70,31 @@ fn bench_threshold_batch_verify_same_message_pre(c: &mut Criterion) {
                                     }
 
                                     let result = if concurrency > 1 {
-                                        black_box(
-                                            primitives::ops::threshold::batch_verify_same_message::<
-                                                _,
-                                                MinSig,
-                                                _,
-                                            >(
-                                                &mut rng,
-                                                &polynomial,
-                                                namespace,
-                                                msg,
-                                                non_empty![@signatures.iter()],
-                                                &strategy,
-                                            ),
-                                        )
+                                        black_box(threshold::batch_verify_same_message::<
+                                            _,
+                                            MinSig,
+                                            _,
+                                        >(
+                                            &mut rng,
+                                            &polynomial,
+                                            namespace,
+                                            msg,
+                                            non_empty![@signatures.iter()],
+                                            &strategy,
+                                        ))
                                     } else {
-                                        black_box(
-                                            primitives::ops::threshold::batch_verify_same_message::<
-                                                _,
-                                                MinSig,
-                                                _,
-                                            >(
-                                                &mut rng,
-                                                &polynomial,
-                                                namespace,
-                                                msg,
-                                                non_empty![@signatures.iter()],
-                                                &Sequential,
-                                            ),
-                                        )
+                                        black_box(threshold::batch_verify_same_message::<
+                                            _,
+                                            MinSig,
+                                            _,
+                                        >(
+                                            &mut rng,
+                                            &polynomial,
+                                            namespace,
+                                            msg,
+                                            non_empty![@signatures.iter()],
+                                            &Sequential,
+                                        ))
                                     };
                                     if invalid == 0 {
                                         assert!(result.is_ok());

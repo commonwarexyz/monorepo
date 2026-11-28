@@ -38,9 +38,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
-    bls12381::{
-        dkg::feldman_desmedt::Reveal,
-        primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
+    bls::{
+        dkg::feldman_desmedt::Reveal, sharing::Mode as SharingMode, variant::Variant as BlsVariant,
     },
 };
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
@@ -194,7 +193,7 @@ where
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     T: Strategy,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
@@ -236,7 +235,7 @@ where
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     T: Strategy,
     C::PublicKey: BatchVerifier,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,

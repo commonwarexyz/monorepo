@@ -1108,7 +1108,7 @@ mod tests {
     use crate::{
         Heightable,
         marshal::{mocks::harness, standard::Standard},
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
+        simplex::{scheme::bls_threshold::vrf as bls_threshold_vrf, types::Proposal},
         types::{Epoch, View},
     };
     use commonware_cryptography::{
@@ -1140,7 +1140,7 @@ mod tests {
 
     fn finalization(height: u64) -> Finalization<harness::S, harness::D> {
         let mut rng = TestRng::new(height);
-        let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<harness::V, _>(
+        let Fixture { schemes, .. } = bls_threshold_vrf::fixture::<harness::V, _>(
             &mut rng,
             harness::NAMESPACE,
             harness::NUM_VALIDATORS,

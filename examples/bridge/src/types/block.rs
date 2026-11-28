@@ -66,13 +66,8 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::{
-            certificate::threshold::Certificate,
-            primitives::{
-                group,
-                variant::{MinSig, Variant},
-            },
-        },
+        bls::{certificate::threshold::Certificate, variant::Variant},
+        bls12381::primitives::{group, variant::MinSig},
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{CryptoGroup, Random as _};
