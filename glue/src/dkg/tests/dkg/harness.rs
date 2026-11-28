@@ -38,13 +38,19 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Handle, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
-    buffer::paged::CacheRef, deterministic, reschedule, telemetry::metrics::count_running_tasks,
+    Clock, Handle, Metrics, Quota, Runner as _, Spawner, Storage, Supervisor as _,
+    buffer::paged::CacheRef,
+    deterministic,
+    mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
+    reschedule,
+    telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
     NZDuration, NZU16, NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set,
     probability, sequence::Unit, sync::Mutex, test_rng,
 };
+use futures::FutureExt as _;
+use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, HashSet},
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -507,6 +513,60 @@ pub(super) fn run_activation_failure_completes_empty() {
     });
 }
 
+/// Stops bootstrap while its Simplex voter is syncing the journal.
+pub(super) fn run_graceful_stop_with_held_sync() {
+    const PREFIX: &str = "dkg-held-sync";
+    let runner = deterministic::Runner::timed(Duration::from_secs(30));
+    runner.start(|context| async move {
+        let engine = DkgEngine::new(1);
+        let oracle = network(&context, &engine);
+        let channels = register(&oracle, &engine).await;
+        // Only Simplex's voter journal is held.
+        let syncs = PendingSyncs::for_partition(format!("{PREFIX}-simplex"));
+        syncs.unblock();
+        let (mut handle, _completion) = boot(
+            &DelayedSyncContext {
+                inner: context.child("held"),
+                pending: syncs.clone(),
+            },
+            &oracle,
+            &engine,
+            PREFIX,
+            oracle.manager(),
+            channels,
+        );
+
+        // Hold the next durability operation once the ceremony is underway.
+        context.sleep(Duration::from_millis(500)).await;
+        syncs.arm();
+        let held = next_pending_sync(&syncs);
+        held.blocked
+            .await
+            .expect("a child should reach a durability operation");
+
+        let mut stopping = Box::pin(context.child("stop").stop(0, Some(Duration::from_secs(5))));
+        assert!(stopping.as_mut().now_or_never().is_none());
+
+        // The buffer exits, while Simplex and the engine wait for the held sync.
+        context.sleep(Duration::from_secs(1)).await;
+        assert_eq!(count_running_tasks(&context, "held_dkg_buffer"), 0);
+        assert!(count_running_tasks(&context, "held_dkg_simplex") > 0);
+        assert!(
+            (&mut handle).now_or_never().is_none(),
+            "engine should wait for the held sync"
+        );
+        assert!(stopping.as_mut().now_or_never().is_none());
+
+        held.release
+            .send(Ok(()))
+            .expect("held sync should still be pending");
+        stopping.await.expect("graceful stop should complete");
+        handle.await.expect("engine should stop cleanly");
+        context.sleep(Duration::from_millis(1)).await;
+        assert_eq!(count_running_tasks(&context, "held"), 0);
+    });
+}
+
 /// Returns the processed height reported by the `dkg` engine's marshal.
 fn processed_height(context: &deterministic::Context) -> u64 {
     context
@@ -736,8 +796,8 @@ async fn register(
 
 /// Starts the first participant's bootstrap engine on `channels`, with its
 /// storage under `prefix` and its secret store.
-fn boot<M>(
-    context: &deterministic::Context,
+fn boot<E, M>(
+    context: &E,
     oracle: &simulated::Oracle<ed25519::PublicKey, deterministic::Context>,
     engine: &DkgEngine,
     prefix: &str,
@@ -745,6 +805,7 @@ fn boot<M>(
     mut channels: Vec<ChannelPair<ed25519::PublicKey>>,
 ) -> (Handle<()>, oneshot::Receiver<bootstrap::Completion<MinPk>>)
 where
+    E: CryptoRng + Spawner + Metrics + Clock + Storage,
     M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit>,
 {
     let public_key = engine.participant(0);

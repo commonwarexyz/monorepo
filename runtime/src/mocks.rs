@@ -435,6 +435,7 @@ pub struct DeferredSync {
 #[derive(Clone, Default)]
 pub struct PendingSyncs {
     state: Arc<Mutex<State>>,
+    partition: Option<Arc<str>>,
 }
 
 /// State shared by all clones of a [PendingSyncs].
@@ -1096,7 +1097,7 @@ impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
         Ok((
             DelayedSyncBlob {
                 inner: Arc::new(inner),
-                pending: self.pending.clone(),
+                pending: self.pending.for_blob(partition),
             },
             len,
             version,
@@ -1280,6 +1281,27 @@ struct SyncGateState {
 }
 
 impl PendingSyncs {
+    /// Delay syncs only for blobs opened in this partition by a [DelayedSyncContext].
+    pub fn for_partition(partition: impl Into<Arc<str>>) -> Self {
+        Self {
+            partition: Some(partition.into()),
+            ..Self::default()
+        }
+    }
+
+    fn for_blob(&self, partition: &str) -> Self {
+        if self
+            .partition
+            .as_deref()
+            .is_some_and(|selected| selected != partition)
+        {
+            let pending = Self::default();
+            pending.unblock();
+            return pending;
+        }
+        self.clone()
+    }
+
     /// Locks the deferred sync queue.
     pub fn lock(&self) -> commonware_utils::sync::MappedMutexGuard<'_, Vec<DeferredSync>> {
         commonware_utils::sync::MutexGuard::map(self.state.lock(), |state| &mut state.syncs)
