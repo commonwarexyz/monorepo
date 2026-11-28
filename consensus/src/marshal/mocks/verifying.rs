@@ -21,13 +21,16 @@ use std::{future::pending, marker::PhantomData, sync::Arc};
 /// A mock application that implements `Application` for testing.
 ///
 /// This mock:
-/// - Returns the configured block (if any) from `propose()`
+/// - Returns the configured block (if any) from `propose()`, or builds one on the parent
 /// - Returns a configurable result from `verify()`
 /// - Rejects blocks matching an optional predicate in `verify()`
 #[derive(Clone)]
-pub struct MockVerifyingApp<B, S> {
-    /// The block returned by `propose`. If `None`, `propose` returns `None`.
+pub struct MockVerifyingApp<B: CertifiableBlock, S> {
+    /// The block `propose` returns when no build function is set. If `None`, `propose` then
+    /// returns `None`.
     pub propose_result: Option<B>,
+    /// Builds the block `propose` returns from the request's context and the parent block.
+    build: Option<fn(B::Context, &B) -> B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
     /// The decision `prepare` attaches to a built block. `Wait` declines without building.
@@ -39,7 +42,7 @@ pub struct MockVerifyingApp<B, S> {
     _phantom: PhantomData<S>,
 }
 
-impl<B, S> MockVerifyingApp<B, S> {
+impl<B: CertifiableBlock, S> MockVerifyingApp<B, S> {
     /// Create a new mock verifying application.
     pub fn new() -> Self {
         Self::default()
@@ -56,6 +59,12 @@ impl<B, S> MockVerifyingApp<B, S> {
     /// Configure the block returned by `propose`.
     pub fn with_propose_result(mut self, block: B) -> Self {
         self.propose_result = Some(block);
+        self
+    }
+
+    /// Configure `propose` to build its block from the request's context and the parent block.
+    pub fn with_build(mut self, build: fn(B::Context, &B) -> B) -> Self {
+        self.build = Some(build);
         self
     }
 
@@ -86,10 +95,11 @@ struct ProposalGate {
     dropped: oneshot::Sender<()>,
 }
 
-impl<B, S> Default for MockVerifyingApp<B, S> {
+impl<B: CertifiableBlock, S> Default for MockVerifyingApp<B, S> {
     fn default() -> Self {
         Self {
             propose_result: None,
+            build: None,
             verify_result: true,
             handoff: Handoff::Wait,
             proposal_gate: Arc::default(),
@@ -127,8 +137,8 @@ where
 
     async fn propose(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        (_, context): (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         let gate = self.proposal_gate.lock().take();
@@ -138,7 +148,11 @@ where
             gate.started.send_lossy(());
             pending::<()>().await;
         }
-        match self.propose_result.clone() {
+        let block = match (self.build, ancestry.peek()) {
+            (Some(build), Some(parent)) => Some(build(context, parent.inner())),
+            _ => self.propose_result.clone(),
+        };
+        match block {
             Some(block) => Some(Digested::compute(block, &Sequential).await),
             None => None,
         }
